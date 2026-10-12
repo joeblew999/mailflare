@@ -1,28 +1,33 @@
 #!/usr/bin/env node
-// Exercise the licensed (Pro/Team) capability gates against a deployed instance.
+// Exercise the licensed (Pro/Team) capability gates on a deployed instance, and
+// show you where each one lives in the app.
 //
-// Mints a temporary admin API key directly in D1, drives the public /api/v1
-// surface, proves the gates actually block, exercises branding through the public
-// icon endpoint, round-trips a shared-mailbox access grant, and (optionally) sends
-// a forwarding test. Everything it creates is cleaned up and the plan restored.
+// WHAT IT DOES
+//   Mints a temporary admin API key, drives /api/v1, proves each gate flips with
+//   the plan, creates a few throwaway fixtures (shared mailbox, branding icon and
+//   forwarding), then removes them. Nothing is left behind unless you ask.
 //
-//   node scripts/features-smoke.mjs
-//   node scripts/features-smoke.mjs --url https://<worker>.<subdomain>.workers.dev
-//   node scripts/features-smoke.mjs --forward-to you@gmail.com
-//   node scripts/features-smoke.mjs --setup         # create the fixtures and keep them
-//   node scripts/features-smoke.mjs --cleanup       # remove fixtures from a prior --setup
-//   node scripts/features-smoke.mjs --status        # report which fixtures exist right now
-//   node scripts/features-smoke.mjs --no-gate        # read-only API checks only
+// PICK ONE
+//   1) Verify it all works, leave the instance clean:
+//        npm run features:smoke
+//   2) Verify AND leave the fixtures so you can eyeball them in the app:
+//        npm run features:smoke -- --setup
+//        ...visit the URLs it prints at the end...
+//        npm run features:smoke -- --cleanup
+//   3) Look around without changing anything:
+//        npm run features:smoke -- --status    # what fixtures exist right now
+//        npm run features:smoke -- --guide     # feature → URL map
 //
-// What is proven where:
-//   • canManageAccounts    — GET /api/v1/accounts flips 403 (community) → 200 (team)
-//   • canShareMailboxes    — shared mailbox POST flips 403 → 201 (Team-only)
-//   • canCustomizeBranding — /api/branding/icon serves the custom object on Team,
-//                            the packaged default on Community (public route)
-//   • canForwardEmail      — needs --forward-to: sets users.forwarding_email, checks
-//                            the destination is a verified Email Routing address,
-//                            then sends a real inbound test to forward
-//   • mailbox access grant — inserts a mailbox_access row and reads it back
+//   Run `npm run features:smoke -- --help` for every flag.
+//
+// WHAT IS PROVEN (and where it shows in the app)
+//   • canManageAccounts    GET /api/v1/accounts flips 403 (community) → 200 (team)
+//   • canShareMailboxes    shared mailbox POST flips 403 → 201 (Team-only)
+//   • canCustomizeBranding /api/branding/icon serves the custom object on Team,
+//                          the packaged default on Community
+//   • canForwardEmail      needs --forward-to: sets users.forwarding_email, checks
+//                          the destination is a verified address, sends a test
+//   • mailbox access grant inserts a mailbox_access row and reads it back
 // GUI map, relative to the instance URL — where each gate is visible. These pages
 // live in the (admin) route group, which does NOT add a path segment:
 //   /mailboxes                shared mailboxes (the list shows a "Shared" badge)
@@ -58,6 +63,7 @@ const { values } = parseArgs({
 		setup: { type: "boolean", default: false },
 		cleanup: { type: "boolean", default: false },
 		status: { type: "boolean", default: false },
+		guide: { type: "boolean", default: false },
 		help: { type: "boolean", short: "h", default: false },
 	},
 });
@@ -73,7 +79,7 @@ const LICENCE_ON = "UPDATE license_settings SET plan='team', state='active', fea
 const LICENCE_OFF = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
 
 if (values.help) {
-	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>] [--setup|--keep] [--cleanup] [--status]");
+	usage();
 	process.exit(0);
 }
 if (values.cleanup) {
@@ -84,6 +90,10 @@ if (values.cleanup) {
 }
 if (values.status) {
 	await printStatus();
+	process.exit(0);
+}
+if (values.guide) {
+	console.log(guiMap(await resolveBaseUrl()));
 	process.exit(0);
 }
 
@@ -135,17 +145,48 @@ async function resolveBaseUrl() {
 	process.exit(1);
 }
 
-const guiGuide = (origin) => `
-Where to see each feature (Team is active), at ${origin}:
+function guiMap(origin) {
+	return `
+Where each check maps in the app (Team is active), at ${origin}:
   • Shared mailboxes ..... ${origin}/mailboxes                "${'smoke-*'}@<domain>" row, "Shared" badge
                            ${origin}/mailboxes/<id>           grant / revoke access
   • Branding ............. ${origin}/branding                 app name + icon
   • Accounts & seats ..... ${origin}/accounts                 seat usage; create an account
   • Email forwarding ..... ${origin}/settings/account         forwarding address field
   • Plan & seats ......... ${origin}/licenses
-  • Push subscriptions ... ${origin}/settings/inbox
-Next: inspect the screens above, then tear the fixtures down with
-  npm run features:smoke -- --cleanup`;
+  • Push subscriptions ... ${origin}/settings/inbox`;
+}
+
+// Plain-language help, also shown by `--help`.
+function usage() {
+	console.log(`features-smoke — exercise the licensed (Pro/Team) gates on a deployed instance.
+
+Pick one:
+  npm run features:smoke                    verify everything, then clean up (default)
+  npm run features:smoke -- --setup         verify AND keep the fixtures to inspect
+  npm run features:smoke -- --cleanup       remove fixtures from a previous --setup
+  npm run features:smoke -- --status        print which fixtures exist right now
+  npm run features:smoke -- --guide         print the feature → URL map
+
+Flags:
+  --setup | --keep      create the fixtures and keep them (skip auto-cleanup)
+  --cleanup             remove fixtures created by --setup/--keep
+  --status              read-only: list existing fixtures
+  --guide               read-only: feature → URL map
+  --forward-to <email>  include the forwarding test (destination must be a verified
+                        Email Routing address)
+  --no-gate             read-only checks; never flip the license or create anything
+  --url <base>          instance URL (else MAILFLARE_URL, else derived from Cloudflare)
+  --db <name>           D1 database name (default: mailflare)
+  --bucket <name>       R2 bucket name (default: mailflare-raw)
+  --local               target the local dev D1 instead of remote
+  -h, --help            show this help
+
+Notes:
+  • With npm pass flags after "--", e.g.  npm run features:smoke -- --setup
+  • Credentials come from CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID, or the
+    macOS keychain (fnox), so usually nothing to configure.`);
+}
 
 // Report which fixtures a previous --setup/--keep left behind (read-only).
 async function printStatus() {
@@ -369,6 +410,7 @@ try {
 }
 
 const failed = results.filter((r) => !r.ok);
-if (keepArtifacts) console.log(guiGuide(base));
+console.log(guiMap(base));
+if (keepArtifacts) console.log(`\nFixtures kept — inspect the screens above, then remove them with: npm run features:smoke -- --cleanup`);
 console.log(`\n${failed.length === 0 ? "All checks passed" : `${failed.length} check(s) failed`}: ${results.length - failed.length}/${results.length}.`);
 process.exit(failed.length === 0 ? 0 : 1);
