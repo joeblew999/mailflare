@@ -11,7 +11,7 @@
 // then fall back to the macOS keychain (service "fnox").
 // GUI: turn notifications on at <instance>/settings/inbox (Browser push notifications).
 import { parseArgs } from "node:util";
-import { spawnSync } from "node:child_process";
+import { d1 as libD1, keychain, sleep, workerSecretNames } from "./lib.mjs";
 
 const API = "https://api.cloudflare.com/client/v4";
 
@@ -30,37 +30,8 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 
-// Blocking sleep so the arrival poll below can stay a plain synchronous loop.
-function sleep(ms) {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-// Read a secret from the macOS keychain, where fnox stores its entries under the
-// "fnox" service and the secret name as the account.
-function keychain(account, service = "fnox") {
-	const result = spawnSync("security", ["find-generic-password", "-s", service, "-a", account, "-w"], { encoding: "utf8" });
-	return result.status === 0 ? result.stdout.trim() : null;
-}
-
-// Run SQL through wrangler and return the result rows, tolerating both output shapes.
-function d1(sql) {
-	const result = spawnSync("npx", ["wrangler", "d1", "execute", values.db, location, "--json", "--command", sql], { encoding: "utf8" });
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 execute failed");
-	const parsed = JSON.parse(result.stdout);
-	const first = Array.isArray(parsed) ? parsed[0] : parsed;
-	return first?.results ?? [];
-}
-
-// Secret names only — Cloudflare never returns secret values, so presence is all we can check.
-function workerSecretNames() {
-	const result = spawnSync("npx", ["wrangler", "secret", "list"], { encoding: "utf8" });
-	if (result.status !== 0) return null;
-	try {
-		return JSON.parse(result.stdout).map((entry) => entry.name);
-	} catch {
-		return null;
-	}
-}
+// Shared helpers (scripts/lib.mjs) with this script's database baked in.
+const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 function printSteps() {
 	console.log(`Rotating Web Push (VAPID) keys

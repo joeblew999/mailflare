@@ -38,12 +38,13 @@
 //   /settings/account         forwarding address            (canForwardEmail)
 //   /settings/inbox           browser push notifications
 import { parseArgs } from "node:util";
-import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import bcrypt from "bcryptjs";
+import { d1 as libD1, findAdmin, keychain, licenceSql, resolveInstanceUrl, run, sqlEscape } from "./lib.mjs";
+import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
+import { generateApiKey } from "@/lib/api-keys";
 
 const BRANDING_KEY = "branding/app-icon";
 // A 1x1 PNG staged as the custom icon. The public icon route serves it only when
@@ -82,10 +83,9 @@ const supportsSharing = planName === "team";
 // --setup/--demo/--keep all mean "create the fixtures and don't clean up".
 const keepArtifacts = values.keep || values.setup || values.demo;
 
-// License flips used to prove (and restore) the gates. Declared here so the
-// module-level --cleanup path below can use them.
-const licenceOn = (plan) => `UPDATE license_settings SET plan='${plan}', state='active', features='[]', updated_at=strftime('%s','now') WHERE id='default';`;
-const LICENCE_OFF = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
+// License SQL is shared via scripts/lib.mjs.
+const licenceOn = licenceSql.on;
+const LICENCE_OFF = licenceSql.off;
 
 if (values.help) {
 	usage();
@@ -108,50 +108,23 @@ if (values.guide) {
 
 const base = await resolveBaseUrl();
 
-function run(command, args) {
-	return spawnSync(command, args, { encoding: "utf8" });
-}
-
+// Shared helpers (scripts/lib.mjs) with this script's database baked in. Kept as
+// function declarations so the module-level --cleanup/--status paths can call them.
 function d1(sql) {
-	const result = run("npx", ["wrangler", "d1", "execute", values.db, location, "--json", "--command", sql]);
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 execute failed");
-	const parsed = JSON.parse(result.stdout);
-	const first = Array.isArray(parsed) ? parsed[0] : parsed;
-	return first?.results ?? [];
+	return libD1(sql, { db: values.db, local: values.local });
+}
+function esc(value) {
+	return sqlEscape(value);
 }
 
-function keychain(account, service = "fnox") {
-	const result = run("security", ["find-generic-password", "-s", service, "-a", account, "-w"]);
-	return result.status === 0 ? result.stdout.trim() : null;
-}
-
-// The Worker name is the first top-level "name" in wrangler.jsonc.
-function workerNameFromConfig() {
-	try {
-		const match = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8").match(/^\s*"name"\s*:\s*"([^"]+)"/m);
-		return match?.[1] ?? null;
-	} catch {
-		return null;
-	}
-}
-
-// Resolve the instance URL at runtime instead of hard-coding it: --url, then
-// MAILFLARE_URL, then <worker-name>.<account-subdomain>.workers.dev from the API.
 async function resolveBaseUrl() {
-	const explicit = values.url || process.env.MAILFLARE_URL;
-	if (explicit) return explicit.replace(/\/+$/, "");
-
-	const name = workerNameFromConfig();
-	const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
-	const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
-	if (name && token && account) {
-		const subdomain = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/subdomain`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
-		if (subdomain?.result?.subdomain) return `https://${name}.${subdomain.result.subdomain}.workers.dev`;
+	const base = await resolveInstanceUrl({ url: values.url });
+	if (!base) {
+		console.error("Could not determine the instance URL.");
+		console.error("Pass --url, set MAILFLARE_URL, or provide CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID so it can be derived.");
+		process.exit(1);
 	}
-
-	console.error("Could not determine the instance URL.");
-	console.error("Pass --url, set MAILFLARE_URL, or provide CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID so it can be derived.");
-	process.exit(1);
+	return base;
 }
 
 function guiMap(origin, plan) {
@@ -273,23 +246,21 @@ function record(name, ok, detail = "") {
 }
 
 // --- target + temporary admin key -------------------------------------------
-const [admin] = d1("SELECT id, email FROM users WHERE role='admin' ORDER BY created_at LIMIT 1;");
+const admin = findAdmin({ db: values.db, local: values.local });
 if (!admin) {
 	console.error("No admin user found — is the instance set up?");
 	process.exit(1);
 }
 console.log(`Instance: ${base}\nAdmin:    ${admin.email}\n`);
 
-// Mint a short-lived admin key in D1. The lookup uses the first 12 chars as a
-// prefix, and the value is bcrypt-hashed exactly as src/lib/api-keys.ts does, so
-// the Worker accepts it without any session or Turnstile.
-const fullKey = `ep_${randomBytes(24).toString("base64url")}`;
+// Mint a short-lived admin key using the app's own key format and admin scopes,
+// so it cannot drift from what the Worker enforces.
+const { fullKey, prefix, hash } = generateApiKey();
 const keyId = `key_smoke_${randomBytes(6).toString("hex")}`;
-const scopes = JSON.stringify(["accounts", "mailboxes", "domains", "storage"]);
-const esc = (value) => value.replace(/'/g, "''");
+const scopes = JSON.stringify(ADMIN_API_KEY_SCOPES);
 d1(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mailbox_scope_enabled, created_at)
-    VALUES ('${esc(keyId)}', 'legacy', '${esc(admin.id)}', 'features-smoke', '${esc(fullKey.slice(0, 12))}', '${esc(bcrypt.hashSync(fullKey, 10))}', '${esc(scopes)}', 0, strftime('%s','now'));`);
-console.log(`Minted temporary key ${keyId} (prefix ${fullKey.slice(0, 12)})\n`);
+    VALUES ('${esc(keyId)}', 'legacy', '${esc(admin.id)}', 'features-smoke', '${esc(prefix)}', '${esc(hash)}', '${esc(scopes)}', 0, strftime('%s','now'));`);
+console.log(`Minted temporary key ${keyId} (prefix ${prefix})\n`);
 
 // --- cleanup stack (runs in finally, LIFO) ----------------------------------
 // Cleanups run in reverse in the finally block, so anything we create is removed
