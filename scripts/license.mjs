@@ -7,6 +7,7 @@
 //   node scripts/license.mjs status
 //
 // Defaults to the remote D1 database. Pass --local for the local dev database.
+// GUI: the plan, seats and activation state are shown at <instance>/admin/licenses.
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 

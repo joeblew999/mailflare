@@ -9,6 +9,7 @@
 //
 // Credentials come from the environment first (so `fnox exec -- ...` works),
 // then fall back to the macOS keychain (service "fnox").
+// GUI: turn notifications on at <instance>/settings/inbox (Browser push notifications).
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 
