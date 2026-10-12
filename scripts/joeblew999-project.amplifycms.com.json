@@ -8,7 +8,7 @@
       "role": "support",
       "displayName": "Support",
       "shared": true,
-      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
+      "access": [{ "email": "gerard@amplifycms.com", "permission": "full_access" }]
     },
     { "role": "billing", "displayName": "Billing", "shared": true }
   ],

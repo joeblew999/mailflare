@@ -26,7 +26,7 @@
 //
 // Manifest sections:
 //   onboard   domain options (enableRouting / enableSending / providers / replaceMxRecords)
-//   mailboxes role mailboxes, shared inboxes, and access grants
+//   mailboxes role mailboxes, shared inboxes, and access grants (to OTHER users)
 //   accounts  login accounts (password, or passwordEnv, else a generated one printed once)
 //   routing   domain-scope rules run during address resolution: forward / reject / store
 //   mcpKeys   MCP keys for AI agents; prints the ready-to-paste client config
@@ -170,9 +170,9 @@ function applyAccess(mailboxId, address, grants, dryRun) {
 			failures += 1;
 			continue;
 		}
-		// Workaround: the app lists a mailbox twice when a user both owns it and holds a
-		// grant on it (listAccessibleMailboxes merges without de-duping). Skip owner grants
-		// and remove any redundant row we created before.
+		// Grants exist to share a mailbox with OTHER users; the owner already has full
+		// access. Skipping owner grants keeps the data meaningful (and stops the mailbox
+		// appearing twice in listings that merge owned + shared rows).
 		const [owner] = d1(`SELECT user_id FROM mailboxes WHERE id='${sqlEscape(mailboxId)}';`);
 		if (owner && owner.user_id === user.id) {
 			if (!dryRun) d1(`DELETE FROM mailbox_access WHERE mailbox_id='${sqlEscape(mailboxId)}' AND user_id='${sqlEscape(user.id)}';`);
