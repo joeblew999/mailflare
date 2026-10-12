@@ -1,6 +1,6 @@
 {
   "domain": "example.com",
-  "onboard": { "enableRouting": true, "replaceMxRecords": true },
+  "onboard": { "enableRouting": true, "replaceMxRecords": false },
   "mailboxes": [
     { "role": "office", "displayName": "Office" },
     { "role": "admin", "displayName": "Admin" },
@@ -16,5 +16,10 @@
       "shared": true,
       "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "read_only" }]
     }
+  ],
+  "accounts": [{ "username": "sam", "name": "Sam", "role": "user", "passwordEnv": "PROV_PASSWORD" }],
+  "routing": [
+    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true },
+    { "pattern": "no-reply", "action": "reject", "rejectReason": "No such user" }
   ]
 }

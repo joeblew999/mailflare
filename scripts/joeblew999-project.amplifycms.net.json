@@ -10,5 +10,11 @@
       "shared": true,
       "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
     }
+  ],
+  "accounts": [
+    { "username": "gerard", "name": "Gerard", "role": "admin", "passwordEnv": "MAILFLARE_PROV_PASSWORD" }
+  ],
+  "routing": [
+    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true }
   ]
 }

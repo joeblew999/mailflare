@@ -8,18 +8,27 @@
 //   records unless you pass --confirm-mx.
 //
 //   npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
-//   npm run joeblew999:provision -- --domain ubuntusoftware.net --roles office,admin
+//   npm run joeblew999:provision -- --domain example.com --roles office,admin
 //
 // Project file (JSON):
 //   {
-//     "domain": "ubuntusoftware.net",
-//     "onboard": { "enableRouting": true, "replaceMxRecords": true },
+//     "domain": "example.com",
+//     "onboard": { "enableRouting": true, "replaceMxRecords": false },
 //     "mailboxes": [
 //       { "role": "office",  "displayName": "Office" },
 //       { "role": "support", "shared": true,
-//         "access": [ { "email": "gedw99@gmail.com", "permission": "full_access" } ] }
-//     ]
+//         "access": [ { "email": "you@example.com", "permission": "full_access" } ] }
+//     ],
+//     "accounts": [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
+//     "routing":  [ { "pattern": "*",      "action": "forward", "forwardTo": "you@example.com" },
+//                   { "pattern": "no-reply", "action": "reject" } ]
 //   }
+//
+// Manifest sections:
+//   onboard   domain options (enableRouting / enableSending / providers / replaceMxRecords)
+//   mailboxes role mailboxes, shared inboxes, and access grants
+//   accounts  login accounts (password, or passwordEnv, else a generated one printed once)
+//   routing   domain-scope rules run during address resolution: forward / reject / store
 //
 // Flags:
 //   --project <path>      apply a project manifest (domain + mailboxes + onboard)
@@ -72,9 +81,12 @@ function usage() {
   npm run joeblew999:provision -- --domain <hostname> --roles a,b,c --cleanup
 
 Project file (JSON):
-  { "domain": "...", "onboard": { "replaceMxRecords": true },
+  { "domain": "...", "onboard": { "replaceMxRecords": false },
     "mailboxes": [ { "role": "office", "displayName": "Office" },
-                   { "role": "support", "shared": true } ] }
+                   { "role": "support", "shared": true,
+                     "access": [ { "email": "you@example.com", "permission": "full_access" } ] } ],
+    "accounts": [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
+    "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ] }
 
 Flags:
   --project <path>      apply a project manifest (domain + mailboxes + onboard)
@@ -168,10 +180,88 @@ function applyAccess(mailboxId, address, grants, dryRun) {
 	return failures;
 }
 
+// Create login accounts (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
+// A password is taken from the entry, the named env var, or generated and printed once.
+async function ensureAccount(entry, domain, key, base, dryRun) {
+	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
+	if (!username) {
+		console.log(`  ✗ account entry needs a username: ${JSON.stringify(entry)}`);
+		return 1;
+	}
+	const email = `${username}@${domain.hostname}`;
+	const list = await request(base, "/api/v1/accounts", { key });
+	const exists = (list.json?.accounts ?? []).some((account) => String(account.email).toLowerCase() === email);
+	if (exists) {
+		console.log(`  · account ${email} — already exists`);
+		return 0;
+	}
+
+	const fromEnv = entry.passwordEnv ? process.env[entry.passwordEnv] : null;
+	const password = entry.password || fromEnv || randomBytes(12).toString("base64url");
+	const generated = !entry.password && !fromEnv;
+	if (dryRun) {
+		console.log(`  → would create account ${email} (${entry.role === "admin" ? "admin" : "user"})`);
+		return 0;
+	}
+	const created = await request(base, "/api/v1/accounts", {
+		method: "POST",
+		key,
+		body: { username, domainId: domain.id, password, role: entry.role === "admin" ? "admin" : "user", useAllDomains: false, aliases: [] },
+	});
+	if (created.status !== 200 && created.status !== 201) {
+		console.log(`  ✗ account failed (HTTP ${created.status}) ${email} — ${created.json?.error ?? ""}`);
+		return 1;
+	}
+	console.log(`  ✓ created account ${email}${generated ? `  ⚠ password (shown once): ${password}` : ""}`);
+	return 0;
+}
+
+// Provision domain-scope routing rules (`routing: [{ pattern, action, forwardTo?, rejectReason?, keepCopy?, priority? }]`).
+// Domain rules decide, during address resolution: reject, forward, or store (catch-all).
+function ensureRouting(entry, domain, adminId, dryRun) {
+	const pattern = String(entry.pattern ?? "*").trim();
+	const action = String(entry.action ?? "forward").trim();
+	if (!["store", "forward", "reject"].includes(action)) {
+		console.log(`  ✗ routing action must be store|forward|reject (got "${action}")`);
+		return 1;
+	}
+	const forwardTo = entry.forwardTo ? String(entry.forwardTo).trim() : null;
+	if (action === "forward" && !forwardTo) {
+		console.log(`  ✗ routing "${pattern}" forwards but has no forwardTo`);
+		return 1;
+	}
+	const label = `routing ${pattern} → ${action}${forwardTo ? ` ${forwardTo}` : ""}`;
+	const existing = d1(`SELECT id FROM routing_rules WHERE domain_id='${sqlEscape(domain.id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(action)}';`);
+	if (existing.length > 0) {
+		console.log(`  · ${label} — already exists`);
+		return 0;
+	}
+	if (dryRun) {
+		console.log(`  → would add ${label}`);
+		return 0;
+	}
+	d1(`INSERT INTO routing_rules (id, user_id, domain_id, scope, name, enabled, pattern, match_field, match_operator, match_value, action, forward_to, keep_copy, reject_reason, priority, created_at)
+	    VALUES ('rr_${randomBytes(6).toString("hex")}', '${sqlEscape(adminId)}', '${sqlEscape(domain.id)}', 'domain', '${sqlEscape(entry.name ?? pattern)}', 1, '${sqlEscape(pattern)}', 'email', 'contains', '${sqlEscape(entry.matchValue ?? "")}', '${sqlEscape(action)}', ${forwardTo ? `'${sqlEscape(forwardTo)}'` : "NULL"}, ${entry.keepCopy ? 1 : 0}, ${entry.rejectReason ? `'${sqlEscape(entry.rejectReason)}'` : "NULL"}, ${Number(entry.priority) || 0}, strftime('%s','now'));`);
+	console.log(`  ✓ added ${label}`);
+	return 0;
+}
+
+function removeRouting(entry, domain, dryRun) {
+	const pattern = String(entry.pattern ?? "*").trim();
+	const action = String(entry.action ?? "forward").trim();
+	if (dryRun) {
+		console.log(`  → would remove routing ${pattern} → ${action}`);
+		return 0;
+	}
+	d1(`DELETE FROM routing_rules WHERE domain_id='${sqlEscape(domain.id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(action)}';`);
+	console.log(`  ✓ removed routing ${pattern} → ${action}`);
+	return 0;
+}
+
 async function main() {
 	const domainName = domainValue.toLowerCase();
 	try {
-		return await withAdminKey({ db: values.db, local: values.local, url: values.url, name: "provision" }, async ({ base, key }) => {
+		return await withAdminKey({ db: values.db, local: values.local, url: values.url, name: "provision" }, async ({ base, key, admin }) => {
 			let domains = await request(base, "/api/v1/domains", { key: key });
 			let domain = findDomain(domains.json?.domains, domainName);
 
@@ -220,7 +310,8 @@ async function main() {
 					for (const record of mx) console.log(`      ${record.priority ?? ""} ${record.content}`);
 				}
 				if (values["dry-run"]) {
-					console.log(`  → would onboard ${domainValue}, then create ${roles.map(({ role }) => `${role}@${domainValue}`).join(", ")}`);
+					const extras = `${project?.accounts?.length ? ` + ${project.accounts.length} account(s)` : ""}${project?.routing?.length ? ` + ${project.routing.length} routing rule(s)` : ""}`;
+					console.log(`  → would onboard ${domainValue}, then create ${roles.map(({ role }) => `${role}@${domainValue}`).join(", ")}${extras}`);
 					return 0;
 				}
 				if (mx?.length && !values["confirm-mx"]) {
@@ -302,6 +393,18 @@ async function main() {
 				if (access.length && (mailboxId || values["dry-run"])) {
 					failures += applyAccess(mailboxId ?? "«new»", address, access, values["dry-run"]);
 				}
+			}
+
+			// Accounts (logins) and domain-scope routing rules.
+			const accounts = project?.accounts ?? [];
+			const routing = project?.routing ?? [];
+			if (accounts.length || routing.length) console.log("");
+
+			if (values.cleanup) {
+				for (const rule of routing) failures += removeRouting(rule, domain, values["dry-run"]);
+			} else {
+				for (const account of accounts) failures += await ensureAccount(account, domain, key, base, values["dry-run"]);
+				for (const rule of routing) failures += ensureRouting(rule, domain, admin.id, values["dry-run"]);
 			}
 
 			if (!values["dry-run"]) console.log(`\nMailboxes: ${base}/mailboxes`);
