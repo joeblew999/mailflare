@@ -57,6 +57,8 @@ if (action === "on" && plan !== "team" && plan !== "pro") {
 
 const location = values.local ? "--local" : "--remote";
 
+// Upsert the singleton license row. instance_id is generated in SQL so this also
+// works against a fresh database; only plan/state matter on conflict.
 const ON = (chosenPlan) => `
 INSERT INTO license_settings (id, instance_id, plan, state, features, seat_limit, updated_at)
 VALUES (
@@ -67,11 +69,13 @@ VALUES (
 ON CONFLICT(id) DO UPDATE SET
 	plan = excluded.plan, state = excluded.state, features = excluded.features, updated_at = excluded.updated_at;`;
 
+// Back to the free plan: every gate in getLicenseEntitlements turns off.
 const OFF = `
 UPDATE license_settings
 SET plan = 'community', state = 'inactive', features = '[]', updated_at = strftime('%s','now')
 WHERE id = 'default';`;
 
+// Read-only: exactly the columns the app derives its entitlements from.
 const STATUS = `SELECT plan, state, seat_limit, features FROM license_settings WHERE id = 'default';`;
 
 function runWrangler(sql) {
@@ -94,6 +98,8 @@ function runWrangler(sql) {
 	}
 }
 
+// Mirrors getLicenseEntitlements (src/lib/licenses/service.ts) so the printed
+// summary matches what the app actually enforces.
 function entitlements(planValue, active) {
 	const isTeam = active && planValue === "team";
 	const isPro = active && planValue === "pro";
@@ -106,6 +112,7 @@ function entitlements(planValue, active) {
 	};
 }
 
+// Render the current row as plan + per-gate state.
 function report(rows) {
 	const row = rows[0];
 	if (!row) {

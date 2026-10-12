@@ -103,6 +103,9 @@ if (!admin) {
 }
 console.log(`Instance: ${base}\nAdmin:    ${admin.email}\n`);
 
+// Mint a short-lived admin key in D1. The lookup uses the first 12 chars as a
+// prefix, and the value is bcrypt-hashed exactly as src/lib/api-keys.ts does, so
+// the Worker accepts it without any session or Turnstile.
 const fullKey = `ep_${randomBytes(24).toString("base64url")}`;
 const keyId = `key_smoke_${randomBytes(6).toString("hex")}`;
 const scopes = JSON.stringify(["accounts", "mailboxes", "domains", "storage"]);
@@ -112,6 +115,8 @@ d1(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mai
 console.log(`Minted temporary key ${keyId} (prefix ${fullKey.slice(0, 12)})\n`);
 
 // --- cleanup stack (runs in finally, LIFO) ----------------------------------
+// Cleanups run in reverse in the finally block, so anything we create is removed
+// even if a check throws partway through.
 const cleanups = [];
 const onCleanup = (fn) => cleanups.push(fn);
 
@@ -131,6 +136,8 @@ try {
 
 	if (flipGate) {
 		// --- branding: stage a custom icon, then flip the gate -----------------
+		// Stage a custom icon: /api/branding/icon is public and branches on
+		// canCustomizeBranding, so a marker object proves the gate flips without a session.
 		const markerPath = join(tmpdir(), `mailflare-branding-${Date.now()}.txt`);
 		writeFileSync(markerPath, BRANDING_MARKER);
 		const put = run("npx", ["wrangler", "r2", "object", "put", `${values.bucket}/${BRANDING_KEY}`, "--file", markerPath, "--content-type", "text/plain", "--remote"]);
@@ -146,6 +153,7 @@ try {
 		}
 
 		// --- prove the gates block under Community ----------------------------
+		// Flip to Community to prove the gates actually block, then back to Team below.
 		d1(LICENCE_OFF);
 		record("accounts blocked on Community", (await api("/api/v1/accounts", { key: fullKey })).status === 403);
 
