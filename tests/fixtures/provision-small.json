@@ -1,0 +1,16 @@
+{
+	"projects": [
+		{
+			"domain": "dev-one.example",
+			"mailboxes": [
+				{ "role": "office", "displayName": "Office" },
+				{ "role": "support", "shared": true }
+			]
+		},
+		{
+			"domain": "dev-two.example",
+			"mailboxes": [{ "role": "hello" }],
+			"routing": [{ "pattern": "*", "action": "forward", "forwardTo": "ops@example.com" }]
+		}
+	]
+}

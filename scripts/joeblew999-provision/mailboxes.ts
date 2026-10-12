@@ -1,12 +1,21 @@
-import { newId } from "@/lib/ids";
 import { mailboxAccessSchema } from "@/lib/validators";
-import { sqlEscape } from "../joeblew999-lib";
 import { validateBody } from "../joeblew999-lib-app";
 import { requireDomain } from "./context";
 import type { AccessGrant, ApiMailbox, Context, Role } from "./types";
 
-// Apply a mailbox's `access: [{ email, permission }]` grants straight to
-// mailbox_access (what the app reads). Deleting the mailbox cascades them away.
+// The domain's mailboxes, keyed by lower-cased local part. One helper so the
+// "list mailboxes and keep this domain's" step is not rewritten in three places.
+export async function mailboxesForDomain(ctx: Context): Promise<Map<string, ApiMailbox>> {
+	const rows = await ctx.store.listMailboxes();
+	return new Map(
+		rows
+			.filter((row) => String(row.hostname).toLowerCase() === ctx.domainName)
+			.map((row) => [String(row.localPart).toLowerCase(), row]),
+	);
+}
+
+// Apply a mailbox's `access: [{ email, permission }]` grants. Grants share a mailbox
+// with OTHER users; the owner already has full access.
 export function applyAccess(ctx: Context, mailboxId: string, address: string, grants: AccessGrant[]): number {
 	let failures = 0;
 	for (const grant of grants) {
@@ -17,25 +26,24 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 			failures += 1;
 			continue;
 		}
-		const [user] = ctx.d1(`SELECT id FROM users WHERE lower(email)='${sqlEscape(email)}' LIMIT 1;`);
-		if (!user) {
+		const userId = ctx.store.userIdByEmail(email);
+		if (!userId) {
 			console.log(`     ✗ ${address}: no user with email ${email}`);
 			failures += 1;
 			continue;
 		}
 		// Validate against the app's own schema so permissions cannot drift.
-		const parsed = mailboxAccessSchema.safeParse({ userId: user.id, permission });
+		const parsed = mailboxAccessSchema.safeParse({ userId, permission });
 		if (!parsed.success) {
 			console.log(`     ✗ ${address}: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
 			failures += 1;
 			continue;
 		}
-		// Grants share a mailbox with OTHER users; the owner already has full access.
 		// Skipping owner grants also stops the mailbox appearing twice in listings that
 		// merge owned + shared rows.
-		const [owner] = ctx.d1(`SELECT user_id FROM mailboxes WHERE id='${sqlEscape(mailboxId)}';`);
-		if (owner && owner.user_id === user.id) {
-			if (!ctx.flags.dryRun) ctx.d1(`DELETE FROM mailbox_access WHERE mailbox_id='${sqlEscape(mailboxId)}' AND user_id='${sqlEscape(user.id)}';`);
+		const owner = ctx.store.mailboxOwnerId(mailboxId);
+		if (owner && owner === userId) {
+			if (!ctx.flags.dryRun) ctx.store.revokeAccess(mailboxId, userId);
 			console.log(`     · ${email} owns ${address} — grant not needed, skipped`);
 			continue;
 		}
@@ -43,24 +51,16 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 			console.log(`     → would grant ${permission} on ${address} to ${email}`);
 			continue;
 		}
-		ctx.d1(`INSERT INTO mailbox_access (id, mailbox_id, user_id, permission, created_at)
-		    VALUES ('${newId("mac")}', '${sqlEscape(mailboxId)}', '${sqlEscape(user.id)}', '${sqlEscape(parsed.data.permission)}', strftime('%s','now'))
-		    ON CONFLICT(mailbox_id, user_id) DO UPDATE SET permission=excluded.permission;`);
+		ctx.store.grantAccess(mailboxId, userId, parsed.data.permission);
 		console.log(`     ✓ ${permission} on ${address} → ${email}`);
 	}
 	return failures;
 }
 
 // Create (or delete, under --cleanup) the role mailboxes, and return each role's
-// mailbox id so MCP keys can be scoped to them.
+// mailbox id so MCP keys and routing rules can be scoped to them.
 export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ failures: number; mailboxIdsByRole: Map<string, string> }> {
-	const boxes = await ctx.api("/api/v1/mailboxes");
-	const rows = (boxes.json?.mailboxes ?? []) as ApiMailbox[];
-	const existing = new Map<string, ApiMailbox>(
-		rows
-			.filter((entry) => String(entry.hostname).toLowerCase() === ctx.domainName)
-			.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
-	);
+	const existing = await mailboxesForDomain(ctx);
 
 	console.log(`${ctx.flags.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${ctx.domainName}:\n`);
 	let failures = 0;
@@ -79,7 +79,7 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 				console.log(`  → would delete ${address}`);
 				continue;
 			}
-			const removed = await ctx.api(`/api/v1/mailboxes/${current.id}`, { method: "DELETE" });
+			const removed = await ctx.store.deleteMailbox(current.id);
 			if (removed.status === 200) {
 				console.log(`  ✓ deleted ${address}`);
 			} else {
@@ -95,10 +95,9 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 		} else if (ctx.flags.dryRun) {
 			console.log(`  → would create ${address}${share ? " (shared)" : ""}`);
 		} else {
-			const created = await ctx.api("/api/v1/mailboxes", {
-				method: "POST",
-				body: validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: role, displayName, type: share ? "shared" : "personal" }),
-			});
+			const created = await ctx.store.createMailbox(
+				validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: role, displayName, type: share ? "shared" : "personal" }),
+			);
 			if (created.status === 201) {
 				mailboxId = created.json.id;
 				console.log(`  ✓ created ${address}${share ? " (shared)" : ""}`);

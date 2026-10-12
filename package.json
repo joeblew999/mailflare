@@ -17,6 +17,7 @@
 		"push:keys": "node scripts/generate-vapid-keys.mjs",
     "joeblew999:push:test": "tsx scripts/joeblew999-push-test.ts",
     "joeblew999:provision": "tsx scripts/joeblew999-provision.ts",
+    "joeblew999:test": "node --import tsx --test tests/joeblew999-provision.test.ts",
     "joeblew999:typecheck": "tsc -p tsconfig.scripts.json",
     "joeblew999:license:on": "tsx scripts/joeblew999-license.ts on",
     "joeblew999:license:off": "tsx scripts/joeblew999-license.ts off",

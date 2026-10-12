@@ -3,7 +3,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import type { accountListItemFromUser } from "@/app/api/accounts/utils";
 import type { listUserDomains } from "@/lib/domains/service";
 import type { domains as domainsTable, mailboxes as mailboxesTable } from "@/db/schema";
-import type { ApiResult } from "../joeblew999-lib";
+import type { Store } from "./store-types";
 
 // Response shapes taken from the app's own builders, so field access is checked
 // against what the endpoint actually returns (no guessing).
@@ -63,16 +63,15 @@ export type ProjectManifest = {
 	mcpKeys?: McpKeyEntry[];
 };
 
-// Everything a resource helper needs. Built once per run so no module reaches into
-// process state; `api`/`d1` close over the resolved base URL and database.
+/** A file that names many projects at once, for mass runs. */
+export type ProjectFile = { projects?: ProjectManifest[] };
+
+// Everything a resource helper needs. The store is the only way out of the logic,
+// so a test can hand it a fake and drive a whole run with no D1 and no network.
 export type Context = {
-	base: string;
-	key: string;
-	admin: { id: string; email: string };
+	store: Store;
 	flags: Flags;
 	project: ProjectManifest | null;
 	domainName: string;
 	domain: ApiDomain | null;
-	d1: (sql: string) => any[];
-	api: (path: string, options?: { method?: string; body?: unknown }) => Promise<ApiResult>;
 };

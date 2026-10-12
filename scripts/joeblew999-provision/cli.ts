@@ -6,6 +6,7 @@ export function parseCli() {
 		options: {
 			domain: { type: "string" },
 			project: { type: "string" },
+			file: { type: "string" },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts" },
 			roles: { type: "string", default: "" },
@@ -45,14 +46,15 @@ export function parseCli() {
 }
 
 export function usage() {
-	console.log(`provision — stand up a domain's mailboxes from a project manifest.
+	console.log(`provision — stand up (or tear down) domains from a JSON manifest.
 
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
   domain that already has MX records unless you pass --confirm-mx.
 
-  npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
-  npm run joeblew999:provision -- --domain <hostname> --roles a,b,c [--onboard] [--share]
-  npm run joeblew999:provision -- --domain <hostname> --roles a,b,c --cleanup
+  npm run joeblew999:provision -- --file scripts/joeblew999-project.example.json
+  npm run joeblew999:provision -- --domain <hostname> --roles a,b,c [--onboard]
+  npm run joeblew999:provision -- --all --dry-run
+  npm run joeblew999:provision -- --file <multi.json>          # { "projects": [ ... ] }
 
 Project file (JSON):
   { "domain": "...", "onboard": { "replaceMxRecords": false },
@@ -63,12 +65,16 @@ Project file (JSON):
     "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ],
     "mcpKeys":  [ { "name": "agent", "mailboxes": ["office"] } ] }
 
+  A mass input is one file: { "projects": [ <project>, <project>, ... ] }. The whole
+  file is loaded once and ONE admin key covers the run.
+
 Flags:
-  --project <path>      apply a project manifest (domain + mailboxes + onboard)
+  --project <path>      apply one project manifest (a typo of --file is harmless)
+  --file <path>         apply one project, or many via { "projects": [...] }
   --all                 apply every joeblew999-project.*.json in --dir
   --dir <path>          directory to scan when using --all (default: scripts)
-  --domain <hostname>   domain to provision on (overrides the manifest)
-  --roles <a,b,c>       ad-hoc role names (alternative to a manifest)
+  --domain <hostname>   provision a domain without a manifest
+  --roles <a,b,c>       ad-hoc role names (with --domain)
   --roles-file <path>   read role names from a file (JSON array or one per line)
   --onboard             add the domain to Mailflare first (publishes MX)
   --replace-mx          when onboarding, take MX over from another provider

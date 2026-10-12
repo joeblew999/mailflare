@@ -1,82 +1,78 @@
 #!/usr/bin/env node
-// Provision a domain's mailboxes from a per-project manifest (or an ad-hoc role list).
-// Idempotent: addresses that already exist are left alone.
+// Provision (or tear down) domains from a JSON manifest.
+// Idempotent: addresses that already exist are left alone, and drift is reconciled.
 //
 // ⚠ MX WARNING — `--onboard` publishes Mailflare's Email Routing MX for the domain.
 //   On a domain that already receives mail (a live company domain) that redirects its
 //   real mail. The script REFUSES to onboard a domain that already has MX records
 //   unless you pass --confirm-mx.
 //
-//   npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
+//   npm run joeblew999:provision -- --file scripts/joeblew999-project.example.json
 //   npm run joeblew999:provision -- --domain example.com --roles office,admin
-//   npm run joeblew999:provision -- --all [--dry-run|--status]
+//   npm run joeblew999:provision -- --all --dry-run
+//   npm run joeblew999:provision -- --file big.json      # { "projects": [ ... ] }
 //
-// Project file (JSON):
-//   {
-//     "domain": "example.com",
-//     "onboard": { "enableRouting": true, "replaceMxRecords": false },
-//     "mailboxes": [
-//       { "role": "office",  "displayName": "Office" },
-//       { "role": "support", "shared": true,
-//         "access": [ { "email": "you@example.com", "permission": "full_access" } ] }
-//     ],
-//     "accounts": [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
-//     "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ],
-//     "mcpKeys":  [ { "name": "agent", "mailboxes": ["office"], "scopes": ["mcp:read", "mcp:draft"] } ]
-//   }
-//
-// Manifest sections:
-//   onboard   domain options (enableRouting / enableSending / providers / replaceMxRecords)
-//   mailboxes role mailboxes, shared inboxes, and access grants (to OTHER users)
-//   accounts  login accounts (password, or passwordEnv, else a generated one printed once)
-//   routing   domain-scope rules run during address resolution: forward / reject / store
-//   mcpKeys   MCP keys for AI agents; prints the ready-to-paste client config
+// Mass input is ONE file holding many projects; it is loaded once and a single admin
+// key covers the whole run. The implementation lives in ./joeblew999-provision/, and
+// all data access goes through the Store seam in store-types.ts.
 //
 // De-provisioning (reverse order; only paths the app supports):
 //   --cleanup            remove the manifest's mailboxes, routing rules and MCP keys
 //   --disable-accounts   also DISABLE its accounts (the app has no user-delete)
 //   --remove-domain      also remove the domain itself (drops its DNS/MX)
-//
-// Runs under tsx; the implementation lives in ./joeblew999-provision/.
 import { parseCli, usage } from "./joeblew999-provision/cli";
 import { loadProject, loadRoles } from "./joeblew999-provision/manifest";
-import { withContext } from "./joeblew999-provision/context";
+import { loadProjects, runBatch, type ProjectEntry } from "./joeblew999-provision/batch";
+import { makeContext } from "./joeblew999-provision/context";
 import { run } from "./joeblew999-provision/commands";
-import { runAll } from "./joeblew999-provision/mass";
-import type { ProjectManifest } from "./joeblew999-provision/types";
+import { withProvisionStore } from "./joeblew999-lib-app";
+import type { ProjectManifest, Role } from "./joeblew999-provision/types";
 
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const { values, flags } = parseCli();
 
 if (values.help) {
 	usage();
 	process.exit(0);
 }
-if (values.all) {
-	process.exit(await runAll(values));
-}
 
-let project: ProjectManifest | null = null;
-if (values.project) {
-	try {
-		project = loadProject(values.project);
-	} catch (error) {
-		console.error(error instanceof Error ? error.message : String(error));
-		process.exit(1);
+const batch = Boolean(values.all) || Boolean(values.file);
+let entries: ProjectEntry[];
+let singleRoles: Role[] = [];
+
+try {
+	if (batch) {
+		entries = loadProjects({ file: values.file ? String(values.file) : undefined, dir: String(values.dir) });
+	} else {
+		const project: ProjectManifest | null = values.project ? loadProject(String(values.project)) : null;
+		const domainValue = String(values.domain ?? project?.domain ?? "").trim();
+		if (!domainValue) {
+			console.error("No domain. Pass --project/--file <path>, --all, or --domain <hostname>.\n");
+			usage();
+			process.exit(1);
+		}
+		const target: ProjectManifest = project ?? { domain: domainValue };
+		singleRoles = loadRoles(values, target, flags);
+		if (singleRoles.length === 0) {
+			console.error("No mailboxes to provision. Use --project/--file <path>, --roles a,b,c, or --roles-file <path>.\n");
+			usage();
+			process.exit(1);
+		}
+		entries = [{ name: domainValue, project: target }];
 	}
-}
-
-const domainValue = String(values.domain ?? project?.domain ?? "").trim();
-if (!domainValue) {
-	console.error("No domain. Pass --project <file> or --domain <hostname>.\n");
-	usage();
+} catch (error) {
+	console.error(message(error));
 	process.exit(1);
 }
 
-const roles = loadRoles(values, project, flags);
-if (roles.length === 0) {
-	console.error("No mailboxes to provision. Use --project <file>, --roles a,b,c, or --roles-file <path>.\n");
-	usage();
-	process.exit(1);
+let exitCode = 1;
+try {
+	exitCode = await withProvisionStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
+		if (batch) return await runBatch(store, flags, values, entries);
+		const [entry] = entries;
+		return await run(makeContext(store, flags, entry.project, entry.name.toLowerCase()), singleRoles);
+	});
+} catch (error) {
+	console.error(message(error));
 }
-
-process.exit(await withContext(flags, project, domainValue.toLowerCase(), (ctx) => run(ctx, roles)));
+process.exit(exitCode);

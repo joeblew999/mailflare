@@ -1,5 +1,3 @@
-import { sqlEscape } from "../joeblew999-lib";
-import { mintMcpKey } from "../joeblew999-lib-app";
 import type { Context, McpKeyEntry } from "./types";
 
 // MCP tool scopes (mirrors MCP_SCOPES in src/lib/mcp/auth.ts).
@@ -24,8 +22,7 @@ export function ensureMcpKey(ctx: Context, entry: McpKeyEntry, mailboxIdsByRole:
 		}
 		mailboxIds.push(id);
 	}
-	const existing = ctx.d1(`SELECT id FROM api_keys WHERE user_id='${sqlEscape(ctx.admin.id)}' AND kind='mcp' AND name='${sqlEscape(name)}';`);
-	if (existing.length > 0) {
+	if (ctx.store.mcpKey(ctx.store.admin.id, name)) {
 		console.log(`  · mcp key "${name}" — already exists`);
 		return 0;
 	}
@@ -33,9 +30,9 @@ export function ensureMcpKey(ctx: Context, entry: McpKeyEntry, mailboxIdsByRole:
 		console.log(`  → would create mcp key "${name}" (${scopes.length} scope(s), ${mailboxIds.length} mailbox(es))`);
 		return 0;
 	}
-	const { fullKey } = mintMcpKey({ db: ctx.flags.db, local: ctx.flags.local, adminId: ctx.admin.id, name, scopes, mailboxIds });
+	const { fullKey } = ctx.store.createMcpKey({ name, scopes, mailboxIds });
 	console.log(`  ✓ created mcp key "${name}"  ⚠ key (shown once): ${fullKey}`);
-	console.log(`     client JSON: {"mcpServers":{"mailflare":{"type":"http","url":"${ctx.base}/mcp","headers":{"Authorization":"Bearer ${fullKey}"}}}}`);
+	console.log(`     client JSON: {"mcpServers":{"mailflare":{"type":"http","url":"${ctx.store.base}/mcp","headers":{"Authorization":"Bearer ${fullKey}"}}}}`);
 	return 0;
 }
 
@@ -45,7 +42,7 @@ export function removeMcpKey(ctx: Context, entry: McpKeyEntry): number {
 		console.log(`  → would remove mcp key "${name}"`);
 		return 0;
 	}
-	ctx.d1(`DELETE FROM api_keys WHERE user_id='${sqlEscape(ctx.admin.id)}' AND kind='mcp' AND name='${sqlEscape(name)}';`);
+	ctx.store.deleteMcpKey(ctx.store.admin.id, name);
 	console.log(`  ✓ removed mcp key "${name}"`);
 	return 0;
 }

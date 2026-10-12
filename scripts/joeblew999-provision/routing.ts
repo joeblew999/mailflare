@@ -1,8 +1,7 @@
-import { newId } from "@/lib/ids";
 import { domainRoutingRuleSchema } from "@/lib/validators";
-import { sqlEscape } from "../joeblew999-lib";
 import { requireDomain } from "./context";
 import type { Context, RoutingEntry } from "./types";
+import type { RoutingRulePatch } from "./store-types";
 
 // Provision domain-scope routing rules. These decide, during address resolution:
 // reject, forward, or store (catch-all). Validated with the app's own
@@ -35,29 +34,28 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 	}
 
 	const rule = parsed.data;
-	const forwardTo = rule.forwardTo ?? null;
-	const label = `routing ${pattern} → ${rule.action}${forwardTo ? ` ${forwardTo}` : ""}`;
-	const existing = ctx.d1(`SELECT id, match_value, forward_to, keep_copy, mailbox_id, reject_reason, priority, enabled FROM routing_rules WHERE domain_id='${sqlEscape(requireDomain(ctx).id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(rule.action)}';`);
-	if (existing.length > 0) {
+	const label = `routing ${pattern} → ${rule.action}${rule.forwardTo ? ` ${rule.forwardTo}` : ""}`;
+	const desired: RoutingRulePatch = {
+		matchValue: rule.matchValue,
+		forwardTo: rule.forwardTo ?? null,
+		keepCopy: rule.keepCopy ? 1 : 0,
+		mailboxId,
+		rejectReason: rule.rejectReason ?? null,
+		priority: rule.priority,
+		enabled: rule.enabled ? 1 : 0,
+	};
+
+	const existing = ctx.store.routingRule(requireDomain(ctx).id, pattern, rule.action);
+	if (existing) {
 		// Reconcile the stored row with the manifest rather than assuming it matches.
-		const row = existing[0];
-		const desired = {
-			matchValue: rule.matchValue,
-			forwardTo,
-			keepCopy: rule.keepCopy ? 1 : 0,
-			mailboxId,
-			rejectReason: rule.rejectReason ?? null,
-			priority: rule.priority,
-			enabled: rule.enabled ? 1 : 0,
-		};
 		const same =
-			String(row.match_value ?? "") === desired.matchValue &&
-			(row.forward_to ?? null) === desired.forwardTo &&
-			Number(row.keep_copy) === desired.keepCopy &&
-			(row.mailbox_id ?? null) === desired.mailboxId &&
-			(row.reject_reason ?? null) === desired.rejectReason &&
-			Number(row.priority) === desired.priority &&
-			Number(row.enabled) === desired.enabled;
+			String(existing.match_value ?? "") === desired.matchValue &&
+			(existing.forward_to ?? null) === desired.forwardTo &&
+			Number(existing.keep_copy) === desired.keepCopy &&
+			(existing.mailbox_id ?? null) === desired.mailboxId &&
+			(existing.reject_reason ?? null) === desired.rejectReason &&
+			Number(existing.priority) === desired.priority &&
+			Number(existing.enabled) === desired.enabled;
 		if (same) {
 			console.log(`  · ${label} — already exists`);
 			return 0;
@@ -66,7 +64,7 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 			console.log(`  → would update ${label}`);
 			return 0;
 		}
-		ctx.d1(`UPDATE routing_rules SET match_value='${sqlEscape(desired.matchValue)}', forward_to=${desired.forwardTo ? `'${sqlEscape(desired.forwardTo)}'` : "NULL"}, keep_copy=${desired.keepCopy}, mailbox_id=${desired.mailboxId ? `'${sqlEscape(desired.mailboxId)}'` : "NULL"}, reject_reason=${desired.rejectReason ? `'${sqlEscape(desired.rejectReason)}'` : "NULL"}, priority=${desired.priority}, enabled=${desired.enabled} WHERE id='${sqlEscape(row.id)}';`);
+		ctx.store.updateRoutingRule(existing.id, desired);
 		console.log(`  ✓ updated ${label}`);
 		return 0;
 	}
@@ -74,8 +72,16 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 		console.log(`  → would add ${label}`);
 		return 0;
 	}
-	ctx.d1(`INSERT INTO routing_rules (id, user_id, domain_id, scope, name, enabled, pattern, match_field, match_operator, match_value, action, forward_to, keep_copy, reject_reason, priority, created_at)
-	    VALUES ('${newId("rr")}', '${sqlEscape(ctx.admin.id)}', '${sqlEscape(requireDomain(ctx).id)}', 'domain', '${sqlEscape(rule.name ?? pattern)}', ${rule.enabled ? 1 : 0}, '${sqlEscape(pattern)}', '${sqlEscape(rule.matchField)}', '${sqlEscape(rule.matchOperator)}', '${sqlEscape(rule.matchValue)}', '${sqlEscape(rule.action)}', ${forwardTo ? `'${sqlEscape(forwardTo)}'` : "NULL"}, ${rule.keepCopy ? 1 : 0}, ${rule.rejectReason ? `'${sqlEscape(rule.rejectReason)}'` : "NULL"}, ${rule.priority}, strftime('%s','now'));`);
+	ctx.store.insertRoutingRule({
+		userId: ctx.store.admin.id,
+		domainId: requireDomain(ctx).id,
+		name: rule.name ?? pattern,
+		pattern,
+		matchField: rule.matchField,
+		matchOperator: rule.matchOperator,
+		action: rule.action,
+		...desired,
+	});
 	console.log(`  ✓ added ${label}`);
 	return 0;
 }
@@ -87,7 +93,7 @@ export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 		console.log(`  → would remove routing ${pattern} → ${action}`);
 		return 0;
 	}
-	ctx.d1(`DELETE FROM routing_rules WHERE domain_id='${sqlEscape(requireDomain(ctx).id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(action)}';`);
+	ctx.store.deleteRoutingRule(requireDomain(ctx).id, pattern, action);
 	console.log(`  ✓ removed routing ${pattern} → ${action}`);
 	return 0;
 }
