@@ -44,6 +44,11 @@
 //   --status              report what exists vs the manifest (no changes)
 //   --cleanup             delete the mailboxes instead of creating them
 //
+// De-provisioning (reverse order; only paths the app supports):
+//   --cleanup            remove the manifest's mailboxes, routing rules and MCP keys
+//   --disable-accounts   also DISABLE its accounts (the app has no user-delete)
+//   --remove-domain      also remove the domain itself (drops its DNS/MX)
+//
 // Runs under tsx (it imports app code via ./joeblew999-lib-app.mjs).
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
@@ -64,6 +69,8 @@ const { values } = parseArgs({
 		"dry-run": { type: "boolean", default: false },
 		status: { type: "boolean", default: false },
 		cleanup: { type: "boolean", default: false },
+		"disable-accounts": { type: "boolean", default: false },
+		"remove-domain": { type: "boolean", default: false },
 		url: { type: "string" },
 		db: { type: "string", default: "mailflare" },
 		local: { type: "boolean", default: false },
@@ -102,6 +109,8 @@ Flags:
   --dry-run             list what would change, create nothing
   --status              report what exists vs the manifest, change nothing
   --cleanup             delete the mailboxes instead of creating them
+  --disable-accounts    with --cleanup, also disable the manifest's accounts
+  --remove-domain       with --cleanup, also remove the domain (drops its DNS/MX)
   --url <base>          instance URL (else MAILFLARE_URL, else derived from Cloudflare)
   --db / --local        target a different D1 database / the local one
   -h, --help            show this help`);
@@ -317,6 +326,40 @@ function removeMcpKey(entry, adminId, dryRun) {
 	return 0;
 }
 
+// The app has no user-delete, so de-provisioning an account means disabling it.
+async function disableAccount(entry, domain, key, base, dryRun) {
+	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
+	const email = `${username}@${domain.hostname}`;
+	const list = await request(base, "/api/v1/accounts", { key });
+	const account = (list.json?.accounts ?? []).find((row) => String(row.email).toLowerCase() === email);
+	if (!account) {
+		console.log(`  · account ${email} — not found, skipping`);
+		return 0;
+	}
+	if (account.isPrimaryAdmin) {
+		console.log(`  ⚠ ${email} is the primary admin — not disabling`);
+		return 0;
+	}
+	if (dryRun) {
+		console.log(`  → would disable account ${email}`);
+		return 0;
+	}
+	const res = await request(base, `/api/v1/accounts/${account.id}`, { method: "PATCH", key, body: { name: account.name ?? username, disabled: true } });
+	console.log(`  ${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status})`} account ${email}`);
+	return res.status === 200 ? 0 : 1;
+}
+
+// Removing the domain (app API) also drops its Email Routing/DNS config.
+async function removeDomain(domain, key, base, dryRun) {
+	if (dryRun) {
+		console.log(`  → would remove domain ${domain.hostname} from Mailflare (drops its DNS/MX)`);
+		return 0;
+	}
+	const res = await request(base, `/api/v1/domains/${domain.id}`, { method: "DELETE", key });
+	console.log(`  ${res.status === 200 ? "✓ removed" : `✗ remove failed (HTTP ${res.status})`} domain ${domain.hostname}`);
+	return res.status === 200 ? 0 : 1;
+}
+
 async function main() {
 	const domainName = domainValue.toLowerCase();
 	try {
@@ -466,6 +509,11 @@ async function main() {
 			if (values.cleanup) {
 				for (const rule of routing) failures += removeRouting(rule, domain, values["dry-run"]);
 				for (const entry of mcpKeys) failures += removeMcpKey(entry, admin.id, values["dry-run"]);
+				if (values["disable-accounts"]) {
+					for (const account of accounts) failures += await disableAccount(account, domain, key, base, values["dry-run"]);
+				}
+				// Last: dropping the domain also removes its mailboxes and routing.
+				if (values["remove-domain"]) failures += await removeDomain(domain, key, base, values["dry-run"]);
 			} else {
 				for (const account of accounts) failures += await ensureAccount(account, domain, key, base, values["dry-run"]);
 				for (const rule of routing) failures += ensureRouting(rule, domain, admin.id, values["dry-run"]);
