@@ -3,22 +3,25 @@
 // One mailbox per role, mirroring the roles an app has. Idempotent: addresses that
 // already exist are left alone. Pass --onboard to add the domain to Mailflare first.
 //
-//   npm run provision:roles -- --domain ubuntusoftware.net --roles office,admin,events
+//   npm run joeblew999:provision:roles -- --domain ubuntusoftware.net --roles office,admin,events
 //     --onboard        add the domain to Mailflare first (this publishes MX)
 //     --replace-mx     when onboarding, take over MX from another provider
 //     --share          create them as shared mailboxes (Team plan)
 //     --dry-run        show what it would do, change nothing
 //     --cleanup        delete exactly the role mailboxes on that domain
+//     --roles-file <p> read the role list from a file (JSON array or one per line)
 //
-// Runs under tsx (it imports app code via ./lib-app.mjs).
+// Runs under tsx (it imports app code via ./joeblew999-lib-app.mjs).
 import { parseArgs } from "node:util";
-import { d1 as libD1, findAdmin, request, resolveInstanceUrl, sqlEscape } from "./lib.mjs";
-import { mintAdminKey } from "./lib-app.mjs";
+import { readFileSync } from "node:fs";
+import { d1 as libD1, findAdmin, request, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib.mjs";
+import { mintAdminKey } from "./joeblew999-lib-app.mjs";
 
 const { values } = parseArgs({
 	options: {
 		domain: { type: "string" },
 		roles: { type: "string", default: "" },
+		"roles-file": { type: "string" },
 		onboard: { type: "boolean", default: false },
 		"replace-mx": { type: "boolean", default: false },
 		share: { type: "boolean", default: false },
@@ -34,12 +37,13 @@ const { values } = parseArgs({
 function usage() {
 	console.log(`provision-roles — create one Mailflare mailbox per role on any domain.
 
-  npm run provision:roles -- --domain <hostname> --roles a,b,c [--onboard] [--share] [--dry-run]
-  npm run provision:roles -- --domain <hostname> --roles a,b,c --cleanup
+  npm run joeblew999:provision:roles -- --domain <hostname> --roles a,b,c [--onboard] [--share] [--dry-run]
+  npm run joeblew999:provision:roles -- --domain <hostname> --roles a,b,c --cleanup
 
 Flags:
   --domain <hostname>   the domain to provision on
   --roles <a,b,c>       role names to create (one mailbox each)
+  --roles-file <path>   read the role names from a file instead (JSON array or one per line)
   --onboard             add the domain to Mailflare first (publishes MX)
   --replace-mx          when onboarding, take MX over from another provider
   --share               create them as shared mailboxes (needs Team)
@@ -80,7 +84,7 @@ async function main() {
 				return 1;
 			}
 			if (values["dry-run"]) {
-				console.log(`  → would onboard ${values.domain}, then create ${roles.map((role) => `${role}@${values.domain}`).join(", ")}`);
+				console.log(`  → would onboard ${values.domain}, then create ${roles.map(({ role }) => `${role}@${values.domain}`).join(", ")}`);
 				return 0;
 			}
 			console.log(`Onboarding ${values.domain} into Mailflare…`);
@@ -111,7 +115,7 @@ async function main() {
 		console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${values.domain}:\n`);
 		let failures = 0;
 
-		for (const role of roles) {
+		for (const { role, displayName, share } of roles) {
 			const address = `${role}@${values.domain}`;
 			const current = existing.get(role);
 
@@ -139,16 +143,16 @@ async function main() {
 				continue;
 			}
 			if (values["dry-run"]) {
-				console.log(`  → would create ${address}${values.share ? " (shared)" : ""}`);
+				console.log(`  → would create ${address}${share ? " (shared)" : ""}`);
 				continue;
 			}
 			const created = await request(base, "/api/v1/mailboxes", {
 				method: "POST",
 				key: fullKey,
-				body: { domainId: domain.id, localPart: role, displayName: role, type: values.share ? "shared" : "personal" },
+				body: { domainId: domain.id, localPart: role, displayName, type: share ? "shared" : "personal" },
 			});
 			if (created.status === 201) {
-				console.log(`  ✓ created ${address}${values.share ? " (shared)" : ""}`);
+				console.log(`  ✓ created ${address}${share ? " (shared)" : ""}`);
 			} else {
 				failures += 1;
 				console.log(`  ✗ failed (HTTP ${created.status}) ${address} — ${created.json?.error ?? ""}`);
@@ -173,9 +177,38 @@ if (!values.domain) {
 	process.exit(1);
 }
 
-const roles = values.roles.split(",").map((role) => role.trim().toLowerCase()).filter(Boolean);
+// Roles come from --roles a,b,c or --roles-file <path>. Each entry is normalised
+// to { role, displayName, share } so both sources behave identically.
+function readRolesFile(path) {
+	const text = readFileSync(path, "utf8");
+	if (path.toLowerCase().endsWith(".json")) {
+		const parsed = JSON.parse(text);
+		if (!Array.isArray(parsed)) throw new Error("roles file must be a JSON array");
+		return parsed.map((entry) => (typeof entry === "string" ? { role: entry } : entry));
+	}
+	return text
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line && !line.startsWith("#"))
+		.map((role) => ({ role }));
+}
+
+function loadRoles() {
+	const entries = values["roles-file"]
+		? readRolesFile(values["roles-file"])
+		: values.roles.split(",").filter(Boolean).map((role) => ({ role }));
+	return entries
+		.map((entry) => {
+			const role = String(entry.role ?? entry.localPart ?? "").trim().toLowerCase();
+			if (!role) return null;
+			return { role, displayName: entry.displayName?.trim() || role, share: typeof entry.share === "boolean" ? entry.share : values.share };
+		})
+		.filter(Boolean);
+}
+
+const roles = loadRoles();
 if (roles.length === 0) {
-	console.error("--roles is required (comma-separated).\n");
+	console.error("No roles given. Pass --roles a,b,c or --roles-file <path>.\n");
 	usage();
 	process.exit(1);
 }

@@ -9,16 +9,16 @@
 //
 // PICK ONE
 //   1) Verify it all works, leave the instance clean:
-//        npm run features:smoke
+//        npm run joeblew999:features:smoke
 //   2) Show the licensed features off (creates + keeps the fixtures, prints URLs):
-//        npm run features:smoke -- --demo
-//        npm run features:smoke -- --demo --plan pro      # showcase Pro instead
-//        npm run features:smoke -- --cleanup              # when you're done
+//        npm run joeblew999:features:smoke -- --demo
+//        npm run joeblew999:features:smoke -- --demo --plan pro      # showcase Pro instead
+//        npm run joeblew999:features:smoke -- --cleanup              # when you're done
 //   3) Look around without changing anything:
-//        npm run features:smoke -- --status    # what fixtures exist right now
-//        npm run features:smoke -- --guide     # feature → URL map
+//        npm run joeblew999:features:smoke -- --status    # what fixtures exist right now
+//        npm run joeblew999:features:smoke -- --guide     # feature → URL map
 //
-//   Run `npm run features:smoke -- --help` for every flag.
+//   Run `npm run joeblew999:features:smoke -- --help` for every flag.
 //
 // WHAT IS PROVEN (and where it shows in the app)
 //   • canManageAccounts    GET /api/v1/accounts flips 403 (community) → 200 (team)
@@ -42,8 +42,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { d1 as libD1, findAdmin, keychain, licenceSql, request, resolveInstanceUrl, run, sqlEscape } from "./lib.mjs";
-import { mintAdminKey } from "./lib-app.mjs";
+import { d1 as libD1, findAdmin, keychain, licenceSql, request, resolveInstanceUrl, run, sqlEscape } from "./joeblew999-lib.mjs";
+import { mintAdminKey } from "./joeblew999-lib-app.mjs";
 
 const BRANDING_KEY = "branding/app-icon";
 // A 1x1 PNG staged as the custom icon. The public icon route serves it only when
@@ -82,7 +82,7 @@ const supportsSharing = planName === "team";
 // --setup/--demo/--keep all mean "create the fixtures and don't clean up".
 const keepArtifacts = values.keep || values.setup || values.demo;
 
-// License SQL is shared via scripts/lib.mjs.
+// License SQL is shared via scripts/joeblew999-lib.mjs.
 const licenceOn = licenceSql.on;
 const LICENCE_OFF = licenceSql.off;
 
@@ -107,7 +107,7 @@ if (values.guide) {
 
 const base = await resolveBaseUrl();
 
-// Shared helpers (scripts/lib.mjs) with this script's database baked in. Kept as
+// Shared helpers (scripts/joeblew999-lib.mjs) with this script's database baked in. Kept as
 // function declarations so the module-level --cleanup/--status paths can call them.
 function d1(sql) {
 	return libD1(sql, { db: values.db, local: values.local });
@@ -143,12 +143,12 @@ function usage() {
 	console.log(`features-smoke — exercise the licensed (Pro/Team) gates on a deployed instance.
 
 Pick one:
-  npm run features:smoke                        verify everything, then clean up (default)
-  npm run features:smoke -- --demo              showcase: create + keep fixtures, print URLs
-  npm run features:smoke -- --demo --plan pro   showcase the Pro plan instead of Team
-  npm run features:smoke -- --cleanup           remove fixtures from a previous --demo/--setup
-  npm run features:smoke -- --status            print which fixtures exist right now
-  npm run features:smoke -- --guide             print the feature → URL map
+  npm run joeblew999:features:smoke                        verify everything, then clean up (default)
+  npm run joeblew999:features:smoke -- --demo              showcase: create + keep fixtures, print URLs
+  npm run joeblew999:features:smoke -- --demo --plan pro   showcase the Pro plan instead of Team
+  npm run joeblew999:features:smoke -- --cleanup           remove fixtures from a previous --demo/--setup
+  npm run joeblew999:features:smoke -- --status            print which fixtures exist right now
+  npm run joeblew999:features:smoke -- --guide             print the feature → URL map
 
 Flags:
   --setup | --keep      create the fixtures and keep them (skip auto-cleanup)
@@ -167,7 +167,7 @@ Flags:
   -h, --help            show this help
 
 Notes:
-  • With npm pass flags after "--", e.g.  npm run features:smoke -- --setup
+  • With npm pass flags after "--", e.g.  npm run joeblew999:features:smoke -- --setup
   • Credentials come from CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID, or the
     macOS keychain (fnox), so usually nothing to configure.`);
 }
@@ -190,7 +190,7 @@ async function printStatus() {
 	console.log(`  branding icon:   ${row.iconKey || "—"}`);
 	console.log(`  forwarding:      ${row.forwarding || "—"}`);
 	console.log(`  license:         ${license ? `${license.plan}/${license.state}` : "—"}`);
-	console.log(present ? "\nFixtures present — remove them with: npm run features:smoke -- --cleanup" : "\nNo fixtures present.");
+	console.log(present ? "\nFixtures present — remove them with: npm run joeblew999:features:smoke -- --cleanup" : "\nNo fixtures present.");
 }
 
 // Remove everything a previous --setup/--keep run left behind, then restore Team.
@@ -380,6 +380,6 @@ try {
 
 const failed = results.filter((r) => !r.ok);
 console.log(guiMap(base, planName));
-if (keepArtifacts) console.log(`\nFixtures kept — inspect the screens above, then remove them with: npm run features:smoke -- --cleanup`);
+if (keepArtifacts) console.log(`\nFixtures kept — inspect the screens above, then remove them with: npm run joeblew999:features:smoke -- --cleanup`);
 console.log(`\n${failed.length === 0 ? "All checks passed" : `${failed.length} check(s) failed`}: ${results.length - failed.length}/${results.length}.`);
 process.exit(failed.length === 0 ? 0 : 1);

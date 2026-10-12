@@ -2,14 +2,14 @@
 // Toggle the self-hosted license plan (the gate `getLicenseEntitlements` reads).
 // The whole plan state lives in the `license_settings` row, so this only touches data.
 //
-//   node scripts/license.mjs on   [--plan team|pro] [--local] [--db mailflare]
-//   node scripts/license.mjs off
-//   node scripts/license.mjs status
+//   node scripts/joeblew999-license.mjs on   [--plan team|pro] [--local] [--db mailflare]
+//   node scripts/joeblew999-license.mjs off
+//   node scripts/joeblew999-license.mjs status
 //
 // Defaults to the remote D1 database. Pass --local for the local dev database.
 // GUI: the plan, seats and activation state are shown at <instance>/admin/licenses.
 import { parseArgs } from "node:util";
-import { d1 as libD1, entitlementsFor, licenceSql } from "./lib.mjs";
+import { d1 as libD1, entitlementsFor, licenceSql } from "./joeblew999-lib.mjs";
 
 const ACTIONS = new Set(["on", "off", "status"]);
 
@@ -25,7 +25,7 @@ const { values, positionals } = parseArgs({
 });
 
 function usage() {
-	console.log(`Usage: node scripts/license.mjs <on|off|status> [options]
+	console.log(`Usage: node scripts/joeblew999-license.mjs <on|off|status> [options]
 
   on       Activate the license (defaults to --plan team)
   off      Revert to the community plan
@@ -58,7 +58,7 @@ if (action === "on" && plan !== "team" && plan !== "pro") {
 
 const location = values.local ? "--local" : "--remote";
 
-// License SQL lives in scripts/lib.mjs (licenceSql) so every script shares one copy.
+// License SQL lives in scripts/joeblew999-lib.mjs (licenceSql) so every script shares one copy.
 
 function runWrangler(sql) {
 	try {

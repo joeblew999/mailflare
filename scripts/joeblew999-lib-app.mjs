@@ -2,7 +2,7 @@
 // Keeping key-minting here means the temp-key format and scopes come straight from
 // the app and cannot drift from what the Worker enforces.
 import { randomBytes } from "node:crypto";
-import { d1, sqlEscape } from "./lib.mjs";
+import { d1, sqlEscape } from "./joeblew999-lib.mjs";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 

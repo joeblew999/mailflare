@@ -1,0 +1,6 @@
+# Roles for a project (one per line; "#" starts a comment).
+# Use with: npm run joeblew999:provision:roles -- --domain <hostname> --roles-file scripts/joeblew999-roles.example.txt
+office
+admin
+events
+support

@@ -3,15 +3,15 @@
 // Sending API back into your own Mailflare inbox, then confirms it arrived and
 // that a push subscription exists. Watch your devices for the notification.
 //
-//   node scripts/push-test.mjs                 # send + verify (uses the primary admin address)
-//   node scripts/push-test.mjs --to a@b.com     # override recipient
-//   node scripts/push-test.mjs --steps          # print the key-rotation runbook
+//   node scripts/joeblew999-push-test.mjs                 # send + verify (uses the primary admin address)
+//   node scripts/joeblew999-push-test.mjs --to a@b.com     # override recipient
+//   node scripts/joeblew999-push-test.mjs --steps          # print the key-rotation runbook
 //
 // Credentials come from the environment first (so `fnox exec -- ...` works),
 // then fall back to the macOS keychain (service "fnox").
 // GUI: turn notifications on at <instance>/settings/inbox (Browser push notifications).
 import { parseArgs } from "node:util";
-import { d1 as libD1, keychain, sleep, workerSecretNames } from "./lib.mjs";
+import { d1 as libD1, keychain, sleep, workerSecretNames } from "./joeblew999-lib.mjs";
 
 const API = "https://api.cloudflare.com/client/v4";
 
@@ -30,7 +30,7 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 
-// Shared helpers (scripts/lib.mjs) with this script's database baked in.
+// Shared helpers (scripts/joeblew999-lib.mjs) with this script's database baked in.
 const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 function printSteps() {
@@ -58,11 +58,11 @@ To rotate and keep a copy in fnox:
   5. In the app: Settings → Inbox → toggle "Browser push notifications" OFF, then ON.
 
   6. Verify
-       node scripts/push-test.mjs`);
+       node scripts/joeblew999-push-test.mjs`);
 }
 
 if (values.help) {
-	console.log("Usage: node scripts/push-test.mjs [--to <addr>] [--from <addr>] [--db mailflare] [--local] [--steps]");
+	console.log("Usage: node scripts/joeblew999-push-test.mjs [--to <addr>] [--from <addr>] [--db mailflare] [--local] [--steps]");
 	process.exit(0);
 }
 if (values.steps) {
@@ -74,7 +74,7 @@ const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_A
 const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
 if (!token || !account) {
 	console.error("Missing CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID.");
-	console.error("Export them, run via `fnox exec -- node scripts/push-test.mjs`, or store them in the keychain (service \"fnox\").");
+	console.error("Export them, run via `fnox exec -- node scripts/joeblew999-push-test.mjs`, or store them in the keychain (service \"fnox\").");
 	process.exit(1);
 }
 
