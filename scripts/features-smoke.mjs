@@ -10,10 +10,10 @@
 // PICK ONE
 //   1) Verify it all works, leave the instance clean:
 //        npm run features:smoke
-//   2) Verify AND leave the fixtures so you can eyeball them in the app:
-//        npm run features:smoke -- --setup
-//        ...visit the URLs it prints at the end...
-//        npm run features:smoke -- --cleanup
+//   2) Show the licensed features off (creates + keeps the fixtures, prints URLs):
+//        npm run features:smoke -- --demo
+//        npm run features:smoke -- --demo --plan pro      # showcase Pro instead
+//        npm run features:smoke -- --cleanup              # when you're done
 //   3) Look around without changing anything:
 //        npm run features:smoke -- --status    # what fixtures exist right now
 //        npm run features:smoke -- --guide     # feature → URL map
@@ -59,6 +59,8 @@ const { values } = parseArgs({
 		local: { type: "boolean", default: false },
 		"no-gate": { type: "boolean", default: false },
 		"forward-to": { type: "string" },
+		plan: { type: "string", default: "team" },
+		demo: { type: "boolean", default: false },
 		keep: { type: "boolean", default: false },
 		setup: { type: "boolean", default: false },
 		cleanup: { type: "boolean", default: false },
@@ -70,12 +72,19 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 const flipGate = !values["no-gate"];
-// --setup (create fixtures, leave them) shares the "don't clean up" path with --keep.
-const keepArtifacts = values.keep || values.setup;
+const planName = (values.plan ?? "team").toLowerCase();
+if (planName !== "team" && planName !== "pro") {
+	console.error(`--plan must be "team" or "pro" (got "${values.plan}")`);
+	process.exit(1);
+}
+// Team unlocks shared mailboxes; Pro caps seats but cannot create shared inboxes.
+const supportsSharing = planName === "team";
+// --setup/--demo/--keep all mean "create the fixtures and don't clean up".
+const keepArtifacts = values.keep || values.setup || values.demo;
 
 // License flips used to prove (and restore) the gates. Declared here so the
 // module-level --cleanup path below can use them.
-const LICENCE_ON = "UPDATE license_settings SET plan='team', state='active', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
+const licenceOn = (plan) => `UPDATE license_settings SET plan='${plan}', state='active', features='[]', updated_at=strftime('%s','now') WHERE id='default';`;
 const LICENCE_OFF = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
 
 if (values.help) {
@@ -83,7 +92,7 @@ if (values.help) {
 	process.exit(0);
 }
 if (values.cleanup) {
-	console.log("Removing fixtures from a previous --setup/--keep run…");
+	console.log("Removing fixtures from a previous --setup/--demo run…");
 	await cleanupAll();
 	console.log("Done — smoke artifacts removed and the license set back to Team.");
 	process.exit(0);
@@ -93,7 +102,7 @@ if (values.status) {
 	process.exit(0);
 }
 if (values.guide) {
-	console.log(guiMap(await resolveBaseUrl()));
+	console.log(guiMap(await resolveBaseUrl(), planName));
 	process.exit(0);
 }
 
@@ -145,9 +154,9 @@ async function resolveBaseUrl() {
 	process.exit(1);
 }
 
-function guiMap(origin) {
+function guiMap(origin, plan) {
 	return `
-Where each check maps in the app (Team is active), at ${origin}:
+Where each check maps in the app (${plan} active), at ${origin}:${plan === "team" ? "" : "  — shared-mailbox screens need Team"}
   • Shared mailboxes ..... ${origin}/mailboxes                "${'smoke-*'}@<domain>" row, "Shared" badge
                            ${origin}/mailboxes/<id>           grant / revoke access
   • Branding ............. ${origin}/branding                 app name + icon
@@ -162,14 +171,17 @@ function usage() {
 	console.log(`features-smoke — exercise the licensed (Pro/Team) gates on a deployed instance.
 
 Pick one:
-  npm run features:smoke                    verify everything, then clean up (default)
-  npm run features:smoke -- --setup         verify AND keep the fixtures to inspect
-  npm run features:smoke -- --cleanup       remove fixtures from a previous --setup
-  npm run features:smoke -- --status        print which fixtures exist right now
-  npm run features:smoke -- --guide         print the feature → URL map
+  npm run features:smoke                        verify everything, then clean up (default)
+  npm run features:smoke -- --demo              showcase: create + keep fixtures, print URLs
+  npm run features:smoke -- --demo --plan pro   showcase the Pro plan instead of Team
+  npm run features:smoke -- --cleanup           remove fixtures from a previous --demo/--setup
+  npm run features:smoke -- --status            print which fixtures exist right now
+  npm run features:smoke -- --guide             print the feature → URL map
 
 Flags:
   --setup | --keep      create the fixtures and keep them (skip auto-cleanup)
+  --demo                alias of --setup, for showing the features off
+  --plan <team|pro>     plan to activate for the checks (default: team)
   --cleanup             remove fixtures created by --setup/--keep
   --status              read-only: list existing fixtures
   --guide               read-only: feature → URL map
@@ -229,7 +241,7 @@ async function cleanupAll() {
 	d1("UPDATE app_settings SET icon_key=NULL WHERE id='default';");
 	run("npx", ["wrangler", "r2", "object", "delete", `${values.bucket}/${BRANDING_KEY}`, "--remote"]);
 	d1("UPDATE users SET forwarding_email=NULL;");
-	d1(LICENCE_ON);
+	d1(licenceOn("team"));
 }
 
 async function api(path, { method = "GET", key, body } = {}) {
@@ -297,7 +309,7 @@ try {
 	record("POST /api/v1/storage (round-trip)", storage.status === 200, `HTTP ${storage.status}`);
 
 	const accountsActive = await api("/api/v1/accounts", { key: fullKey });
-	record("GET /api/v1/accounts (Team)", accountsActive.status === 200, `HTTP ${accountsActive.status} — ${accountsActive.json?.accounts?.length ?? "?"} accounts`);
+	record(`GET /api/v1/accounts (${planName})`, accountsActive.status === 200, `HTTP ${accountsActive.status} — ${accountsActive.json?.accounts?.length ?? "?"} accounts`);
 
 	if (flipGate) {
 		// --- branding: stage a custom icon, then flip the gate -----------------
@@ -329,17 +341,17 @@ try {
 		const iconDefault = await fetchBytes("/api/branding/icon");
 		record("branding icon is the default on Community", sha256(iconDefault) !== sha256(BRANDING_PNG), `${iconDefault.length} bytes`);
 
-		// --- and allow again under Team --------------------------------------
-		d1(LICENCE_ON);
-		record("accounts allowed on Team", (await api("/api/v1/accounts", { key: fullKey })).status === 200);
+		// --- and allow again under the chosen plan ----------------------------
+		d1(licenceOn(planName));
+		record(`accounts allowed (${planName})`, (await api("/api/v1/accounts", { key: fullKey })).status === 200);
 
 		const iconCustom = await fetchBytes("/api/branding/icon");
-		record("branding icon is custom on Team", sha256(iconCustom) === sha256(BRANDING_PNG), `${iconCustom.length} bytes`);
+		record(`branding icon is custom (${planName})`, sha256(iconCustom) === sha256(BRANDING_PNG), `${iconCustom.length} bytes`);
 
-		if (domainId) {
+		if (domainId && supportsSharing) {
 			const localPart = `smoke-${randomBytes(3).toString("hex")}`;
 			const created = await api("/api/v1/mailboxes", { method: "POST", key: fullKey, body: { domainId, localPart, displayName: "Smoke test", type: "shared" } });
-			record("shared mailbox allowed on Team", created.status === 201, `HTTP ${created.status} — ${created.json?.address ?? created.json?.error ?? ""}`);
+			record(`shared mailbox allowed (${planName})`, created.status === 201, `HTTP ${created.status} — ${created.json?.address ?? created.json?.error ?? ""}`);
 			const mailboxId = created.status === 201 ? created.json.id : null;
 			if (mailboxId) {
 				onCleanup(() => api(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE", key: fullKey }));
@@ -359,6 +371,11 @@ try {
 					if (removed.status === 200) d1(`DELETE FROM mailbox_access WHERE id='${esc(grantId)}';`);
 				}
 			}
+		}
+
+		if (domainId && !supportsSharing) {
+			const refused = await api("/api/v1/mailboxes", { method: "POST", key: fullKey, body: { domainId, localPart: `smoke-${randomBytes(3).toString("hex")}`, displayName: "Smoke test", type: "shared" } });
+			record("shared mailbox refused on Pro (Team-only)", refused.status === 403, `HTTP ${refused.status}`);
 		}
 	}
 
@@ -404,13 +421,13 @@ try {
 				// best effort
 			}
 		}
-		d1(LICENCE_ON);
+		d1(licenceOn("team"));
 		console.log(`\nCleaned up temporary key ${keyId}; license restored to Team.`);
 	}
 }
 
 const failed = results.filter((r) => !r.ok);
-console.log(guiMap(base));
+console.log(guiMap(base, planName));
 if (keepArtifacts) console.log(`\nFixtures kept — inspect the screens above, then remove them with: npm run features:smoke -- --cleanup`);
 console.log(`\n${failed.length === 0 ? "All checks passed" : `${failed.length} check(s) failed`}: ${results.length - failed.length}/${results.length}.`);
 process.exit(failed.length === 0 ? 0 : 1);
