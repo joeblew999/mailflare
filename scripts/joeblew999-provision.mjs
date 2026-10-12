@@ -210,10 +210,24 @@ async function ensureAccount(entry, domain, key, base, dryRun) {
 	}
 	const email = `${username}@${domain.hostname}`;
 	const list = await request(base, "/api/v1/accounts", { key });
-	const exists = (list.json?.accounts ?? []).some((account) => String(account.email).toLowerCase() === email);
-	if (exists) {
-		console.log(`  · account ${email} — already exists`);
-		return 0;
+	const existing = (list.json?.accounts ?? []).find((account) => String(account.email).toLowerCase() === email);
+	if (existing) {
+		if (existing.disabled) {
+			if (dryRun) {
+				console.log(`  → would re-enable account ${email}`);
+			} else {
+				const res = await request(base, `/api/v1/accounts/${existing.id}`, {
+					method: "PATCH",
+					key,
+					body: { name: existing.name ?? username, role: existing.role ?? "user", disabled: false, canManageMailboxes: Boolean(existing.canManageMailboxes) },
+				});
+				console.log(`  ${res.status === 200 ? "✓ re-enabled" : `✗ re-enable failed (HTTP ${res.status})`} account ${email}`);
+				if (res.status !== 200) return 1;
+			}
+		} else {
+			console.log(`  · account ${email} — already exists`);
+		}
+		return await ensureAccountMailbox(existing, domain, key, base, username, email, dryRun);
 	}
 
 	const fromEnv = entry.passwordEnv ? process.env[entry.passwordEnv] : null;
@@ -326,6 +340,32 @@ function removeMcpKey(entry, adminId, dryRun) {
 	return 0;
 }
 
+// An account's own mailbox is cascaded away when its domain is removed, and the
+// account itself cannot be recreated (no user-delete), so rebuild the mailbox owned
+// by that account (POST /api/v1/mailboxes accepts ownerUserId).
+async function ensureAccountMailbox(account, domain, key, base, username, email, dryRun) {
+	const boxes = await request(base, "/api/v1/mailboxes", { key });
+	const exists = (boxes.json?.mailboxes ?? []).some(
+		(row) => String(row.hostname).toLowerCase() === domain.hostname.toLowerCase() && String(row.localPart).toLowerCase() === username,
+	);
+	if (exists) return 0;
+	if (dryRun) {
+		console.log(`  → would create mailbox ${email}`);
+		return 0;
+	}
+	const created = await request(base, "/api/v1/mailboxes", {
+		method: "POST",
+		key,
+		body: { domainId: domain.id, localPart: username, displayName: account.name ?? username, type: "personal", ownerUserId: account.id },
+	});
+	if (created.status === 201) {
+		console.log(`  ✓ created mailbox ${email}`);
+		return 0;
+	}
+	console.log(`  ✗ mailbox ${email} failed (HTTP ${created.status}) — ${created.json?.error ?? ""}`);
+	return 1;
+}
+
 // The app has no user-delete, so de-provisioning an account means disabling it.
 async function disableAccount(entry, domain, key, base, dryRun) {
 	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
@@ -344,7 +384,12 @@ async function disableAccount(entry, domain, key, base, dryRun) {
 		console.log(`  → would disable account ${email}`);
 		return 0;
 	}
-	const res = await request(base, `/api/v1/accounts/${account.id}`, { method: "PATCH", key, body: { name: account.name ?? username, disabled: true } });
+	const res = await request(base, `/api/v1/accounts/${account.id}`, {
+		method: "PATCH",
+		key,
+		// updateManagedAccountSchema requires name, role, disabled and canManageMailboxes.
+		body: { name: account.name ?? username, role: account.role ?? "user", disabled: true, canManageMailboxes: Boolean(account.canManageMailboxes) },
+	});
 	console.log(`  ${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status})`} account ${email}`);
 	return res.status === 200 ? 0 : 1;
 }
@@ -366,6 +411,19 @@ async function main() {
 		return await withAdminKey({ db: values.db, local: values.local, url: values.url, name: "provision" }, async ({ base, key, admin }) => {
 			let domains = await request(base, "/api/v1/domains", { key: key });
 			let domain = findDomain(domains.json?.domains, domainName);
+
+			// Teardown must be re-runnable: if the domain is already gone there is nothing
+			// domain-scoped left (mailboxes/routing cascade with it), but the keys and
+			// accounts still need cleaning up.
+			if (values.cleanup && !domain) {
+				console.log(`${domainValue} is not in Mailflare — finishing account/key teardown only.`);
+				let failures = 0;
+				for (const entry of project?.mcpKeys ?? []) failures += removeMcpKey(entry, admin.id, values["dry-run"]);
+				if (values["disable-accounts"]) {
+					for (const account of project?.accounts ?? []) failures += await disableAccount(account, { hostname: domainValue }, key, base, values["dry-run"]);
+				}
+				return failures === 0 ? 0 : 1;
+			}
 
 			// --status: report what the manifest wants vs what exists, change nothing.
 			if (values.status) {
