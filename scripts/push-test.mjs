@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Verify Web Push end to end: sends a test email through the Cloudflare Email
 // Sending API back into your own Mailflare inbox, then confirms it arrived and
-// that a push subscription exists. Watch the Mac for the notification.
+// that a push subscription exists. Watch your devices for the notification.
 //
 //   node scripts/push-test.mjs                 # send + verify (uses the primary admin address)
 //   node scripts/push-test.mjs --to a@b.com     # override recipient
@@ -140,8 +140,8 @@ const response = await fetch(`${API}/accounts/${account}/email/sending/send`, {
 		from: sender,
 		to: recipient,
 		subject,
-		text: "If macOS shows a notification, Web Push is working.",
-		html: "<p>If macOS shows a notification, <strong>Web Push</strong> is working.</p>",
+		text: "If your device shows a notification, Web Push is working.",
+		html: "<p>If your device shows a notification, <strong>Web Push</strong> is working.</p>",
 	}),
 });
 const payload = await response.json();
@@ -162,7 +162,7 @@ while (Date.now() < deadline) {
 
 if (arrived) {
 	console.log(`✓ Arrived in the inbox (status: ${arrived.status}) after poll`);
-	console.log("\nNow check the Mac — a notification should have popped. If not, re-enable the toggle and retry.");
+	console.log("\nNow check your devices — a notification should have popped. If not, re-enable the toggle and retry.");
 } else {
 	console.log(`✗ Not seen in the inbox within ${values.timeout}s. Check Email Routing/MX and the inbound queue.`);
 	process.exit(1);
