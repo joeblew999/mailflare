@@ -1,15 +1,31 @@
 #!/usr/bin/env node
-// Provision role mailboxes for a project (e.g. the remy-sport office) on any domain.
-// One mailbox per role, mirroring the roles an app has. Idempotent: addresses that
-// already exist are left alone. Pass --onboard to add the domain to Mailflare first.
+// Provision a domain's mailboxes from a per-project manifest (or an ad-hoc role
+// list). Idempotent: addresses that already exist are left alone. `--onboard` adds
+// the domain to Mailflare first (which publishes MX).
 //
-//   npm run joeblew999:provision:roles -- --domain ubuntusoftware.net --roles office,admin,events
-//     --onboard        add the domain to Mailflare first (this publishes MX)
-//     --replace-mx     when onboarding, take over MX from another provider
-//     --share          create them as shared mailboxes (Team plan)
-//     --dry-run        show what it would do, change nothing
-//     --cleanup        delete exactly the role mailboxes on that domain
-//     --roles-file <p> read the role list from a file (JSON array or one per line)
+//   npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
+//   npm run joeblew999:provision -- --domain ubuntusoftware.net --roles office,admin
+//
+// Project file (JSON):
+//   {
+//     "domain": "ubuntusoftware.net",
+//     "onboard": { "replaceMxRecords": true },
+//     "mailboxes": [
+//       { "role": "office",  "displayName": "Office" },
+//       { "role": "support", "shared": true }
+//     ]
+//   }
+//
+// Flags:
+//   --project <path>      apply a project manifest (domain + mailboxes + onboard)
+//   --domain <hostname>   domain to provision on (overrides the manifest)
+//   --roles <a,b,c>       ad-hoc role names (alternative to a manifest)
+//   --roles-file <path>   read roles from a file (JSON array or one per line)
+//   --onboard             add the domain to Mailflare first (publishes MX)
+//   --replace-mx          when onboarding, take MX over from another provider
+//   --share               create the mailboxes as shared (Team plan)
+//   --dry-run             show what it would do, change nothing
+//   --cleanup             delete the mailboxes instead of creating them
 //
 // Runs under tsx (it imports app code via ./joeblew999-lib-app.mjs).
 import { parseArgs } from "node:util";
@@ -20,6 +36,7 @@ import { withAdminKey } from "./joeblew999-lib-app.mjs";
 const { values } = parseArgs({
 	options: {
 		domain: { type: "string" },
+		project: { type: "string" },
 		roles: { type: "string", default: "" },
 		"roles-file": { type: "string" },
 		onboard: { type: "boolean", default: false },
@@ -35,20 +52,27 @@ const { values } = parseArgs({
 });
 
 function usage() {
-	console.log(`provision-roles — create one Mailflare mailbox per role on any domain.
+	console.log(`provision — stand up a domain's mailboxes from a project manifest.
 
-  npm run joeblew999:provision:roles -- --domain <hostname> --roles a,b,c [--onboard] [--share] [--dry-run]
-  npm run joeblew999:provision:roles -- --domain <hostname> --roles a,b,c --cleanup
+  npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
+  npm run joeblew999:provision -- --domain <hostname> --roles a,b,c [--onboard] [--share]
+  npm run joeblew999:provision -- --domain <hostname> --roles a,b,c --cleanup
+
+Project file (JSON):
+  { "domain": "...", "onboard": { "replaceMxRecords": true },
+    "mailboxes": [ { "role": "office", "displayName": "Office" },
+                   { "role": "support", "shared": true } ] }
 
 Flags:
-  --domain <hostname>   the domain to provision on
-  --roles <a,b,c>       role names to create (one mailbox each)
-  --roles-file <path>   read the role names from a file instead (JSON array or one per line)
+  --project <path>      apply a project manifest (domain + mailboxes + onboard)
+  --domain <hostname>   domain to provision on (overrides the manifest)
+  --roles <a,b,c>       ad-hoc role names (alternative to a manifest)
+  --roles-file <path>   read role names from a file (JSON array or one per line)
   --onboard             add the domain to Mailflare first (publishes MX)
   --replace-mx          when onboarding, take MX over from another provider
-  --share               create them as shared mailboxes (needs Team)
+  --share               create the mailboxes as shared (needs Team)
   --dry-run             list what would change, create nothing
-  --cleanup             delete the role mailboxes instead of creating them
+  --cleanup             delete the mailboxes instead of creating them
   --url <base>          instance URL (else MAILFLARE_URL, else derived from Cloudflare)
   --db / --local        target a different D1 database / the local one
   -h, --help            show this help`);
@@ -56,8 +80,25 @@ Flags:
 
 const findDomain = (list, name) => (list ?? []).find((entry) => String(entry.hostname).toLowerCase() === name);
 
+// A project manifest carries the domain plus what to create on it.
+let project = null;
+if (values.project) {
+	try {
+		project = JSON.parse(readFileSync(values.project, "utf8"));
+		if (!project || typeof project !== "object" || Array.isArray(project)) throw new Error("must be a JSON object");
+	} catch (error) {
+		console.error(`Could not read project file ${values.project}: ${error.message}`);
+		process.exit(1);
+	}
+}
+
+// Effective values: an explicit flag wins over the manifest.
+const domainValue = (values.domain ?? project?.domain ?? "").trim();
+const onboardValue = values.onboard || Boolean(project?.onboard);
+const replaceMxValue = values["replace-mx"] || Boolean(project?.onboard?.replaceMxRecords);
+
 async function main() {
-	const domainName = values.domain.toLowerCase();
+	const domainName = domainValue.toLowerCase();
 	try {
 		return await withAdminKey({ db: values.db, local: values.local, url: values.url, name: "provision" }, async ({ base, key }) => {
 			let domains = await request(base, "/api/v1/domains", { key: key });
@@ -65,29 +106,29 @@ async function main() {
 
 			// Add the domain to Mailflare first when asked (publishes MX).
 			if (!domain) {
-				if (!values.onboard) {
-					console.error(`"${values.domain}" is not onboarded in Mailflare.`);
+				if (!onboardValue) {
+					console.error(`"${domainValue}" is not onboarded in Mailflare.`);
 					console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
 					return 1;
 				}
 				if (values["dry-run"]) {
-					console.log(`  → would onboard ${values.domain}, then create ${roles.map(({ role }) => `${role}@${values.domain}`).join(", ")}`);
+					console.log(`  → would onboard ${domainValue}, then create ${roles.map(({ role }) => `${role}@${domainValue}`).join(", ")}`);
 					return 0;
 				}
-				console.log(`Onboarding ${values.domain} into Mailflare…`);
+				console.log(`Onboarding ${domainValue} into Mailflare…`);
 				const added = await request(base, "/api/v1/domains", {
 					method: "POST",
 					key: key,
-					body: { hostname: values.domain, enableRouting: true, replaceMxRecords: values["replace-mx"] },
+					body: { hostname: domainValue, enableRouting: true, replaceMxRecords: replaceMxValue },
 				});
 				if (added.status !== 200 && added.status !== 201) {
-					console.error(`Could not onboard ${values.domain}: HTTP ${added.status} ${added.json?.error ?? ""}`);
+					console.error(`Could not onboard ${domainValue}: HTTP ${added.status} ${added.json?.error ?? ""}`);
 					return 1;
 				}
 				domains = await request(base, "/api/v1/domains", { key: key });
 				domain = findDomain(domains.json?.domains, domainName);
 				if (!domain) {
-					console.error(`Onboarded ${values.domain} but it is not listed afterwards.`);
+					console.error(`Onboarded ${domainValue} but it is not listed afterwards.`);
 					return 1;
 				}
 			}
@@ -99,11 +140,11 @@ async function main() {
 					.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
 			);
 
-			console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${values.domain}:\n`);
+			console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${domainValue}:\n`);
 			let failures = 0;
 
 			for (const { role, displayName, share } of roles) {
-				const address = `${role}@${values.domain}`;
+				const address = `${role}@${domainValue}`;
 				const current = existing.get(role);
 
 				if (values.cleanup) {
@@ -159,8 +200,8 @@ if (values.help) {
 	usage();
 	process.exit(0);
 }
-if (!values.domain) {
-	console.error("--domain is required.\n");
+if (!domainValue) {
+	console.error("No domain. Pass --project <file> or --domain <hostname>.\n");
 	usage();
 	process.exit(1);
 }
@@ -182,21 +223,25 @@ function readRolesFile(path) {
 }
 
 function loadRoles() {
-	const entries = values["roles-file"]
-		? readRolesFile(values["roles-file"])
-		: values.roles.split(",").filter(Boolean).map((role) => ({ role }));
+	// Precedence: project manifest → roles file → ad-hoc --roles.
+	const entries = project?.mailboxes?.length
+		? project.mailboxes
+		: values["roles-file"]
+			? readRolesFile(values["roles-file"])
+			: values.roles.split(",").filter(Boolean).map((role) => ({ role }));
 	return entries
 		.map((entry) => {
 			const role = String(entry.role ?? entry.localPart ?? "").trim().toLowerCase();
 			if (!role) return null;
-			return { role, displayName: entry.displayName?.trim() || role, share: typeof entry.share === "boolean" ? entry.share : values.share };
+			const share = typeof entry.share === "boolean" ? entry.share : typeof entry.shared === "boolean" ? entry.shared : values.share;
+			return { role, displayName: entry.displayName?.trim() || role, share };
 		})
 		.filter(Boolean);
 }
 
 const roles = loadRoles();
 if (roles.length === 0) {
-	console.error("No roles given. Pass --roles a,b,c or --roles-file <path>.\n");
+	console.error("No mailboxes to provision. Use --project <file>, --roles a,b,c, or --roles-file <path>.\n");
 	usage();
 	process.exit(1);
 }

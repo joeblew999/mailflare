@@ -1,6 +1,0 @@
-[
-  { "role": "office", "displayName": "Office" },
-  { "role": "admin", "displayName": "Admin" },
-  { "role": "events", "displayName": "Events", "share": true },
-  { "role": "support", "displayName": "Support", "share": true }
-]
