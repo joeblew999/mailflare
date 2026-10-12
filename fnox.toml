@@ -1,0 +1,20 @@
+# Project-scoped fnox configuration for Mailflare.
+#
+# A dedicated keychain service ("mailflare") keeps these secret names from
+# colliding with other projects that share ~/.config/fnox/config.toml
+# (whose provider uses service = "fnox"). The provider name is distinct too,
+# so it never clobbers the global "keychain" provider.
+#
+# Store/read from this directory:
+#   security add-generic-password -U -s mailflare -a VAPID_PUBLIC_KEY -w "<value>"
+#   fnox get VAPID_PUBLIC_KEY
+#   fnox exec -- node scripts/<...>.mjs
+
+[providers.mailflare_keychain]
+type = "keychain"
+service = "mailflare"
+
+[secrets]
+VAPID_PUBLIC_KEY = { provider = "mailflare_keychain", value = "VAPID_PUBLIC_KEY" }
+VAPID_PRIVATE_KEY = { provider = "mailflare_keychain", value = "VAPID_PRIVATE_KEY" }
+VAPID_SUBJECT = { provider = "mailflare_keychain", value = "VAPID_SUBJECT" }
