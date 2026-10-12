@@ -14,8 +14,8 @@
 // Runs under tsx (it imports app code via ./joeblew999-lib-app.mjs).
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
-import { d1 as libD1, findAdmin, request, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib.mjs";
-import { mintAdminKey } from "./joeblew999-lib-app.mjs";
+import { request } from "./joeblew999-lib.mjs";
+import { withAdminKey } from "./joeblew999-lib-app.mjs";
 
 const { values } = parseArgs({
 	options: {
@@ -55,115 +55,103 @@ Flags:
 }
 
 const findDomain = (list, name) => (list ?? []).find((entry) => String(entry.hostname).toLowerCase() === name);
-const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 async function main() {
-	const base = await resolveInstanceUrl({ url: values.url });
-	if (!base) {
-		console.error("Could not determine the instance URL. Pass --url or set MAILFLARE_URL.");
-		return 1;
-	}
-
-	const admin = findAdmin({ db: values.db, local: values.local });
-	if (!admin) {
-		console.error("No admin user found — is the instance set up?");
-		return 1;
-	}
-
 	const domainName = values.domain.toLowerCase();
-	const { fullKey, keyId } = mintAdminKey({ db: values.db, local: values.local, adminId: admin.id, name: "provision" });
 	try {
-		let domains = await request(base, "/api/v1/domains", { key: fullKey });
-		let domain = findDomain(domains.json?.domains, domainName);
+		return await withAdminKey({ db: values.db, local: values.local, url: values.url, name: "provision" }, async ({ base, key }) => {
+			let domains = await request(base, "/api/v1/domains", { key: key });
+			let domain = findDomain(domains.json?.domains, domainName);
 
-		// Add the domain to Mailflare first when asked (publishes MX).
-		if (!domain) {
-			if (!values.onboard) {
-				console.error(`"${values.domain}" is not onboarded in Mailflare.`);
-				console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
-				return 1;
-			}
-			if (values["dry-run"]) {
-				console.log(`  → would onboard ${values.domain}, then create ${roles.map(({ role }) => `${role}@${values.domain}`).join(", ")}`);
-				return 0;
-			}
-			console.log(`Onboarding ${values.domain} into Mailflare…`);
-			const added = await request(base, "/api/v1/domains", {
-				method: "POST",
-				key: fullKey,
-				body: { hostname: values.domain, enableRouting: true, replaceMxRecords: values["replace-mx"] },
-			});
-			if (added.status !== 200 && added.status !== 201) {
-				console.error(`Could not onboard ${values.domain}: HTTP ${added.status} ${added.json?.error ?? ""}`);
-				return 1;
-			}
-			domains = await request(base, "/api/v1/domains", { key: fullKey });
-			domain = findDomain(domains.json?.domains, domainName);
+			// Add the domain to Mailflare first when asked (publishes MX).
 			if (!domain) {
-				console.error(`Onboarded ${values.domain} but it is not listed afterwards.`);
-				return 1;
+				if (!values.onboard) {
+					console.error(`"${values.domain}" is not onboarded in Mailflare.`);
+					console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
+					return 1;
+				}
+				if (values["dry-run"]) {
+					console.log(`  → would onboard ${values.domain}, then create ${roles.map(({ role }) => `${role}@${values.domain}`).join(", ")}`);
+					return 0;
+				}
+				console.log(`Onboarding ${values.domain} into Mailflare…`);
+				const added = await request(base, "/api/v1/domains", {
+					method: "POST",
+					key: key,
+					body: { hostname: values.domain, enableRouting: true, replaceMxRecords: values["replace-mx"] },
+				});
+				if (added.status !== 200 && added.status !== 201) {
+					console.error(`Could not onboard ${values.domain}: HTTP ${added.status} ${added.json?.error ?? ""}`);
+					return 1;
+				}
+				domains = await request(base, "/api/v1/domains", { key: key });
+				domain = findDomain(domains.json?.domains, domainName);
+				if (!domain) {
+					console.error(`Onboarded ${values.domain} but it is not listed afterwards.`);
+					return 1;
+				}
 			}
-		}
 
-		const boxes = await request(base, "/api/v1/mailboxes", { key: fullKey });
-		const existing = new Map(
-			(boxes.json?.mailboxes ?? [])
-				.filter((entry) => String(entry.hostname).toLowerCase() === domainName)
-				.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
-		);
+			const boxes = await request(base, "/api/v1/mailboxes", { key: key });
+			const existing = new Map(
+				(boxes.json?.mailboxes ?? [])
+					.filter((entry) => String(entry.hostname).toLowerCase() === domainName)
+					.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
+			);
 
-		console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${values.domain}:\n`);
-		let failures = 0;
+			console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${values.domain}:\n`);
+			let failures = 0;
 
-		for (const { role, displayName, share } of roles) {
-			const address = `${role}@${values.domain}`;
-			const current = existing.get(role);
+			for (const { role, displayName, share } of roles) {
+				const address = `${role}@${values.domain}`;
+				const current = existing.get(role);
 
-			if (values.cleanup) {
-				if (!current) {
-					console.log(`  · ${address} — not present, skipping`);
+				if (values.cleanup) {
+					if (!current) {
+						console.log(`  · ${address} — not present, skipping`);
+						continue;
+					}
+					if (values["dry-run"]) {
+						console.log(`  → would delete ${address}`);
+						continue;
+					}
+					const removed = await request(base, `/api/v1/mailboxes/${current.id}`, { method: "DELETE", key: key });
+					if (removed.status === 200) {
+						console.log(`  ✓ deleted ${address}`);
+					} else {
+						failures += 1;
+						console.log(`  ✗ delete failed (HTTP ${removed.status}) ${address}`);
+					}
+					continue;
+				}
+
+				if (current) {
+					console.log(`  · ${address} — already exists, skipping`);
 					continue;
 				}
 				if (values["dry-run"]) {
-					console.log(`  → would delete ${address}`);
+					console.log(`  → would create ${address}${share ? " (shared)" : ""}`);
 					continue;
 				}
-				const removed = await request(base, `/api/v1/mailboxes/${current.id}`, { method: "DELETE", key: fullKey });
-				if (removed.status === 200) {
-					console.log(`  ✓ deleted ${address}`);
+				const created = await request(base, "/api/v1/mailboxes", {
+					method: "POST",
+					key: key,
+					body: { domainId: domain.id, localPart: role, displayName, type: share ? "shared" : "personal" },
+				});
+				if (created.status === 201) {
+					console.log(`  ✓ created ${address}${share ? " (shared)" : ""}`);
 				} else {
 					failures += 1;
-					console.log(`  ✗ delete failed (HTTP ${removed.status}) ${address}`);
+					console.log(`  ✗ failed (HTTP ${created.status}) ${address} — ${created.json?.error ?? ""}`);
 				}
-				continue;
 			}
 
-			if (current) {
-				console.log(`  · ${address} — already exists, skipping`);
-				continue;
-			}
-			if (values["dry-run"]) {
-				console.log(`  → would create ${address}${share ? " (shared)" : ""}`);
-				continue;
-			}
-			const created = await request(base, "/api/v1/mailboxes", {
-				method: "POST",
-				key: fullKey,
-				body: { domainId: domain.id, localPart: role, displayName, type: share ? "shared" : "personal" },
-			});
-			if (created.status === 201) {
-				console.log(`  ✓ created ${address}${share ? " (shared)" : ""}`);
-			} else {
-				failures += 1;
-				console.log(`  ✗ failed (HTTP ${created.status}) ${address} — ${created.json?.error ?? ""}`);
-			}
-		}
-
-		if (!values["dry-run"]) console.log(`\nMailboxes: ${base}/mailboxes`);
-		return failures === 0 ? 0 : 1;
-	} finally {
-		// Always remove the temporary key, even when we return early.
-		d1(`DELETE FROM api_keys WHERE id='${sqlEscape(keyId)}';`);
+			if (!values["dry-run"]) console.log(`\nMailboxes: ${base}/mailboxes`);
+			return failures === 0 ? 0 : 1;
+		});
+	} catch (error) {
+		console.error(error instanceof Error ? error.message : String(error));
+		return 1;
 	}
 }
 
