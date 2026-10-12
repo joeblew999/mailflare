@@ -17,6 +17,7 @@
 		"push:keys": "node scripts/generate-vapid-keys.mjs",
     "push:test": "node scripts/push-test.mjs",
     "features:smoke": "tsx scripts/features-smoke.mjs",
+    "provision:roles": "tsx scripts/provision-roles.mjs",
     "license:on": "node scripts/license.mjs on",
     "license:off": "node scripts/license.mjs off",
     "license:status": "node scripts/license.mjs status",

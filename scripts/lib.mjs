@@ -44,6 +44,24 @@ export function sqlEscape(value) {
 	return String(value).replace(/'/g, "''");
 }
 
+// Call the app's HTTP API with a bearer key. Returns the status plus parsed JSON
+// (json is null when the body is not JSON, e.g. the branding icon bytes).
+export async function request(base, path, { method = "GET", key, body } = {}) {
+	const response = await fetch(`${base}${path}`, {
+		method,
+		headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+		body: body ? JSON.stringify(body) : undefined,
+	});
+	const text = await response.text();
+	let json = null;
+	try {
+		json = JSON.parse(text);
+	} catch {
+		// not JSON
+	}
+	return { status: response.status, text, json };
+}
+
 // The whole plan state lives in one license_settings row; these are the writes the
 // app's getLicenseEntitlements reads.
 export const licenceSql = {

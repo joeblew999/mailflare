@@ -42,9 +42,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { d1 as libD1, findAdmin, keychain, licenceSql, resolveInstanceUrl, run, sqlEscape } from "./lib.mjs";
-import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
-import { generateApiKey } from "@/lib/api-keys";
+import { d1 as libD1, findAdmin, keychain, licenceSql, request, resolveInstanceUrl, run, sqlEscape } from "./lib.mjs";
+import { mintAdminKey } from "./lib-app.mjs";
 
 const BRANDING_KEY = "branding/app-icon";
 // A 1x1 PNG staged as the custom icon. The public icon route serves it only when
@@ -217,21 +216,8 @@ async function cleanupAll() {
 	d1(licenceOn("team"));
 }
 
-async function api(path, { method = "GET", key, body } = {}) {
-	const response = await fetch(`${base}${path}`, {
-		method,
-		headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
-		body: body ? JSON.stringify(body) : undefined,
-	});
-	const text = await response.text();
-	let json = null;
-	try {
-		json = JSON.parse(text);
-	} catch {
-		// Not JSON (e.g. the icon endpoint returns image bytes).
-	}
-	return { status: response.status, text, json };
-}
+// Thin binding to the shared request helper with this script's base URL baked in.
+const api = (path, options) => request(base, path, options);
 
 // Fetch a URL as raw bytes — the branding icon check compares exact content.
 async function fetchBytes(path) {
@@ -253,13 +239,8 @@ if (!admin) {
 }
 console.log(`Instance: ${base}\nAdmin:    ${admin.email}\n`);
 
-// Mint a short-lived admin key using the app's own key format and admin scopes,
-// so it cannot drift from what the Worker enforces.
-const { fullKey, prefix, hash } = generateApiKey();
-const keyId = `key_smoke_${randomBytes(6).toString("hex")}`;
-const scopes = JSON.stringify(ADMIN_API_KEY_SCOPES);
-d1(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mailbox_scope_enabled, created_at)
-    VALUES ('${esc(keyId)}', 'legacy', '${esc(admin.id)}', 'features-smoke', '${esc(prefix)}', '${esc(hash)}', '${esc(scopes)}', 0, strftime('%s','now'));`);
+// Mint a short-lived admin key via the shared helper (app key format + scopes).
+const { fullKey, keyId, prefix } = mintAdminKey({ db: values.db, local: values.local, adminId: admin.id, name: "features-smoke" });
 console.log(`Minted temporary key ${keyId} (prefix ${prefix})\n`);
 
 // --- cleanup stack (runs in finally, LIFO) ----------------------------------
