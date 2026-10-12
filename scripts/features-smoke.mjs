@@ -11,6 +11,7 @@
 //   node scripts/features-smoke.mjs --forward-to you@gmail.com
 //   node scripts/features-smoke.mjs --setup         # create the fixtures and keep them
 //   node scripts/features-smoke.mjs --cleanup       # remove fixtures from a prior --setup
+//   node scripts/features-smoke.mjs --status        # report which fixtures exist right now
 //   node scripts/features-smoke.mjs --no-gate        # read-only API checks only
 //
 // What is proven where:
@@ -56,6 +57,7 @@ const { values } = parseArgs({
 		keep: { type: "boolean", default: false },
 		setup: { type: "boolean", default: false },
 		cleanup: { type: "boolean", default: false },
+		status: { type: "boolean", default: false },
 		help: { type: "boolean", short: "h", default: false },
 	},
 });
@@ -71,13 +73,17 @@ const LICENCE_ON = "UPDATE license_settings SET plan='team', state='active', fea
 const LICENCE_OFF = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
 
 if (values.help) {
-	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>] [--setup|--keep] [--cleanup]");
+	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>] [--setup|--keep] [--cleanup] [--status]");
 	process.exit(0);
 }
 if (values.cleanup) {
 	console.log("Removing fixtures from a previous --setup/--keep run…");
 	await cleanupAll();
 	console.log("Done — smoke artifacts removed and the license set back to Team.");
+	process.exit(0);
+}
+if (values.status) {
+	await printStatus();
 	process.exit(0);
 }
 
@@ -140,6 +146,27 @@ Where to see each feature (Team is active), at ${origin}:
   • Push subscriptions ... ${origin}/settings/inbox
 Next: inspect the screens above, then tear the fixtures down with
   npm run features:smoke -- --cleanup`;
+
+// Report which fixtures a previous --setup/--keep left behind (read-only).
+async function printStatus() {
+	const [row] = d1(`SELECT
+		(SELECT COUNT(*) FROM mailboxes WHERE local_part LIKE 'smoke-%') AS smokeMailboxes,
+		(SELECT COUNT(*) FROM mailbox_access WHERE id LIKE 'mac_smoke_%') AS grants,
+		(SELECT COUNT(*) FROM api_keys WHERE name='features-smoke') AS tempKeys,
+		(SELECT COALESCE(icon_key,'') FROM app_settings WHERE id='default') AS iconKey,
+		(SELECT COALESCE(forwarding_email,'') FROM users WHERE role='admin' LIMIT 1) AS forwarding;`);
+	const [license] = d1("SELECT plan, state FROM license_settings WHERE id='default';");
+	const present = row.smokeMailboxes > 0 || row.grants > 0 || row.tempKeys > 0 || !!row.iconKey || !!row.forwarding;
+
+	console.log(`Fixture status (${values.db} ${location}):`);
+	console.log(`  smoke mailboxes: ${row.smokeMailboxes}`);
+	console.log(`  access grants:   ${row.grants}`);
+	console.log(`  temp API keys:   ${row.tempKeys}`);
+	console.log(`  branding icon:   ${row.iconKey || "—"}`);
+	console.log(`  forwarding:      ${row.forwarding || "—"}`);
+	console.log(`  license:         ${license ? `${license.plan}/${license.state}` : "—"}`);
+	console.log(present ? "\nFixtures present — remove them with: npm run features:smoke -- --cleanup" : "\nNo fixtures present.");
+}
 
 // Remove everything a previous --setup/--keep run left behind, then restore Team.
 async function cleanupAll() {
