@@ -1,49 +1,73 @@
 #!/usr/bin/env node
 // Exercise the licensed (Pro/Team) capability gates against a deployed instance.
 //
-// It mints a temporary admin API key directly in D1, drives the public /api/v1
-// surface with it, flips the license plan to prove the gates actually block
-// things, then restores everything (key, created mailbox, plan).
+// Mints a temporary admin API key directly in D1, drives the public /api/v1
+// surface, proves the gates actually block, exercises branding through the public
+// icon endpoint, round-trips a shared-mailbox access grant, and (optionally) sends
+// a forwarding test. Everything it creates is cleaned up and the plan restored.
 //
-//   node scripts/features-smoke.mjs [--url https://mailflare.example.workers.dev]
-//                                   [--db mailflare] [--local] [--no-gate]
+//   node scripts/features-smoke.mjs
+//   node scripts/features-smoke.mjs --url https://mailflare.example.workers.dev
+//   node scripts/features-smoke.mjs --forward-to you@gmail.com
+//   node scripts/features-smoke.mjs --no-gate        # read-only API checks only
 //
-// Notes:
-//  - "accounts" (canManageAccounts) and "shared mailboxes" (canShareMailboxes,
-//    Team-only) are proven by the 403/200 flip.
-//  - branding and per-account forwarding are session-only routes (not on /api/v1),
-//    so they are reported as informational, not exercised here.
+// What is proven where:
+//   • canManageAccounts    — GET /api/v1/accounts flips 403 (community) → 200 (team)
+//   • canShareMailboxes    — shared mailbox POST flips 403 → 201 (Team-only)
+//   • canCustomizeBranding — /api/branding/icon serves the custom object on Team,
+//                            the packaged default on Community (public route)
+//   • canForwardEmail      — needs --forward-to: sets users.forwarding_email, checks
+//                            the destination is a verified Email Routing address,
+//                            then sends a real inbound test to forward
+//   • mailbox access grant — inserts a mailbox_access row and reads it back
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import bcrypt from "bcryptjs";
 
 const DEFAULT_URL = "https://mailflare.gedw99.workers.dev";
+const BRANDING_KEY = "branding/app-icon";
+const BRANDING_MARKER = "MAILFLARE-BRANDING-SMOKE";
 
 const { values } = parseArgs({
 	options: {
 		url: { type: "string", default: DEFAULT_URL },
 		db: { type: "string", default: "mailflare" },
+		bucket: { type: "string", default: "mailflare-raw" },
 		local: { type: "boolean", default: false },
 		"no-gate": { type: "boolean", default: false },
+		"forward-to": { type: "string" },
 		help: { type: "boolean", short: "h", default: false },
 	},
 });
 
 if (values.help) {
-	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--local] [--no-gate]");
+	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>]");
 	process.exit(0);
 }
 
 const base = values.url.replace(/\/+$/, "");
 const location = values.local ? "--local" : "--remote";
+const flipGate = !values["no-gate"];
+
+function run(command, args) {
+	return spawnSync(command, args, { encoding: "utf8" });
+}
 
 function d1(sql) {
-	const result = spawnSync("npx", ["wrangler", "d1", "execute", values.db, location, "--json", "--command", sql], { encoding: "utf8" });
+	const result = run("npx", ["wrangler", "d1", "execute", values.db, location, "--json", "--command", sql]);
 	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 execute failed");
 	const parsed = JSON.parse(result.stdout);
 	const first = Array.isArray(parsed) ? parsed[0] : parsed;
 	return first?.results ?? [];
+}
+
+function keychain(account, service = "fnox") {
+	const result = run("security", ["find-generic-password", "-s", service, "-a", account, "-w"]);
+	return result.status === 0 ? result.stdout.trim() : null;
 }
 
 const LICENCE_ON = "UPDATE license_settings SET plan='team', state='active', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
@@ -55,13 +79,14 @@ async function api(path, { method = "GET", key, body } = {}) {
 		headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
 		body: body ? JSON.stringify(body) : undefined,
 	});
+	const text = await response.text();
 	let json = null;
 	try {
-		json = await response.json();
+		json = JSON.parse(text);
 	} catch {
-		// Some responses (e.g. 404 pages) have no JSON body.
+		// Not JSON (e.g. the icon endpoint returns image bytes).
 	}
-	return { status: response.status, json };
+	return { status: response.status, text, json };
 }
 
 const results = [];
@@ -70,7 +95,7 @@ function record(name, ok, detail = "") {
 	console.log(`${ok ? "✓" : "✗"} ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
-// --- mint a temporary admin key ---------------------------------------------
+// --- target + temporary admin key -------------------------------------------
 const [admin] = d1("SELECT id, email FROM users WHERE role='admin' ORDER BY created_at LIMIT 1;");
 if (!admin) {
 	console.error("No admin user found — is the instance set up?");
@@ -86,8 +111,9 @@ d1(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mai
     VALUES ('${esc(keyId)}', 'legacy', '${esc(admin.id)}', 'features-smoke', '${esc(fullKey.slice(0, 12))}', '${esc(bcrypt.hashSync(fullKey, 10))}', '${esc(scopes)}', 0, strftime('%s','now'));`);
 console.log(`Minted temporary key ${keyId} (prefix ${fullKey.slice(0, 12)})\n`);
 
-let createdMailboxId = null;
-let restoredPlan = false;
+// --- cleanup stack (runs in finally, LIFO) ----------------------------------
+const cleanups = [];
+const onCleanup = (fn) => cleanups.push(fn);
 
 try {
 	// --- read checks (Team active) -------------------------------------------
@@ -95,8 +121,7 @@ try {
 	record("GET /api/v1/domains", domains.status === 200, `HTTP ${domains.status}`);
 	const domainId = domains.json?.domains?.[0]?.id ?? null;
 
-	const mailboxes = await api("/api/v1/mailboxes", { key: fullKey });
-	record("GET /api/v1/mailboxes", mailboxes.status === 200, `HTTP ${mailboxes.status}`);
+	record("GET /api/v1/mailboxes", (await api("/api/v1/mailboxes", { key: fullKey })).status === 200);
 
 	const storage = await api("/api/v1/storage", { method: "POST", key: fullKey });
 	record("POST /api/v1/storage (round-trip)", storage.status === 200, `HTTP ${storage.status}`);
@@ -104,51 +129,104 @@ try {
 	const accountsActive = await api("/api/v1/accounts", { key: fullKey });
 	record("GET /api/v1/accounts (Team)", accountsActive.status === 200, `HTTP ${accountsActive.status} — ${accountsActive.json?.accounts?.length ?? "?"} accounts`);
 
-	if (!values["no-gate"]) {
+	if (flipGate) {
+		// --- branding: stage a custom icon, then flip the gate -----------------
+		const markerPath = join(tmpdir(), `mailflare-branding-${Date.now()}.txt`);
+		writeFileSync(markerPath, BRANDING_MARKER);
+		const put = run("npx", ["wrangler", "r2", "object", "put", `${values.bucket}/${BRANDING_KEY}`, "--file", markerPath, "--content-type", "text/plain", "--remote"]);
+		rmSync(markerPath, { force: true });
+		if (put.status === 0) {
+			const [previous] = d1("SELECT icon_key FROM app_settings WHERE id='default';");
+			d1(`INSERT INTO app_settings (id, icon_key, updated_at) VALUES ('default', '${BRANDING_KEY}', strftime('%s','now'))
+			    ON CONFLICT(id) DO UPDATE SET icon_key=excluded.icon_key, updated_at=excluded.updated_at;`);
+			onCleanup(() => d1(`UPDATE app_settings SET icon_key=${previous?.icon_key ? `'${esc(previous.icon_key)}'` : "NULL"} WHERE id='default';`));
+			onCleanup(() => run("npx", ["wrangler", "r2", "object", "delete", `${values.bucket}/${BRANDING_KEY}`, "--remote"]));
+		} else {
+			record("stage custom branding icon", false, (put.stderr || "r2 put failed").trim().slice(0, 90));
+		}
+
 		// --- prove the gates block under Community ----------------------------
 		d1(LICENCE_OFF);
-		const accountsBlocked = await api("/api/v1/accounts", { key: fullKey });
-		record("accounts blocked on Community", accountsBlocked.status === 403, `HTTP ${accountsBlocked.status}`);
+		record("accounts blocked on Community", (await api("/api/v1/accounts", { key: fullKey })).status === 403);
 
 		const sharedBlocked = domainId
 			? await api("/api/v1/mailboxes", { method: "POST", key: fullKey, body: { domainId, localPart: `smoke-${randomBytes(3).toString("hex")}`, displayName: "Smoke test", type: "shared" } })
 			: { status: 0 };
 		record("shared mailbox blocked on Community", sharedBlocked.status === 403, `HTTP ${sharedBlocked.status}`);
 
+		const iconDefault = await api("/api/branding/icon");
+		record("branding icon is the default on Community", !iconDefault.text.includes(BRANDING_MARKER), `HTTP ${iconDefault.status}`);
+
 		// --- and allow again under Team --------------------------------------
 		d1(LICENCE_ON);
-		const accountsAllowed = await api("/api/v1/accounts", { key: fullKey });
-		record("accounts allowed on Team", accountsAllowed.status === 200, `HTTP ${accountsAllowed.status}`);
+		record("accounts allowed on Team", (await api("/api/v1/accounts", { key: fullKey })).status === 200);
+
+		const iconCustom = await api("/api/branding/icon");
+		record("branding icon is custom on Team", iconCustom.text.includes(BRANDING_MARKER), `HTTP ${iconCustom.status}`);
 
 		if (domainId) {
 			const localPart = `smoke-${randomBytes(3).toString("hex")}`;
 			const created = await api("/api/v1/mailboxes", { method: "POST", key: fullKey, body: { domainId, localPart, displayName: "Smoke test", type: "shared" } });
 			record("shared mailbox allowed on Team", created.status === 201, `HTTP ${created.status} — ${created.json?.address ?? created.json?.error ?? ""}`);
-			createdMailboxId = created.status === 201 ? created.json.id : null;
-			if (createdMailboxId) {
-				const removed = await api(`/api/v1/mailboxes/${createdMailboxId}`, { method: "DELETE", key: fullKey });
+			const mailboxId = created.status === 201 ? created.json.id : null;
+			if (mailboxId) {
+				onCleanup(() => api(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE", key: fullKey }));
+
+				// --- sharing: round-trip an access grant ----------------------
+				const grantId = `mac_smoke_${randomBytes(6).toString("hex")}`;
+				d1(`INSERT INTO mailbox_access (id, mailbox_id, user_id, permission, created_at) VALUES ('${esc(grantId)}', '${esc(mailboxId)}', '${esc(admin.id)}', 'full_access', strftime('%s','now'));`);
+				onCleanup(() => d1(`DELETE FROM mailbox_access WHERE id='${esc(grantId)}';`));
+				const [grant] = d1(`SELECT permission FROM mailbox_access WHERE id='${esc(grantId)}';`);
+				record("mailbox access grant round-trip", grant?.permission === "full_access", grant?.permission ?? "missing");
+
+				const removed = await api(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE", key: fullKey });
 				record("delete the shared mailbox", removed.status === 200, `HTTP ${removed.status}`);
-				createdMailboxId = removed.status === 200 ? null : createdMailboxId;
+				if (removed.status === 200) d1(`DELETE FROM mailbox_access WHERE id='${esc(grantId)}';`);
 			}
 		}
 	}
+
+	// --- forwarding (opt-in: needs a real external destination) --------------
+	if (values["forward-to"]) {
+		const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
+		const account = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
+		if (!token || !account) {
+			record("forwarding setup", false, "no Cloudflare credentials available for the destination check");
+		} else {
+			const destination = values["forward-to"].trim();
+			const addresses = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/email/routing/addresses?per_page=100`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+			const match = addresses?.result?.find((a) => String(a.email).toLowerCase() === destination.toLowerCase());
+			record("forward destination is a verified Email Routing address", !!match && (match.verified === true || match.verified === "true" || match.status === "verified"), match ? `verified=${JSON.stringify(match.verified)}` : "not registered");
+
+			const [previous] = d1(`SELECT forwarding_email FROM users WHERE id='${esc(admin.id)}';`);
+			d1(`UPDATE users SET forwarding_email='${esc(destination)}' WHERE id='${esc(admin.id)}';`);
+			onCleanup(() => d1(`UPDATE users SET forwarding_email=${previous?.forwarding_email ? `'${esc(previous.forwarding_email)}'` : "NULL"} WHERE id='${esc(admin.id)}';`));
+
+			const subject = `Mailflare forwarding test ${new Date().toISOString()}`;
+			const sent = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/email/sending/send`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ from: admin.email, to: admin.email, subject, text: "Forwarding smoke test." }),
+			}).then((r) => r.json()).catch(() => null);
+			record("forwarding test email queued", sent?.success === true, sent?.result?.message_id ?? JSON.stringify(sent?.errors ?? {}));
+			console.log(`\n  → check ${destination} for "${subject}" (the forward leaves the Mailflare inbox).`);
+		}
+	}
+} catch (error) {
+	record("smoke run completed", false, error instanceof Error ? error.message : String(error));
 } finally {
-	if (createdMailboxId) {
-		console.log(`\nCleaning up mailbox ${createdMailboxId}…`);
-		await api(`/api/v1/mailboxes/${createdMailboxId}`, { method: "DELETE", key: fullKey }).catch(() => {});
+	for (const cleanup of cleanups.reverse()) {
+		try {
+			await cleanup();
+		} catch {
+			// best effort
+		}
 	}
 	d1(LICENCE_ON);
-	restoredPlan = true;
 	d1(`DELETE FROM api_keys WHERE id='${esc(keyId)}';`);
-	console.log(`Removed temporary key ${keyId}; license restored to Team.`);
+	console.log(`\nCleaned up temporary key ${keyId}; license restored to Team.`);
 }
-
-console.log(`\nNot exercised here (session-only routes, not on /api/v1):`);
-console.log(`  • canCustomizeBranding — Admin → Branding`);
-console.log(`  • canForwardEmail      — Settings → forwarding`);
-console.log(`  • mailbox access grants — /api/mailboxes/[id]/access`);
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${failed.length === 0 ? "All checks passed" : `${failed.length} check(s) failed`}: ${results.length - failed.length}/${results.length}.`);
-if (!restoredPlan) console.log("⚠️  License may not have been restored — run `npm run license:on`.");
 process.exit(failed.length === 0 ? 0 : 1);
