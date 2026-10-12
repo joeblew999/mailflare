@@ -9,7 +9,7 @@
 // Defaults to the remote D1 database. Pass --local for the local dev database.
 // GUI: the plan, seats and activation state are shown at <instance>/admin/licenses.
 import { parseArgs } from "node:util";
-import { d1 as libD1, entitlementsFor, licenceSql } from "./joeblew999-lib.mjs";
+import { d1 as libD1, entitlementsFor, licenceSql } from "./joeblew999-lib";
 
 const ACTIONS = new Set(["on", "off", "status"]);
 
@@ -58,7 +58,7 @@ if (action === "on" && plan !== "team" && plan !== "pro") {
 
 const location = values.local ? "--local" : "--remote";
 
-// License SQL lives in scripts/joeblew999-lib.mjs (licenceSql) so every script shares one copy.
+// License SQL lives in scripts/joeblew999-lib.ts (licenceSql) so every script shares one copy.
 
 function runWrangler(sql) {
 	try {

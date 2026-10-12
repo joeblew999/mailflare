@@ -1,26 +1,27 @@
 // Shared helpers for the repo's scripts. Deliberately plain JS with no app imports,
+/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON is validated by the app's zod schemas at runtime, not by these types. */
 // so it works under both `node` and `tsx` (features-smoke.mjs runs under tsx to
 // import app code, the others under node).
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-export function run(command, args) {
+export function run(command: string, args: string[]) {
 	return spawnSync(command, args, { encoding: "utf8" });
 }
 
 // Read a secret from the macOS keychain; fnox stores entries under service "fnox"
 // with the secret name as the account.
-export function keychain(account, service = "fnox") {
+export function keychain(account: string, service = "fnox") {
 	const result = run("security", ["find-generic-password", "-s", service, "-a", account, "-w"]);
 	return result.status === 0 ? result.stdout.trim() : null;
 }
 
-export function sleep(ms) {
+export function sleep(ms: number) {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // Run SQL through wrangler and return the result rows.
-export function d1(sql, { db = "mailflare", local = false } = {}) {
+export function d1(sql: string, { db = "mailflare", local = false }: { db?: string; local?: boolean } = {}) {
 	const result = run("npx", ["wrangler", "d1", "execute", db, local ? "--local" : "--remote", "--json", "--command", sql]);
 	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 execute failed");
 	const parsed = JSON.parse(result.stdout);
@@ -40,20 +41,26 @@ export function workerSecretNames() {
 }
 
 // Quote a value for a single-quoted SQL string.
-export function sqlEscape(value) {
+export function sqlEscape(value: unknown) {
 	return String(value).replace(/'/g, "''");
 }
 
 // Call the app's HTTP API with a bearer key. Returns the status plus parsed JSON
 // (json is null when the body is not JSON, e.g. the branding icon bytes).
-export async function request(base, path, { method = "GET", key, body } = {}) {
+export type ApiResult = { status: number; text: string; json: any };
+
+export async function request(
+	base: string,
+	path: string,
+	{ method = "GET", key, body }: { method?: string; key?: string; body?: unknown } = {},
+): Promise<ApiResult> {
 	const response = await fetch(`${base}${path}`, {
 		method,
 		headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	const text = await response.text();
-	let json = null;
+	let json: any = null;
 	try {
 		json = JSON.parse(text);
 	} catch {
@@ -81,7 +88,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 // Mirrors getLicenseEntitlements (src/lib/licenses/service.ts) for display. It needs
 // D1, so it cannot be imported — keep this the one place that mirrors the gates.
-export function entitlementsFor(plan, active) {
+export function entitlementsFor(plan: string, active: boolean) {
 	const isTeam = active && plan === "team";
 	const isPro = active && plan === "pro";
 	return {
@@ -106,7 +113,7 @@ export function workerNameFromConfig() {
 // Resolve the instance URL without hard-coding it: explicit value, then
 // MAILFLARE_URL, then <worker>.<account-subdomain>.workers.dev from the API.
 // Returns null when nothing can be determined.
-export async function resolveInstanceUrl({ url, token, account } = {}) {
+export async function resolveInstanceUrl({ url, token, account }: { url?: string; token?: string | null; account?: string | null } = {}) {
 	const explicit = url || process.env.MAILFLARE_URL;
 	if (explicit) return explicit.replace(/\/+$/, "");
 
@@ -122,7 +129,7 @@ export async function resolveInstanceUrl({ url, token, account } = {}) {
 }
 
 // The primary admin account, used as the default recipient/target.
-export function findAdmin({ db, local } = {}) {
+export function findAdmin({ db, local }: { db?: string; local?: boolean } = {}) {
 	const [admin] = d1("SELECT id, email FROM users WHERE role='admin' ORDER BY created_at LIMIT 1;", { db, local });
 	return admin ?? null;
 }

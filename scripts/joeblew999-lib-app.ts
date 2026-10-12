@@ -2,7 +2,7 @@
 // Keeping key-minting here means the temp-key format and scopes come straight from
 // the app and cannot drift from what the Worker enforces.
 import { randomBytes } from "node:crypto";
-import { d1, findAdmin, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib.mjs";
+import { d1, findAdmin, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
@@ -17,7 +17,7 @@ const REQUEST_SCHEMAS = {
 	accountUpdate: updateManagedAccountSchema,
 };
 
-export function validateBody(kind, body) {
+export function validateBody(kind: string, body: unknown) {
 	const schema = REQUEST_SCHEMAS[kind];
 	if (!schema) throw new Error(`no schema registered for "${kind}"`);
 	const parsed = schema.safeParse(body);
@@ -28,7 +28,7 @@ export function validateBody(kind, body) {
 }
 
 // Insert a short-lived admin API key into D1 and return it.
-export function mintAdminKey({ db, local, adminId, name = "smoke" }) {
+export function mintAdminKey({ db, local, adminId, name = "smoke" }: { db?: string; local?: boolean; adminId: string; name?: string }) {
 	const { fullKey, prefix, hash } = generateApiKey();
 	const id = `key_${name}_${randomBytes(6).toString("hex")}`;
 	d1(
@@ -40,7 +40,7 @@ export function mintAdminKey({ db, local, adminId, name = "smoke" }) {
 }
 
 // Mint an MCP key (kind "mcp"): scoped to MCP tools, optionally limited to mailboxes.
-export function mintMcpKey({ db, local, adminId, name, scopes, mailboxIds = [] }) {
+export function mintMcpKey({ db, local, adminId, name, scopes, mailboxIds = [] }: { db?: string; local?: boolean; adminId: string; name: string; scopes: string[]; mailboxIds?: string[] }) {
 	const { fullKey, prefix, hash } = generateApiKey();
 	const id = `key_mcp_${randomBytes(6).toString("hex")}`;
 	d1(
@@ -61,7 +61,10 @@ export function mintMcpKey({ db, local, adminId, name, scopes, mailboxIds = [] }
  *
  * Pass `base` to reuse an already-resolved origin (avoids a second lookup).
  */
-export async function withAdminKey({ db, local, url, base, name = "smoke" }, fn) {
+export async function withAdminKey(
+	{ db, local, url, base, name = "smoke" }: { db?: string; local?: boolean; url?: string; base?: string; name?: string },
+	fn: (context: { base: string; key: string; admin: { id: string; email: string }; keyId: string; prefix: string }) => Promise<number>,
+) {
 	const origin = base ?? (await resolveInstanceUrl({ url }));
 	if (!origin) throw new Error("Could not determine the instance URL. Pass --url or set MAILFLARE_URL.");
 

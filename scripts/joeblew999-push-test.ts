@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON is validated by the app's zod schemas at runtime, not by these types. */
 // Verify Web Push end to end: sends a test email through the Cloudflare Email
 // Sending API back into your own Mailflare inbox, then confirms it arrived and
 // that a push subscription exists. Watch your devices for the notification.
@@ -11,7 +12,7 @@
 // then fall back to the macOS keychain (service "fnox").
 // GUI: turn notifications on at <instance>/settings/inbox (Browser push notifications).
 import { parseArgs } from "node:util";
-import { d1 as libD1, keychain, sleep, workerSecretNames } from "./joeblew999-lib.mjs";
+import { d1 as libD1, keychain, sleep, workerSecretNames } from "./joeblew999-lib";
 
 const API = "https://api.cloudflare.com/client/v4";
 
@@ -30,7 +31,7 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 
-// Shared helpers (scripts/joeblew999-lib.mjs) with this script's database baked in.
+// Shared helpers (scripts/joeblew999-lib.ts) with this script's database baked in.
 const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 function printSteps() {
@@ -89,7 +90,7 @@ try {
 	subscriptions = d1("SELECT id FROM push_subscriptions;");
 	console.log(`✓ push_subscriptions: ${subscriptions.length} registered`);
 } catch (error) {
-	console.log(`⚠️  Could not read push_subscriptions (${error.message})`);
+	console.log(`⚠️  Could not read push_subscriptions (${error instanceof Error ? error.message : String(error)})`);
 }
 if (subscriptions.length === 0) {
 	console.log("⚠️  No subscription — enable Settings → Inbox → \"Browser push notifications\" on the device first.");
@@ -132,7 +133,7 @@ console.log(`✓ Queued (${payload.result.message_id})`);
 // because the inbound copy gets its own id.
 const deadline = Date.now() + Number(values.timeout) * 1000;
 const escaped = subject.replace(/'/g, "''");
-let arrived = null;
+let arrived: any = null;
 while (Date.now() < deadline) {
 	[arrived] = d1(`SELECT subject, from_addr, status, created_at FROM messages WHERE subject = '${escaped}' LIMIT 1;`);
 	if (arrived) break;

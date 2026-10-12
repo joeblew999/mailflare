@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON is validated by the app's zod schemas at runtime, not by these types. */
 // Provision a domain's mailboxes from a per-project manifest (or an ad-hoc role list).
 // Idempotent: addresses that already exist are left alone.
 //
@@ -49,12 +50,12 @@
 //   --disable-accounts   also DISABLE its accounts (the app has no user-delete)
 //   --remove-domain      also remove the domain itself (drops its DNS/MX)
 //
-// Runs under tsx (it imports app code via ./joeblew999-lib-app.mjs).
+// Runs under tsx (it imports app code via ./joeblew999-lib-app).
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib.mjs";
-import { mintMcpKey, validateBody, withAdminKey } from "./joeblew999-lib-app.mjs";
+import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib";
+import { mintMcpKey, validateBody, withAdminKey } from "./joeblew999-lib-app";
 
 const { values } = parseArgs({
 	options: {
@@ -119,13 +120,13 @@ Flags:
 const findDomain = (list, name) => (list ?? []).find((entry) => String(entry.hostname).toLowerCase() === name);
 
 // A project manifest carries the domain plus what to create on it.
-let project = null;
+let project: any = null;
 if (values.project) {
 	try {
 		project = JSON.parse(readFileSync(values.project, "utf8"));
 		if (!project || typeof project !== "object" || Array.isArray(project)) throw new Error("must be a JSON object");
 	} catch (error) {
-		console.error(`Could not read project file ${values.project}: ${error.message}`);
+		console.error(`Could not read project file ${values.project}: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(1);
 	}
 }
@@ -138,9 +139,9 @@ const replaceMxValue = values["replace-mx"] || Boolean(project?.onboard?.replace
 const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 // Onboard body: manifest options with sane defaults.
-function onboardBody(hostname) {
+function onboardBody(hostname: string) {
 	const o = project?.onboard ?? {};
-	const body = { hostname, enableRouting: o.enableRouting ?? true, replaceMxRecords: replaceMxValue };
+	const body: any = { hostname, enableRouting: o.enableRouting ?? true, replaceMxRecords: replaceMxValue };
 	if (typeof o.enableSending === "boolean") body.enableSending = o.enableSending;
 	if (o.sendingProvider) body.sendingProvider = o.sendingProvider;
 	if (o.receivingProvider) body.receivingProvider = o.receivingProvider;
@@ -305,7 +306,7 @@ function ensureMcpKey(entry, domain, adminId, mailboxIdsByRole, base, dryRun) {
 		console.log(`  ✗ mcp key "${name}": unknown scope(s) ${bad.join(", ")}`);
 		return 1;
 	}
-	const mailboxIds = [];
+	const mailboxIds: string[] = [];
 	for (const role of entry.mailboxes ?? []) {
 		const id = mailboxIdsByRole.get(String(role).toLowerCase());
 		if (!id) {
@@ -432,7 +433,7 @@ async function main() {
 					return 1;
 				}
 				const boxes = await request(base, "/api/v1/mailboxes", { key: key });
-				const present = new Map(
+				const present = new Map<string, any>(
 					(boxes.json?.mailboxes ?? [])
 						.filter((entry) => String(entry.hostname).toLowerCase() === domainName)
 						.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
@@ -498,7 +499,7 @@ async function main() {
 			}
 
 			const boxes = await request(base, "/api/v1/mailboxes", { key: key });
-			const existing = new Map(
+			const existing = new Map<string, any>(
 				(boxes.json?.mailboxes ?? [])
 					.filter((entry) => String(entry.hostname).toLowerCase() === domainName)
 					.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
@@ -506,7 +507,7 @@ async function main() {
 
 			console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${domainValue}:\n`);
 			let failures = 0;
-			const mailboxIdsByRole = new Map();
+			const mailboxIdsByRole = new Map<string, string>();
 
 			for (const { role, displayName, share, access } of roles) {
 				const address = `${role}@${domainValue}`;
