@@ -1,19 +1,19 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON. */
 import { sqlEscape } from "../joeblew999-lib";
 import { ensureDomain, removeDomain } from "./domain";
 import { syncMailboxes } from "./mailboxes";
 import { ensureAccount, disableAccount } from "./accounts";
 import { ensureRouting, removeRouting } from "./routing";
 import { ensureMcpKey, removeMcpKey } from "./mcp-keys";
-import type { Context, Role } from "./types";
+import type { ApiMailbox, Context, Role } from "./types";
 
 // Read-only drift report: what the manifest wants vs what exists.
 async function reportStatus(ctx: Context, roles: Role[]): Promise<number> {
 	const boxes = await ctx.api("/api/v1/mailboxes");
-	const present = new Map<string, any>(
-		(boxes.json?.mailboxes ?? [])
-			.filter((entry: any) => String(entry.hostname).toLowerCase() === ctx.domainName)
-			.map((entry: any) => [String(entry.localPart).toLowerCase(), entry]),
+	const rows = (boxes.json?.mailboxes ?? []) as ApiMailbox[];
+	const present = new Map<string, ApiMailbox>(
+		rows
+			.filter((entry) => String(entry.hostname).toLowerCase() === ctx.domainName)
+			.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
 	);
 	console.log(`Status for ${ctx.domainName} — ${roles.length} mailbox(es) wanted:\n`);
 	let missing = 0;

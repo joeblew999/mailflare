@@ -1,6 +1,7 @@
 import { newId } from "@/lib/ids";
 import { domainRoutingRuleSchema } from "@/lib/validators";
 import { sqlEscape } from "../joeblew999-lib";
+import { requireDomain } from "./context";
 import type { Context, RoutingEntry } from "./types";
 
 // Provision domain-scope routing rules. These decide, during address resolution:
@@ -15,7 +16,7 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 		if (!mailboxId) console.log(`  ⚠ routing "${pattern}": mailbox role "${entry.mailbox}" not found`);
 	}
 	const parsed = domainRoutingRuleSchema.safeParse({
-		domainId: ctx.domain.id,
+		domainId: requireDomain(ctx).id,
 		name: entry.name,
 		enabled: true,
 		matchField: "recipient",
@@ -36,7 +37,7 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 	const rule = parsed.data;
 	const forwardTo = rule.forwardTo ?? null;
 	const label = `routing ${pattern} → ${rule.action}${forwardTo ? ` ${forwardTo}` : ""}`;
-	const existing = ctx.d1(`SELECT id, match_value, forward_to, keep_copy, mailbox_id, reject_reason, priority, enabled FROM routing_rules WHERE domain_id='${sqlEscape(ctx.domain.id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(rule.action)}';`);
+	const existing = ctx.d1(`SELECT id, match_value, forward_to, keep_copy, mailbox_id, reject_reason, priority, enabled FROM routing_rules WHERE domain_id='${sqlEscape(requireDomain(ctx).id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(rule.action)}';`);
 	if (existing.length > 0) {
 		// Reconcile the stored row with the manifest rather than assuming it matches.
 		const row = existing[0];
@@ -74,7 +75,7 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 		return 0;
 	}
 	ctx.d1(`INSERT INTO routing_rules (id, user_id, domain_id, scope, name, enabled, pattern, match_field, match_operator, match_value, action, forward_to, keep_copy, reject_reason, priority, created_at)
-	    VALUES ('${newId("rr")}', '${sqlEscape(ctx.admin.id)}', '${sqlEscape(ctx.domain.id)}', 'domain', '${sqlEscape(rule.name ?? pattern)}', ${rule.enabled ? 1 : 0}, '${sqlEscape(pattern)}', '${sqlEscape(rule.matchField)}', '${sqlEscape(rule.matchOperator)}', '${sqlEscape(rule.matchValue)}', '${sqlEscape(rule.action)}', ${forwardTo ? `'${sqlEscape(forwardTo)}'` : "NULL"}, ${rule.keepCopy ? 1 : 0}, ${rule.rejectReason ? `'${sqlEscape(rule.rejectReason)}'` : "NULL"}, ${rule.priority}, strftime('%s','now'));`);
+	    VALUES ('${newId("rr")}', '${sqlEscape(ctx.admin.id)}', '${sqlEscape(requireDomain(ctx).id)}', 'domain', '${sqlEscape(rule.name ?? pattern)}', ${rule.enabled ? 1 : 0}, '${sqlEscape(pattern)}', '${sqlEscape(rule.matchField)}', '${sqlEscape(rule.matchOperator)}', '${sqlEscape(rule.matchValue)}', '${sqlEscape(rule.action)}', ${forwardTo ? `'${sqlEscape(forwardTo)}'` : "NULL"}, ${rule.keepCopy ? 1 : 0}, ${rule.rejectReason ? `'${sqlEscape(rule.rejectReason)}'` : "NULL"}, ${rule.priority}, strftime('%s','now'));`);
 	console.log(`  ✓ added ${label}`);
 	return 0;
 }
@@ -86,7 +87,7 @@ export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 		console.log(`  → would remove routing ${pattern} → ${action}`);
 		return 0;
 	}
-	ctx.d1(`DELETE FROM routing_rules WHERE domain_id='${sqlEscape(ctx.domain.id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(action)}';`);
+	ctx.d1(`DELETE FROM routing_rules WHERE domain_id='${sqlEscape(requireDomain(ctx).id)}' AND scope='domain' AND pattern='${sqlEscape(pattern)}' AND action='${sqlEscape(action)}';`);
 	console.log(`  ✓ removed routing ${pattern} → ${action}`);
 	return 0;
 }

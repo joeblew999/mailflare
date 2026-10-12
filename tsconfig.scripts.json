@@ -1,7 +1,7 @@
 {
 	"extends": "./tsconfig.json",
 	"compilerOptions": {
-		"types": ["node"],
+		"types": ["./cloudflare-env.d.ts", "./env.d.ts", "node", "@cloudflare/workers-types"],
 		"noEmit": true,
 		"noImplicitAny": false,
 		"skipLibCheck": true

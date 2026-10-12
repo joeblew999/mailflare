@@ -1,5 +1,25 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON is validated by the app's zod schemas at runtime. */
+/* eslint-disable @typescript-eslint/no-explicit-any -- manifest entries are user-authored JSON. */
+import type { InferSelectModel } from "drizzle-orm";
+import type { accountListItemFromUser } from "@/app/api/accounts/utils";
+import type { listUserDomains } from "@/lib/domains/service";
+import type { domains as domainsTable, mailboxes as mailboxesTable } from "@/db/schema";
 import type { ApiResult } from "../joeblew999-lib";
+
+// Response shapes taken from the app's own builders, so field access is checked
+// against what the endpoint actually returns (no guessing).
+//   GET /api/v1/domains   → listUserDomains() rows (+ sendingEnabled)
+//   GET /api/v1/accounts  → accountListItemFromUser()
+//   GET /api/v1/mailboxes → the inline select in api/v1/mailboxes/utils.ts (no named
+//                           export exists, so the columns below mirror that select)
+export type ApiDomain = Awaited<ReturnType<typeof listUserDomains>>[number] & {
+	/** Added by GET /api/v1/domains on top of the stored row. */
+	sendingEnabled?: boolean;
+};
+export type ApiAccount = ReturnType<typeof accountListItemFromUser>;
+export type ApiMailbox = Pick<
+	InferSelectModel<typeof mailboxesTable>,
+	"id" | "userId" | "domainId" | "localPart" | "displayName" | "type" | "disabled" | "createdAt"
+> & { hostname: InferSelectModel<typeof domainsTable>["hostname"] };
 
 export type Flags = {
 	dryRun: boolean;
@@ -52,7 +72,7 @@ export type Context = {
 	flags: Flags;
 	project: ProjectManifest | null;
 	domainName: string;
-	domain: any | null;
+	domain: ApiDomain | null;
 	d1: (sql: string) => any[];
 	api: (path: string, options?: { method?: string; body?: unknown }) => Promise<ApiResult>;
 };

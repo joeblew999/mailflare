@@ -1,7 +1,7 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON. */
-import { randomBytes } from "node:crypto";
+import { newId } from "@/lib/ids";
 import { validateBody } from "../joeblew999-lib-app";
-import type { AccountEntry, Context } from "./types";
+import { requireDomain } from "./context";
+import type { AccountEntry, ApiAccount, ApiMailbox, Context } from "./types";
 
 // Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
 // Existing accounts are re-enabled, since the app cannot delete a user.
@@ -13,7 +13,8 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 	}
 	const email = `${username}@${ctx.domainName}`;
 	const list = await ctx.api("/api/v1/accounts");
-	const existing = (list.json?.accounts ?? []).find((account: any) => String(account.email).toLowerCase() === email);
+	const accounts = (list.json?.accounts ?? []) as ApiAccount[];
+	const existing = accounts.find((account) => String(account.email).toLowerCase() === email);
 
 	if (existing) {
 		if (existing.disabled) {
@@ -39,7 +40,7 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 	}
 
 	const fromEnv = entry.passwordEnv ? process.env[entry.passwordEnv] : null;
-	const password = entry.password || fromEnv || randomBytes(12).toString("base64url");
+	const password = entry.password || fromEnv || newId();
 	const generated = !entry.password && !fromEnv;
 	if (ctx.flags.dryRun) {
 		console.log(`  → would create account ${email} (${entry.role === "admin" ? "admin" : "user"})`);
@@ -47,7 +48,7 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 	}
 	const created = await ctx.api("/api/v1/accounts", {
 		method: "POST",
-		body: validateBody("account", { username, domainId: ctx.domain.id, password, role: entry.role === "admin" ? "admin" : "user", useAllDomains: false, aliases: [] }),
+		body: validateBody("account", { username, domainId: requireDomain(ctx).id, password, role: entry.role === "admin" ? "admin" : "user", useAllDomains: false, aliases: [] }),
 	});
 	if (created.status !== 200 && created.status !== 201) {
 		console.log(`  ✗ account failed (HTTP ${created.status}) ${email} — ${created.json?.error ?? ""}`);
@@ -60,10 +61,10 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 // An account's own mailbox is cascaded away when its domain is removed, and the
 // account itself cannot be recreated (no user-delete), so rebuild the mailbox owned
 // by that account (POST /api/v1/mailboxes accepts ownerUserId).
-async function ensureAccountMailbox(ctx: Context, account: any, username: string, email: string): Promise<number> {
+async function ensureAccountMailbox(ctx: Context, account: ApiAccount, username: string, email: string): Promise<number> {
 	const boxes = await ctx.api("/api/v1/mailboxes");
-	const exists = (boxes.json?.mailboxes ?? []).some(
-		(row: any) => String(row.hostname).toLowerCase() === ctx.domainName && String(row.localPart).toLowerCase() === username,
+	const exists = ((boxes.json?.mailboxes ?? []) as ApiMailbox[]).some(
+		(row) => String(row.hostname).toLowerCase() === ctx.domainName && String(row.localPart).toLowerCase() === username,
 	);
 	if (exists) return 0;
 	if (ctx.flags.dryRun) {
@@ -72,7 +73,7 @@ async function ensureAccountMailbox(ctx: Context, account: any, username: string
 	}
 	const created = await ctx.api("/api/v1/mailboxes", {
 		method: "POST",
-		body: validateBody("mailbox", { domainId: ctx.domain.id, localPart: username, displayName: account.name ?? username, type: "personal", ownerUserId: account.id }),
+		body: validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: username, displayName: account.name ?? username, type: "personal", ownerUserId: account.id }),
 	});
 	if (created.status === 201) {
 		console.log(`  ✓ created mailbox ${email}`);
@@ -87,7 +88,8 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
 	const email = `${username}@${ctx.domainName}`;
 	const list = await ctx.api("/api/v1/accounts");
-	const account = (list.json?.accounts ?? []).find((row: any) => String(row.email).toLowerCase() === email);
+	const accounts = (list.json?.accounts ?? []) as ApiAccount[];
+	const account = accounts.find((row) => String(row.email).toLowerCase() === email);
 	if (!account) {
 		console.log(`  · account ${email} — not found, skipping`);
 		return 0;

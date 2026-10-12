@@ -1,21 +1,21 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON. */
-import { keychain } from "../joeblew999-lib";
+import { cfApi, keychain } from "../joeblew999-lib";
 import { onboardBody } from "./manifest";
+import { requireDomain } from "./context";
 import { removeMcpKey } from "./mcp-keys";
 import { disableAccount } from "./accounts";
-import type { Context, Role } from "./types";
+import type { ApiDomain, Context, Role } from "./types";
 
-export const findDomain = (list: any, name: string) => (list ?? []).find((entry: any) => String(entry.hostname).toLowerCase() === name);
+export const findDomain = (list: ApiDomain[] | undefined, name: string) => (list ?? []).find((entry) => String(entry.hostname).toLowerCase() === name);
 
 // The domain's current MX records, from the Cloudflare API (null when unavailable).
 // Used to refuse taking over a domain that already receives mail.
 export async function currentMx(hostname: string) {
 	const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
 	if (!token) return null;
-	const zone = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(hostname)}`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+	const zone = await cfApi<Array<{ id: string }>>(`/zones?name=${encodeURIComponent(hostname)}`, token);
 	const zoneId = zone?.result?.[0]?.id;
 	if (!zoneId) return null;
-	const records = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=MX&per_page=100`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+	const records = await cfApi<Array<{ priority?: number; content?: string }>>(`/zones/${zoneId}/dns_records?type=MX&per_page=100`, token);
 	return records?.result ?? null;
 }
 
@@ -87,7 +87,7 @@ export async function removeDomain(ctx: Context): Promise<number> {
 		console.log(`  → would remove domain ${ctx.domainName} from Mailflare (drops its DNS/MX)`);
 		return 0;
 	}
-	const res = await ctx.api(`/api/v1/domains/${ctx.domain.id}`, { method: "DELETE" });
+	const res = await ctx.api(`/api/v1/domains/${requireDomain(ctx).id}`, { method: "DELETE" });
 	console.log(`  ${res.status === 200 ? "✓ removed" : `✗ remove failed (HTTP ${res.status})`} domain ${ctx.domainName}`);
 	return res.status === 200 ? 0 : 1;
 }

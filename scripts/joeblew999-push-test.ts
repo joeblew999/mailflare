@@ -122,12 +122,16 @@ const response = await fetch(`${API}/accounts/${account}/email/sending/send`, {
 		html: "<p>If your device shows a notification, <strong>Web Push</strong> is working.</p>",
 	}),
 });
-const payload = await response.json();
+const payload = (await response.json()) as {
+	success?: boolean;
+	errors?: unknown;
+	result?: { message_id?: string };
+};
 if (!response.ok || !payload.success) {
 	console.error(`Send failed (${response.status}): ${JSON.stringify(payload.errors ?? payload)}`);
 	process.exit(1);
 }
-console.log(`✓ Queued (${payload.result.message_id})`);
+console.log(`✓ Queued (${payload.result?.message_id})`);
 
 // Poll until the message lands. We match on the unique subject generated above
 // because the inbound copy gets its own id.

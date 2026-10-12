@@ -1,7 +1,6 @@
-// Shared helpers for the repo's scripts. Deliberately plain JS with no app imports,
 /* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON is validated by the app's zod schemas at runtime, not by these types. */
-// so it works under both `node` and `tsx` (features-smoke.mjs runs under tsx to
-// import app code, the others under node).
+// Shared helpers for the repo's scripts. Kept free of app imports so this module runs
+// under both `node` and `tsx`; callers add app imports (zod schemas, ids) where needed.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -110,6 +109,17 @@ export function workerNameFromConfig() {
 	}
 }
 
+// Cloudflare API responses wrap their payload in { result }. `json()` is typed
+// `unknown` under @cloudflare/workers-types, so this keeps the envelope explicit
+// instead of leaking `any` into callers.
+export async function cfApi<T>(path: string, token: string) {
+	const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
+		headers: { Authorization: `Bearer ${token}` },
+	});
+	if (!response.ok) return null;
+	return (await response.json().catch(() => null)) as { result?: T } | null;
+}
+
 // Resolve the instance URL without hard-coding it: explicit value, then
 // MAILFLARE_URL, then <worker>.<account-subdomain>.workers.dev from the API.
 // Returns null when nothing can be determined.
@@ -122,9 +132,7 @@ export async function resolveInstanceUrl({ url, token, account }: { url?: string
 	const accountValue = account || process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
 	if (!name || !tokenValue || !accountValue) return null;
 
-	const subdomain = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountValue}/workers/subdomain`, {
-		headers: { Authorization: `Bearer ${tokenValue}` },
-	}).then((r) => r.json()).catch(() => null);
+	const subdomain = await cfApi<{ subdomain?: string }>(`/accounts/${accountValue}/workers/subdomain`, tokenValue);
 	return subdomain?.result?.subdomain ? `https://${name}.${subdomain.result.subdomain}.workers.dev` : null;
 }
 

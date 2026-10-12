@@ -1,9 +1,9 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON. */
 import { newId } from "@/lib/ids";
 import { mailboxAccessSchema } from "@/lib/validators";
 import { sqlEscape } from "../joeblew999-lib";
 import { validateBody } from "../joeblew999-lib-app";
-import type { AccessGrant, Context, Role } from "./types";
+import { requireDomain } from "./context";
+import type { AccessGrant, ApiMailbox, Context, Role } from "./types";
 
 // Apply a mailbox's `access: [{ email, permission }]` grants straight to
 // mailbox_access (what the app reads). Deleting the mailbox cascades them away.
@@ -55,10 +55,11 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 // mailbox id so MCP keys can be scoped to them.
 export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ failures: number; mailboxIdsByRole: Map<string, string> }> {
 	const boxes = await ctx.api("/api/v1/mailboxes");
-	const existing = new Map<string, any>(
-		(boxes.json?.mailboxes ?? [])
-			.filter((entry: any) => String(entry.hostname).toLowerCase() === ctx.domainName)
-			.map((entry: any) => [String(entry.localPart).toLowerCase(), entry]),
+	const rows = (boxes.json?.mailboxes ?? []) as ApiMailbox[];
+	const existing = new Map<string, ApiMailbox>(
+		rows
+			.filter((entry) => String(entry.hostname).toLowerCase() === ctx.domainName)
+			.map((entry) => [String(entry.localPart).toLowerCase(), entry]),
 	);
 
 	console.log(`${ctx.flags.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${ctx.domainName}:\n`);
@@ -96,7 +97,7 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 		} else {
 			const created = await ctx.api("/api/v1/mailboxes", {
 				method: "POST",
-				body: validateBody("mailbox", { domainId: ctx.domain.id, localPart: role, displayName, type: share ? "shared" : "personal" }),
+				body: validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: role, displayName, type: share ? "shared" : "personal" }),
 			});
 			if (created.status === 201) {
 				mailboxId = created.json.id;
