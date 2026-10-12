@@ -9,6 +9,8 @@
 //   node scripts/features-smoke.mjs
 //   node scripts/features-smoke.mjs --url https://<worker>.<subdomain>.workers.dev
 //   node scripts/features-smoke.mjs --forward-to you@gmail.com
+//   node scripts/features-smoke.mjs --setup         # create the fixtures and keep them
+//   node scripts/features-smoke.mjs --cleanup       # remove fixtures from a prior --setup
 //   node scripts/features-smoke.mjs --no-gate        # read-only API checks only
 //
 // What is proven where:
@@ -52,6 +54,7 @@ const { values } = parseArgs({
 		"no-gate": { type: "boolean", default: false },
 		"forward-to": { type: "string" },
 		keep: { type: "boolean", default: false },
+		setup: { type: "boolean", default: false },
 		cleanup: { type: "boolean", default: false },
 		help: { type: "boolean", short: "h", default: false },
 	},
@@ -59,6 +62,8 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 const flipGate = !values["no-gate"];
+// --setup (create fixtures, leave them) shares the "don't clean up" path with --keep.
+const keepArtifacts = values.keep || values.setup;
 
 // License flips used to prove (and restore) the gates. Declared here so the
 // module-level --cleanup path below can use them.
@@ -66,11 +71,11 @@ const LICENCE_ON = "UPDATE license_settings SET plan='team', state='active', fea
 const LICENCE_OFF = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
 
 if (values.help) {
-	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>] [--keep] [--cleanup]");
+	console.log("Usage: node scripts/features-smoke.mjs [--url <base>] [--db mailflare] [--bucket mailflare-raw] [--local] [--no-gate] [--forward-to <email>] [--setup|--keep] [--cleanup]");
 	process.exit(0);
 }
 if (values.cleanup) {
-	console.log("Removing leftovers from a previous --keep run…");
+	console.log("Removing fixtures from a previous --setup/--keep run…");
 	await cleanupAll();
 	console.log("Done — smoke artifacts removed and the license set back to Team.");
 	process.exit(0);
@@ -133,9 +138,10 @@ Where to see each feature (Team is active), at ${origin}:
   • Email forwarding ..... ${origin}/settings/account         forwarding address field
   • Plan & seats ......... ${origin}/licenses
   • Push subscriptions ... ${origin}/settings/inbox
-Clean up when you are done looking:  npm run features:smoke -- --cleanup`;
+Next: inspect the screens above, then tear the fixtures down with
+  npm run features:smoke -- --cleanup`;
 
-// Remove everything a previous --keep run left behind, then restore Team.
+// Remove everything a previous --setup/--keep run left behind, then restore Team.
 async function cleanupAll() {
 	const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
 	if (token) {
@@ -277,7 +283,7 @@ try {
 				const [grant] = d1(`SELECT permission FROM mailbox_access WHERE id='${esc(grantId)}';`);
 				record("mailbox access grant round-trip", grant?.permission === "full_access", grant?.permission ?? "missing");
 
-				if (values.keep) {
+				if (keepArtifacts) {
 					console.log(`\n  → kept ${created.json.address} and its full_access grant for inspection.`);
 				} else {
 					const removed = await api(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE", key: fullKey });
@@ -320,7 +326,7 @@ try {
 	// The temporary API key is always removed. With --keep, the other artifacts
 	// (shared mailbox, branding icon, forwarding address) stay for inspection.
 	d1(`DELETE FROM api_keys WHERE id='${esc(keyId)}';`);
-	if (values.keep) {
+	if (keepArtifacts) {
 		console.log(`\nTemporary key ${keyId} removed; artifacts kept (see the guide above).`);
 	} else {
 		for (const cleanup of cleanups.reverse()) {
@@ -336,6 +342,6 @@ try {
 }
 
 const failed = results.filter((r) => !r.ok);
-if (values.keep) console.log(guiGuide(base));
+if (keepArtifacts) console.log(guiGuide(base));
 console.log(`\n${failed.length === 0 ? "All checks passed" : `${failed.length} check(s) failed`}: ${results.length - failed.length}/${results.length}.`);
 process.exit(failed.length === 0 ? 0 : 1);
