@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- manifest shape is user-authored JSON. */
 import { readFileSync } from "node:fs";
-import { validateBody } from "../joeblew999-lib-app";
+import { validateBody } from "../lib-app";
 import type { Flags, ProjectManifest, Role } from "./types";
 
 export function loadProject(path: string): ProjectManifest {

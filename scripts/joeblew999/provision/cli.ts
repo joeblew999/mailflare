@@ -8,7 +8,7 @@ export function parseCli() {
 			project: { type: "string" },
 			file: { type: "string" },
 			all: { type: "boolean", default: false },
-			dir: { type: "string", default: "scripts" },
+			dir: { type: "string", default: "scripts/joeblew999/projects" },
 			roles: { type: "string", default: "" },
 			"roles-file": { type: "string" },
 			onboard: { type: "boolean", default: false },
@@ -51,7 +51,7 @@ export function usage() {
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
   domain that already has MX records unless you pass --confirm-mx.
 
-  npm run joeblew999:provision -- --file scripts/joeblew999-project.example.json
+  npm run joeblew999:provision -- --file scripts/joeblew999/projects/example.json
   npm run joeblew999:provision -- --domain <hostname> --roles a,b,c [--onboard]
   npm run joeblew999:provision -- --all --dry-run
   npm run joeblew999:provision -- --file <multi.json>          # { "projects": [ ... ] }
@@ -71,8 +71,8 @@ Project file (JSON):
 Flags:
   --project <path>      apply one project manifest (a typo of --file is harmless)
   --file <path>         apply one project, or many via { "projects": [...] }
-  --all                 apply every joeblew999-project.*.json in --dir
-  --dir <path>          directory to scan when using --all (default: scripts)
+  --all                 apply every project in --dir (skips example.json, _*.json)
+  --dir <path>          projects folder for --all (default: scripts/joeblew999/projects)
   --domain <hostname>   provision a domain without a manifest
   --roles <a,b,c>       ad-hoc role names (with --domain)
   --roles-file <path>   read role names from a file (JSON array or one per line)

@@ -7,7 +7,7 @@
 // names and the escaping in exactly one place instead of scattering them.
 import { newId } from "@/lib/ids";
 import { generateApiKey } from "@/lib/api-keys";
-import { cfApi, d1, keychain, request, sqlEscape } from "../joeblew999-lib";
+import { cfApi, d1, keychain, request, sqlEscape } from "../lib";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "./types";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store } from "./store-types";
 

@@ -31,9 +31,9 @@ export function loadProjects({ file, dir }: { file?: string; dir: string }): Pro
 		return list.map((project, index) => ({ name: String(project?.domain ?? `${file}#${index + 1}`), project }));
 	}
 	const files = readdirSync(dir)
-		.filter((name) => /^joeblew999-project\..*\.json$/.test(name))
+		.filter((name) => name.endsWith(".json") && !name.startsWith("_") && name !== "example.json")
 		.sort();
-	if (files.length === 0) throw new Error(`No joeblew999-project.*.json manifests in ${dir}.`);
+	if (files.length === 0) throw new Error(`No project manifests in ${dir} (expected *.json; example.json and _*.json are skipped).`);
 	return files.map((name) => ({ name: join(dir, name), project: loadProject(join(dir, name)) }));
 }
 

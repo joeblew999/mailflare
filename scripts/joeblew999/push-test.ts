@@ -12,7 +12,7 @@
 // then fall back to the macOS keychain (service "fnox").
 // GUI: turn notifications on at <instance>/settings/inbox (Browser push notifications).
 import { parseArgs } from "node:util";
-import { d1 as libD1, keychain, sleep, workerSecretNames } from "./joeblew999-lib";
+import { d1 as libD1, keychain, sleep, workerSecretNames } from "./lib";
 
 const API = "https://api.cloudflare.com/client/v4";
 
@@ -31,7 +31,7 @@ const { values } = parseArgs({
 
 const location = values.local ? "--local" : "--remote";
 
-// Shared helpers (scripts/joeblew999-lib.ts) with this script's database baked in.
+// Shared helpers (scripts/joeblew999/lib.ts) with this script's database baked in.
 const d1 = (sql) => libD1(sql, { db: values.db, local: values.local });
 
 function printSteps() {

@@ -7,26 +7,26 @@
 //   real mail. The script REFUSES to onboard a domain that already has MX records
 //   unless you pass --confirm-mx.
 //
-//   npm run joeblew999:provision -- --file scripts/joeblew999-project.example.json
+//   npm run joeblew999:provision -- --file scripts/joeblew999/projects/example.json
 //   npm run joeblew999:provision -- --domain example.com --roles office,admin
 //   npm run joeblew999:provision -- --all --dry-run
 //   npm run joeblew999:provision -- --file big.json      # { "projects": [ ... ] }
 //
 // Mass input is ONE file holding many projects; it is loaded once and a single admin
-// key covers the whole run. The implementation lives in ./joeblew999-provision/, and
+// key covers the whole run. The implementation lives in ./provision/, and
 // all data access goes through the Store seam in store-types.ts.
 //
 // De-provisioning (reverse order; only paths the app supports):
 //   --cleanup            remove the manifest's mailboxes, routing rules and MCP keys
 //   --disable-accounts   also DISABLE its accounts (the app has no user-delete)
 //   --remove-domain      also remove the domain itself (drops its DNS/MX)
-import { parseCli, usage } from "./joeblew999-provision/cli";
-import { loadProject, loadRoles } from "./joeblew999-provision/manifest";
-import { loadProjects, runBatch, type ProjectEntry } from "./joeblew999-provision/batch";
-import { makeContext } from "./joeblew999-provision/context";
-import { run } from "./joeblew999-provision/commands";
-import { withProvisionStore } from "./joeblew999-lib-app";
-import type { ProjectManifest, Role } from "./joeblew999-provision/types";
+import { parseCli, usage } from "./provision/cli";
+import { loadProject, loadRoles } from "./provision/manifest";
+import { loadProjects, runBatch, type ProjectEntry } from "./provision/batch";
+import { makeContext } from "./provision/context";
+import { run } from "./provision/commands";
+import { withProvisionStore } from "./lib-app";
+import type { ProjectManifest, Role } from "./provision/types";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const { values, flags } = parseCli();

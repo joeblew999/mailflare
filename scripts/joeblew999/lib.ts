@@ -102,7 +102,7 @@ export function entitlementsFor(plan: string, active: boolean) {
 // The Worker name is the first top-level "name" in wrangler.jsonc.
 export function workerNameFromConfig() {
 	try {
-		const match = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8").match(/^\s*"name"\s*:\s*"([^"]+)"/m);
+		const match = readFileSync(new URL("../../wrangler.jsonc", import.meta.url), "utf8").match(/^\s*"name"\s*:\s*"([^"]+)"/m);
 		return match?.[1] ?? null;
 	} catch {
 		return null;

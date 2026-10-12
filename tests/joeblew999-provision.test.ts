@@ -2,11 +2,11 @@
 // with no D1, no Workers binding and no network. Run with `npm run joeblew999:test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeContext } from "../scripts/joeblew999-provision/context";
-import { run } from "../scripts/joeblew999-provision/commands";
-import { runBatch } from "../scripts/joeblew999-provision/batch";
-import type { Flags, ProjectManifest, Role } from "../scripts/joeblew999-provision/types";
-import type { Store } from "../scripts/joeblew999-provision/store-types";
+import { makeContext } from "../scripts/joeblew999/provision/context";
+import { run } from "../scripts/joeblew999/provision/commands";
+import { loadProjects, runBatch } from "../scripts/joeblew999/provision/batch";
+import type { Flags, ProjectManifest, Role } from "../scripts/joeblew999/provision/types";
+import type { Store } from "../scripts/joeblew999/provision/store-types";
 
 const ok = (json: unknown = {}) => ({ status: 200, text: "", json });
 const created = (json: unknown = {}) => ({ status: 201, text: "", json });
@@ -329,4 +329,16 @@ test("mass mode keeps going and reports failure per project", async () => {
 	];
 	const code = await quiet(() => runBatch(store, flags(), { roles: "" }, entries));
 	assert.equal(code, 1, "one bad project fails the run");
+});
+
+test("a multi-project file loads every project", () => {
+	const entries = loadProjects({ file: "tests/fixtures/provision-small.json", dir: "" });
+	assert.deepEqual(entries.map((e) => e.name), ["dev-one.example", "dev-two.example"]);
+});
+
+test("scanning the projects folder skips the placeholder and drafts", () => {
+	const entries = loadProjects({ dir: "scripts/joeblew999/projects" });
+	assert.ok(entries.length > 0, "found project manifests");
+	assert.ok(!entries.some((e) => /example\.json$/.test(e.name)), "example.json is skipped");
+	assert.ok(!entries.some((e) => /\/_/.test(e.name)), "_*.json drafts are skipped");
 });

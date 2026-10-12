@@ -6,9 +6,9 @@ import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
-import { d1, findAdmin, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib";
-import { makeLiveStore } from "./joeblew999-provision/store-live";
-import type { Store } from "./joeblew999-provision/store-types";
+import { d1, findAdmin, resolveInstanceUrl, sqlEscape } from "./lib";
+import { makeLiveStore } from "./provision/store-live";
+import type { Store } from "./provision/store-types";
 
 // The app's own request schemas, keyed by what we send. Validating here means a
 // hand-written body cannot drift from what the route accepts: it throws before the

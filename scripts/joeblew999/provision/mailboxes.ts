@@ -1,5 +1,5 @@
 import { mailboxAccessSchema } from "@/lib/validators";
-import { validateBody } from "../joeblew999-lib-app";
+import { validateBody } from "../lib-app";
 import { requireDomain } from "./context";
 import type { AccessGrant, ApiMailbox, Context, Role } from "./types";
 

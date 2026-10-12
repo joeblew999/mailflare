@@ -1,5 +1,5 @@
 import { newId } from "@/lib/ids";
-import { validateBody } from "../joeblew999-lib-app";
+import { validateBody } from "../lib-app";
 import { requireDomain } from "./context";
 import { mailboxesForDomain } from "./mailboxes";
 import type { AccountEntry, ApiAccount, Context } from "./types";
