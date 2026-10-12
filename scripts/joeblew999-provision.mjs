@@ -1,7 +1,11 @@
 #!/usr/bin/env node
-// Provision a domain's mailboxes from a per-project manifest (or an ad-hoc role
-// list). Idempotent: addresses that already exist are left alone. `--onboard` adds
-// the domain to Mailflare first (which publishes MX).
+// Provision a domain's mailboxes from a per-project manifest (or an ad-hoc role list).
+// Idempotent: addresses that already exist are left alone.
+//
+// ⚠ MX WARNING — `--onboard` publishes Mailflare's Email Routing MX for the domain.
+//   On a domain that already receives mail (a live company domain), that redirects
+//   its real mail. The script REFUSES to onboard a domain that already has MX
+//   records unless you pass --confirm-mx.
 //
 //   npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
 //   npm run joeblew999:provision -- --domain ubuntusoftware.net --roles office,admin
@@ -24,6 +28,7 @@
 //   --roles-file <path>   read roles from a file (JSON array or one per line)
 //   --onboard             add the domain to Mailflare first (publishes MX)
 //   --replace-mx          when onboarding, take MX over from another provider
+//   --confirm-mx          allow onboarding a domain that already has MX records
 //   --share               create the mailboxes as shared (Team plan)
 //   --dry-run             show what it would do, change nothing
 //   --status              report what exists vs the manifest (no changes)
@@ -33,7 +38,7 @@
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { d1 as libD1, request, sqlEscape } from "./joeblew999-lib.mjs";
+import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib.mjs";
 import { withAdminKey } from "./joeblew999-lib-app.mjs";
 
 const { values } = parseArgs({
@@ -44,6 +49,7 @@ const { values } = parseArgs({
 		"roles-file": { type: "string" },
 		onboard: { type: "boolean", default: false },
 		"replace-mx": { type: "boolean", default: false },
+		"confirm-mx": { type: "boolean", default: false },
 		share: { type: "boolean", default: false },
 		"dry-run": { type: "boolean", default: false },
 		status: { type: "boolean", default: false },
@@ -57,6 +63,9 @@ const { values } = parseArgs({
 
 function usage() {
 	console.log(`provision — stand up a domain's mailboxes from a project manifest.
+
+⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
+  domain that already has MX records unless you pass --confirm-mx.
 
   npm run joeblew999:provision -- --project scripts/joeblew999-project.example.json
   npm run joeblew999:provision -- --domain <hostname> --roles a,b,c [--onboard] [--share]
@@ -74,6 +83,7 @@ Flags:
   --roles-file <path>   read role names from a file (JSON array or one per line)
   --onboard             add the domain to Mailflare first (publishes MX)
   --replace-mx          when onboarding, take MX over from another provider
+  --confirm-mx          allow onboarding a domain that already has MX records
   --share               create the mailboxes as shared (needs Team)
   --dry-run             list what would change, create nothing
   --status              report what exists vs the manifest, change nothing
@@ -115,6 +125,18 @@ function onboardBody(hostname) {
 }
 
 const PERMISSIONS = new Set(["read_only", "send_as", "send_on_behalf", "full_access"]);
+
+// The domain's current MX records, from the Cloudflare API (null when unavailable).
+// Used to refuse taking over a domain that already receives mail.
+async function currentMx(hostname) {
+	const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
+	if (!token) return null;
+	const zone = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(hostname)}`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+	const zoneId = zone?.result?.[0]?.id;
+	if (!zoneId) return null;
+	const records = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=MX&per_page=100`, { headers: { Authorization: `Bearer ${token}` } }).then((r) => r.json()).catch(() => null);
+	return records?.result ?? null;
+}
 
 // Apply a mailbox's `access: [{ email, permission }]` grants straight to
 // mailbox_access (what the app reads). Deleting the mailbox cascades them away.
@@ -192,9 +214,19 @@ async function main() {
 					console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
 					return 1;
 				}
+				const mx = await currentMx(domainValue);
+				if (mx?.length) {
+					console.log(`  ⚠ ${domainValue} already has MX records — onboarding changes where its mail goes:`);
+					for (const record of mx) console.log(`      ${record.priority ?? ""} ${record.content}`);
+				}
 				if (values["dry-run"]) {
 					console.log(`  → would onboard ${domainValue}, then create ${roles.map(({ role }) => `${role}@${domainValue}`).join(", ")}`);
 					return 0;
+				}
+				if (mx?.length && !values["confirm-mx"]) {
+					console.error(`\nRefusing to onboard ${domainValue}: it already receives mail.`);
+					console.error("Re-run with --confirm-mx to knowingly take over its MX, or pick a domain with no mail.");
+					return 1;
 				}
 				console.log(`Onboarding ${domainValue} into Mailflare…`);
 				const added = await request(base, "/api/v1/domains", {

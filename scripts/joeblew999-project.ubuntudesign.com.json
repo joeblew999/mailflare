@@ -1,0 +1,14 @@
+{
+  "domain": "ubuntudesign.com",
+  "mailboxes": [
+    { "role": "office", "displayName": "Office" },
+    { "role": "admin", "displayName": "Admin" },
+    {
+      "role": "support",
+      "displayName": "Support",
+      "shared": true,
+      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
+    },
+    { "role": "events", "displayName": "Events", "shared": true }
+  ]
+}

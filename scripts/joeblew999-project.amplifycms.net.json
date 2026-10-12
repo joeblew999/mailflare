@@ -1,0 +1,14 @@
+{
+  "domain": "amplifycms.net",
+  "onboard": { "enableRouting": true },
+  "mailboxes": [
+    { "role": "admin", "displayName": "Admin" },
+    { "role": "hello", "displayName": "Hello" },
+    {
+      "role": "support",
+      "displayName": "Support",
+      "shared": true,
+      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
+    }
+  ]
+}

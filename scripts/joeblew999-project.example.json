@@ -1,5 +1,5 @@
 {
-  "domain": "ubuntusoftware.net",
+  "domain": "example.com",
   "onboard": { "enableRouting": true, "replaceMxRecords": true },
   "mailboxes": [
     { "role": "office", "displayName": "Office" },
