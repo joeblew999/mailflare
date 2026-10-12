@@ -34,6 +34,8 @@
 //
 // Flags:
 //   --project <path>      apply a project manifest (domain + mailboxes + onboard)
+//   --all                 apply every joeblew999-project.*.json in --dir
+//   --dir <path>          directory to scan when using --all (default: scripts)
 //   --domain <hostname>   domain to provision on (overrides the manifest)
 //   --roles <a,b,c>       ad-hoc role names (alternative to a manifest)
 //   --roles-file <path>   read roles from a file (JSON array or one per line)
@@ -52,15 +54,19 @@
 //
 // Runs under tsx (it imports app code via ./joeblew999-lib-app).
 import { parseArgs } from "node:util";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib";
+import { d1 as libD1, keychain, request, run, sqlEscape } from "./joeblew999-lib";
 import { mintMcpKey, validateBody, withAdminKey } from "./joeblew999-lib-app";
 
 const { values } = parseArgs({
 	options: {
 		domain: { type: "string" },
 		project: { type: "string" },
+		all: { type: "boolean", default: false },
+		dir: { type: "string", default: "scripts" },
 		roles: { type: "string", default: "" },
 		"roles-file": { type: "string" },
 		onboard: { type: "boolean", default: false },
@@ -100,6 +106,8 @@ Project file (JSON):
 
 Flags:
   --project <path>      apply a project manifest (domain + mailboxes + onboard)
+  --all                 apply every joeblew999-project.*.json in --dir
+  --dir <path>          directory to scan when using --all (default: scripts)
   --domain <hostname>   domain to provision on (overrides the manifest)
   --roles <a,b,c>       ad-hoc role names (alternative to a manifest)
   --roles-file <path>   read role names from a file (JSON array or one per line)
@@ -406,6 +414,52 @@ async function removeDomain(domain, key, base, dryRun) {
 	return res.status === 200 ? 0 : 1;
 }
 
+// Mass mode: apply every project manifest in the directory, each in its own process
+// so one project's failure cannot disturb another's run.
+async function runAll() {
+	const dir = values.dir;
+	let files: string[];
+	try {
+		files = readdirSync(dir)
+			.filter((name) => /^joeblew999-project\..*\.json$/.test(name))
+			.sort()
+			.map((name) => join(dir, name));
+	} catch (error) {
+		console.error(`Could not read ${dir}: ${error instanceof Error ? error.message : String(error)}`);
+		return 1;
+	}
+	if (files.length === 0) {
+		console.error(`No joeblew999-project.*.json manifests in ${dir}.`);
+		return 1;
+	}
+
+	const passthrough: string[] = [];
+	for (const flag of ["dry-run", "status", "cleanup", "onboard", "replace-mx", "confirm-mx", "share", "disable-accounts", "remove-domain"]) {
+		if (values[flag]) passthrough.push(`--${flag}`);
+	}
+	if (values.url) passthrough.push("--url", values.url);
+	if (values.db) passthrough.push("--db", values.db);
+	if (values.local) passthrough.push("--local");
+
+	const self = fileURLToPath(import.meta.url);
+	console.log(`Applying ${files.length} project(s) from ${dir}${passthrough.length > 0 ? ` (${passthrough.join(" ")})` : ""}\n`);
+
+	const results: Array<{ file: string; ok: boolean }> = [];
+	for (const file of files) {
+		console.log(`\n──────── ${file}`);
+		const result = run("npx", ["tsx", self, "--project", file, ...passthrough]);
+		process.stdout.write(result.stdout ?? "");
+		process.stderr.write(result.stderr ?? "");
+		results.push({ file, ok: result.status === 0 });
+	}
+
+	const failed = results.filter((r) => !r.ok);
+	console.log("\n──────── summary");
+	for (const r of results) console.log(`  ${r.ok ? "✓" : "✗"} ${r.file}`);
+	console.log(`\n${results.length - failed.length}/${results.length} project(s) ok`);
+	return failed.length === 0 ? 0 : 1;
+}
+
 async function main() {
 	const domainName = domainValue.toLowerCase();
 	try {
@@ -591,6 +645,9 @@ async function main() {
 if (values.help) {
 	usage();
 	process.exit(0);
+}
+if (values.all) {
+	process.exit(await runAll());
 }
 if (!domainValue) {
 	console.error("No domain. Pass --project <file> or --domain <hostname>.\n");
