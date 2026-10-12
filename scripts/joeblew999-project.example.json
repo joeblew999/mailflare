@@ -19,7 +19,7 @@
   ],
   "accounts": [{ "username": "sam", "name": "Sam", "role": "user", "passwordEnv": "PROV_PASSWORD" }],
   "routing": [
-    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true },
+    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true, "mailbox": "support" },
     { "pattern": "no-reply", "action": "reject", "rejectReason": "No such user" }
   ]
 }

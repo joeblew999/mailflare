@@ -15,6 +15,6 @@
     { "username": "gerard", "name": "Gerard", "role": "admin", "passwordEnv": "MAILFLARE_PROV_PASSWORD" }
   ],
   "routing": [
-    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true }
+    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true, "mailbox": "support" }
   ]
 }

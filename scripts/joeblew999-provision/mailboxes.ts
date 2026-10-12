@@ -1,10 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- external HTTP JSON. */
-import { randomBytes } from "node:crypto";
+import { newId } from "@/lib/ids";
+import { mailboxAccessSchema } from "@/lib/validators";
 import { sqlEscape } from "../joeblew999-lib";
 import { validateBody } from "../joeblew999-lib-app";
 import type { AccessGrant, Context, Role } from "./types";
-
-const PERMISSIONS = new Set(["read_only", "send_as", "send_on_behalf", "full_access"]);
 
 // Apply a mailbox's `access: [{ email, permission }]` grants straight to
 // mailbox_access (what the app reads). Deleting the mailbox cascades them away.
@@ -13,14 +12,21 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 	for (const grant of grants) {
 		const email = String(grant.email ?? "").trim().toLowerCase();
 		const permission = String(grant.permission ?? "full_access").trim();
-		if (!email || !PERMISSIONS.has(permission)) {
-			console.log(`     ✗ ${address}: bad access entry ${JSON.stringify(grant)}`);
+		if (!email) {
+			console.log(`     ✗ ${address}: access entry needs an email ${JSON.stringify(grant)}`);
 			failures += 1;
 			continue;
 		}
 		const [user] = ctx.d1(`SELECT id FROM users WHERE lower(email)='${sqlEscape(email)}' LIMIT 1;`);
 		if (!user) {
 			console.log(`     ✗ ${address}: no user with email ${email}`);
+			failures += 1;
+			continue;
+		}
+		// Validate against the app's own schema so permissions cannot drift.
+		const parsed = mailboxAccessSchema.safeParse({ userId: user.id, permission });
+		if (!parsed.success) {
+			console.log(`     ✗ ${address}: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
 			failures += 1;
 			continue;
 		}
@@ -38,7 +44,7 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 			continue;
 		}
 		ctx.d1(`INSERT INTO mailbox_access (id, mailbox_id, user_id, permission, created_at)
-		    VALUES ('mac_${randomBytes(6).toString("hex")}', '${sqlEscape(mailboxId)}', '${sqlEscape(user.id)}', '${sqlEscape(permission)}', strftime('%s','now'))
+		    VALUES ('${newId("mac")}', '${sqlEscape(mailboxId)}', '${sqlEscape(user.id)}', '${sqlEscape(parsed.data.permission)}', strftime('%s','now'))
 		    ON CONFLICT(mailbox_id, user_id) DO UPDATE SET permission=excluded.permission;`);
 		console.log(`     ✓ ${permission} on ${address} → ${email}`);
 	}

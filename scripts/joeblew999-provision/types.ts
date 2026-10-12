@@ -28,6 +28,9 @@ export type RoutingEntry = {
 	rejectReason?: string;
 	priority?: number;
 	matchValue?: string;
+	mailboxId?: string;
+	/** Destination mailbox by role (for keepCopy / store). */
+	mailbox?: string;
 };
 export type McpKeyEntry = { name?: string; mailboxes?: string[]; scopes?: string[] };
 

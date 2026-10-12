@@ -58,7 +58,7 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 		if (ctx.flags.removeDomain) failures += await removeDomain(ctx);
 	} else {
 		for (const account of accounts) failures += await ensureAccount(ctx, account);
-		for (const rule of routing) failures += ensureRouting(ctx, rule);
+		for (const rule of routing) failures += ensureRouting(ctx, rule, mailboxIdsByRole);
 		for (const entry of mcpKeys) failures += ensureMcpKey(ctx, entry, mailboxIdsByRole);
 	}
 
