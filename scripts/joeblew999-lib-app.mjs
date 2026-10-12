@@ -5,6 +5,27 @@ import { randomBytes } from "node:crypto";
 import { d1, findAdmin, resolveInstanceUrl, sqlEscape } from "./joeblew999-lib.mjs";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
+import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
+
+// The app's own request schemas, keyed by what we send. Validating here means a
+// hand-written body cannot drift from what the route accepts: it throws before the
+// request is made, instead of 400-ing halfway through a run.
+const REQUEST_SCHEMAS = {
+	domain: addDomainSchema,
+	mailbox: mailboxSchema,
+	account: createUserAccountSchema,
+	accountUpdate: updateManagedAccountSchema,
+};
+
+export function validateBody(kind, body) {
+	const schema = REQUEST_SCHEMAS[kind];
+	if (!schema) throw new Error(`no schema registered for "${kind}"`);
+	const parsed = schema.safeParse(body);
+	if (!parsed.success) {
+		throw new Error(`the app's ${kind} schema rejected this body: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
+	}
+	return parsed.data;
+}
 
 // Insert a short-lived admin API key into D1 and return it.
 export function mintAdminKey({ db, local, adminId, name = "smoke" }) {

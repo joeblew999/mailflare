@@ -54,7 +54,7 @@ import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib.mjs";
-import { mintMcpKey, withAdminKey } from "./joeblew999-lib-app.mjs";
+import { mintMcpKey, validateBody, withAdminKey } from "./joeblew999-lib-app.mjs";
 
 const { values } = parseArgs({
 	options: {
@@ -144,7 +144,7 @@ function onboardBody(hostname) {
 	if (typeof o.enableSending === "boolean") body.enableSending = o.enableSending;
 	if (o.sendingProvider) body.sendingProvider = o.sendingProvider;
 	if (o.receivingProvider) body.receivingProvider = o.receivingProvider;
-	return body;
+	return validateBody("domain", body);
 }
 
 const PERMISSIONS = new Set(["read_only", "send_as", "send_on_behalf", "full_access"]);
@@ -219,7 +219,7 @@ async function ensureAccount(entry, domain, key, base, dryRun) {
 				const res = await request(base, `/api/v1/accounts/${existing.id}`, {
 					method: "PATCH",
 					key,
-					body: { name: existing.name ?? username, role: existing.role ?? "user", disabled: false, canManageMailboxes: Boolean(existing.canManageMailboxes) },
+					body: validateBody("accountUpdate", { name: existing.name ?? username, role: existing.role ?? "user", disabled: false, canManageMailboxes: Boolean(existing.canManageMailboxes) }),
 				});
 				console.log(`  ${res.status === 200 ? "✓ re-enabled" : `✗ re-enable failed (HTTP ${res.status})`} account ${email}`);
 				if (res.status !== 200) return 1;
@@ -240,7 +240,7 @@ async function ensureAccount(entry, domain, key, base, dryRun) {
 	const created = await request(base, "/api/v1/accounts", {
 		method: "POST",
 		key,
-		body: { username, domainId: domain.id, password, role: entry.role === "admin" ? "admin" : "user", useAllDomains: false, aliases: [] },
+		body: validateBody("account", { username, domainId: domain.id, password, role: entry.role === "admin" ? "admin" : "user", useAllDomains: false, aliases: [] }),
 	});
 	if (created.status !== 200 && created.status !== 201) {
 		console.log(`  ✗ account failed (HTTP ${created.status}) ${email} — ${created.json?.error ?? ""}`);
@@ -356,7 +356,7 @@ async function ensureAccountMailbox(account, domain, key, base, username, email,
 	const created = await request(base, "/api/v1/mailboxes", {
 		method: "POST",
 		key,
-		body: { domainId: domain.id, localPart: username, displayName: account.name ?? username, type: "personal", ownerUserId: account.id },
+		body: validateBody("mailbox", { domainId: domain.id, localPart: username, displayName: account.name ?? username, type: "personal", ownerUserId: account.id }),
 	});
 	if (created.status === 201) {
 		console.log(`  ✓ created mailbox ${email}`);
@@ -388,7 +388,7 @@ async function disableAccount(entry, domain, key, base, dryRun) {
 		method: "PATCH",
 		key,
 		// updateManagedAccountSchema requires name, role, disabled and canManageMailboxes.
-		body: { name: account.name ?? username, role: account.role ?? "user", disabled: true, canManageMailboxes: Boolean(account.canManageMailboxes) },
+		body: validateBody("accountUpdate", { name: account.name ?? username, role: account.role ?? "user", disabled: true, canManageMailboxes: Boolean(account.canManageMailboxes) }),
 	});
 	console.log(`  ${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status})`} account ${email}`);
 	return res.status === 200 ? 0 : 1;
@@ -540,7 +540,7 @@ async function main() {
 					const created = await request(base, "/api/v1/mailboxes", {
 						method: "POST",
 						key: key,
-						body: { domainId: domain.id, localPart: role, displayName, type: share ? "shared" : "personal" },
+						body: validateBody("mailbox", { domainId: domain.id, localPart: role, displayName, type: share ? "shared" : "personal" }),
 					});
 					if (created.status === 201) {
 						mailboxId = created.json.id;
