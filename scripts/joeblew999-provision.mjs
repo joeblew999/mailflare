@@ -170,6 +170,15 @@ function applyAccess(mailboxId, address, grants, dryRun) {
 			failures += 1;
 			continue;
 		}
+		// Workaround: the app lists a mailbox twice when a user both owns it and holds a
+		// grant on it (listAccessibleMailboxes merges without de-duping). Skip owner grants
+		// and remove any redundant row we created before.
+		const [owner] = d1(`SELECT user_id FROM mailboxes WHERE id='${sqlEscape(mailboxId)}';`);
+		if (owner && owner.user_id === user.id) {
+			if (!dryRun) d1(`DELETE FROM mailbox_access WHERE mailbox_id='${sqlEscape(mailboxId)}' AND user_id='${sqlEscape(user.id)}';`);
+			console.log(`     · ${email} owns ${address} — grant not needed, skipped`);
+			continue;
+		}
 		if (dryRun) {
 			console.log(`     → would grant ${permission} on ${address} to ${email}`);
 			continue;
