@@ -18,6 +18,21 @@ export function mintAdminKey({ db, local, adminId, name = "smoke" }) {
 	return { fullKey, keyId: id, prefix };
 }
 
+// Mint an MCP key (kind "mcp"): scoped to MCP tools, optionally limited to mailboxes.
+export function mintMcpKey({ db, local, adminId, name, scopes, mailboxIds = [] }) {
+	const { fullKey, prefix, hash } = generateApiKey();
+	const id = `key_mcp_${randomBytes(6).toString("hex")}`;
+	d1(
+		`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mailbox_scope_enabled, created_at)
+     VALUES ('${sqlEscape(id)}', 'mcp', '${sqlEscape(adminId)}', '${sqlEscape(name)}', '${sqlEscape(prefix)}', '${sqlEscape(hash)}', '${sqlEscape(JSON.stringify(scopes))}', ${mailboxIds.length ? 1 : 0}, strftime('%s','now'));`,
+		{ db, local },
+	);
+	for (const mailboxId of mailboxIds) {
+		d1(`INSERT INTO mcp_key_mailboxes (key_id, mailbox_id) VALUES ('${sqlEscape(id)}', '${sqlEscape(mailboxId)}');`, { db, local });
+	}
+	return { fullKey, keyId: id, prefix };
+}
+
 /**
  * Resolve the instance, find the admin, mint a temporary API key, run `fn` with it,
  * and always delete the key afterwards. Callers cannot leak the key: a bare

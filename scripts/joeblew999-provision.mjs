@@ -20,8 +20,8 @@
 //         "access": [ { "email": "you@example.com", "permission": "full_access" } ] }
 //     ],
 //     "accounts": [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
-//     "routing":  [ { "pattern": "*",      "action": "forward", "forwardTo": "you@example.com" },
-//                   { "pattern": "no-reply", "action": "reject" } ]
+//     "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ],
+//     "mcpKeys":  [ { "name": "agent", "mailboxes": ["office"], "scopes": ["mcp:read", "mcp:draft"] } ]
 //   }
 //
 // Manifest sections:
@@ -29,6 +29,7 @@
 //   mailboxes role mailboxes, shared inboxes, and access grants
 //   accounts  login accounts (password, or passwordEnv, else a generated one printed once)
 //   routing   domain-scope rules run during address resolution: forward / reject / store
+//   mcpKeys   MCP keys for AI agents; prints the ready-to-paste client config
 //
 // Flags:
 //   --project <path>      apply a project manifest (domain + mailboxes + onboard)
@@ -48,7 +49,7 @@ import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { d1 as libD1, keychain, request, sqlEscape } from "./joeblew999-lib.mjs";
-import { withAdminKey } from "./joeblew999-lib-app.mjs";
+import { mintMcpKey, withAdminKey } from "./joeblew999-lib-app.mjs";
 
 const { values } = parseArgs({
 	options: {
@@ -86,7 +87,8 @@ Project file (JSON):
                    { "role": "support", "shared": true,
                      "access": [ { "email": "you@example.com", "permission": "full_access" } ] } ],
     "accounts": [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
-    "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ] }
+    "routing":  [ { "pattern": "*", "action": "forward", "forwardTo": "you@example.com" } ],
+    "mcpKeys":  [ { "name": "agent", "mailboxes": ["office"] } ] }
 
 Flags:
   --project <path>      apply a project manifest (domain + mailboxes + onboard)
@@ -258,6 +260,54 @@ function removeRouting(entry, domain, dryRun) {
 	return 0;
 }
 
+// MCP tool scopes (mirrors MCP_SCOPES in src/lib/mcp/auth.ts).
+const MCP_SCOPES = ["mcp:read", "mcp:draft", "mcp:organize", "mcp:request-send", "mcp:calendar-read", "mcp:calendar-write"];
+
+// Mint an MCP key (`mcpKeys: [{ name, mailboxes?, scopes? }]`) and print the
+// ready-to-paste client config. The key is shown once.
+function ensureMcpKey(entry, domain, adminId, mailboxIdsByRole, base, dryRun) {
+	const name = String(entry.name ?? "agent").trim();
+	const scopes = Array.isArray(entry.scopes) && entry.scopes.length > 0 ? entry.scopes.map(String) : MCP_SCOPES;
+	const bad = scopes.filter((scope) => !MCP_SCOPES.includes(scope));
+	if (bad.length > 0) {
+		console.log(`  ✗ mcp key "${name}": unknown scope(s) ${bad.join(", ")}`);
+		return 1;
+	}
+	const mailboxIds = [];
+	for (const role of entry.mailboxes ?? []) {
+		const id = mailboxIdsByRole.get(String(role).toLowerCase());
+		if (!id) {
+			console.log(`  ⚠ mcp key "${name}": mailbox "${role}" not found, skipping it`);
+			continue;
+		}
+		mailboxIds.push(id);
+	}
+	const existing = d1(`SELECT id FROM api_keys WHERE user_id='${sqlEscape(adminId)}' AND kind='mcp' AND name='${sqlEscape(name)}';`);
+	if (existing.length > 0) {
+		console.log(`  · mcp key "${name}" — already exists`);
+		return 0;
+	}
+	if (dryRun) {
+		console.log(`  → would create mcp key "${name}" (${scopes.length} scope(s), ${mailboxIds.length} mailbox(es))`);
+		return 0;
+	}
+	const { fullKey } = mintMcpKey({ db: values.db, local: values.local, adminId, name, scopes, mailboxIds });
+	console.log(`  ✓ created mcp key "${name}"  ⚠ key (shown once): ${fullKey}`);
+	console.log(`     client JSON: {"mcpServers":{"mailflare":{"type":"http","url":"${base}/mcp","headers":{"Authorization":"Bearer ${fullKey}"}}}}`);
+	return 0;
+}
+
+function removeMcpKey(entry, adminId, dryRun) {
+	const name = String(entry.name ?? "agent").trim();
+	if (dryRun) {
+		console.log(`  → would remove mcp key "${name}"`);
+		return 0;
+	}
+	d1(`DELETE FROM api_keys WHERE user_id='${sqlEscape(adminId)}' AND kind='mcp' AND name='${sqlEscape(name)}';`);
+	console.log(`  ✓ removed mcp key "${name}"`);
+	return 0;
+}
+
 async function main() {
 	const domainName = domainValue.toLowerCase();
 	try {
@@ -346,6 +396,7 @@ async function main() {
 
 			console.log(`${values.cleanup ? "Removing" : "Provisioning"} ${roles.length} role(s) on ${domainValue}:\n`);
 			let failures = 0;
+			const mailboxIdsByRole = new Map();
 
 			for (const { role, displayName, share, access } of roles) {
 				const address = `${role}@${domainValue}`;
@@ -390,21 +441,26 @@ async function main() {
 					}
 				}
 
+				if (mailboxId) mailboxIdsByRole.set(role, mailboxId);
+
 				if (access.length && (mailboxId || values["dry-run"])) {
 					failures += applyAccess(mailboxId ?? "«new»", address, access, values["dry-run"]);
 				}
 			}
 
-			// Accounts (logins) and domain-scope routing rules.
+			// Accounts (logins), domain-scope routing rules, and MCP keys.
 			const accounts = project?.accounts ?? [];
 			const routing = project?.routing ?? [];
-			if (accounts.length || routing.length) console.log("");
+			const mcpKeys = project?.mcpKeys ?? [];
+			if (accounts.length || routing.length || mcpKeys.length) console.log("");
 
 			if (values.cleanup) {
 				for (const rule of routing) failures += removeRouting(rule, domain, values["dry-run"]);
+				for (const entry of mcpKeys) failures += removeMcpKey(entry, admin.id, values["dry-run"]);
 			} else {
 				for (const account of accounts) failures += await ensureAccount(account, domain, key, base, values["dry-run"]);
 				for (const rule of routing) failures += ensureRouting(rule, domain, admin.id, values["dry-run"]);
+				for (const entry of mcpKeys) failures += ensureMcpKey(entry, domain, admin.id, mailboxIdsByRole, base, values["dry-run"]);
 			}
 
 			if (!values["dry-run"]) console.log(`\nMailboxes: ${base}/mailboxes`);

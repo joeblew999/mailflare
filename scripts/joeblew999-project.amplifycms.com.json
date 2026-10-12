@@ -17,5 +17,8 @@
   ],
   "routing": [
     { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true }
+  ],
+  "mcpKeys": [
+    { "name": "agent", "mailboxes": ["support"], "scopes": ["mcp:read", "mcp:draft", "mcp:request-send"] }
   ]
 }
