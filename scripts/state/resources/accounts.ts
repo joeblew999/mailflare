@@ -21,13 +21,6 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 
 	if (existing) {
 		if (existing.disabled) {
-			if (ctx.flags.dryRun) {
-				console.log(`  → would re-enable account ${email}`);
-			} else {
-				const res = await ctx.store.updateAccount(existing.id, updateBody(existing, username, false));
-				console.log(`${res.status === 200 ? "✓ re-enabled" : `✗ re-enable failed (HTTP ${res.status}) — ${JSON.stringify(res.json?.error ?? "")}`} account ${email}`);
-				if (res.status !== 200) return 1;
-			}
 		} else {
 			console.log(`  · account ${email} — already exists`);
 		}
@@ -37,10 +30,6 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 	const fromEnv = entry.passwordEnv ? process.env[entry.passwordEnv] : null;
 	const password = entry.password || fromEnv || newId();
 	const generated = !entry.password && !fromEnv;
-	if (ctx.flags.dryRun) {
-		console.log(`  → would create account ${email} (${entry.role === "admin" ? "admin" : "user"})`);
-		return 0;
-	}
 	const created = await ctx.store.createAccount(
 		validateBody("account", {
 			username,
@@ -83,10 +72,6 @@ function updateBody(account: ApiAccount, username: string, disabled: boolean) {
 async function ensureAccountMailbox(ctx: Context, account: ApiAccount, username: string, email: string): Promise<number> {
 	const boxes = await mailboxesForDomain(ctx);
 	if (boxes.has(username)) return 0;
-	if (ctx.flags.dryRun) {
-		console.log(`  → would create mailbox ${email}`);
-		return 0;
-	}
 	const created = await ctx.store.createMailbox(
 		validateBody("mailbox", {
 			domainId: requireDomain(ctx).id,
@@ -116,10 +101,6 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 	}
 	if (account.isPrimaryAdmin) {
 		console.log(`  ⚠ ${email} is the primary admin — not disabling`);
-		return 0;
-	}
-	if (ctx.flags.dryRun) {
-		console.log(`  → would disable account ${email}`);
 		return 0;
 	}
 	const res = await ctx.store.updateAccount(account.id, updateBody(account, username, true));

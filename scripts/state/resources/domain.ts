@@ -1,7 +1,7 @@
 import { requireDomain } from "../context";
 import { onboardBody } from "../document";
 import type { Context } from "../context";
-import type { ApiDomain, Role } from "../spec";
+import type { ApiDomain } from "../spec";
 import type { Resource } from "./resource";
 
 export const findDomain = (list: ApiDomain[], name: string) =>
@@ -16,7 +16,7 @@ export const findDomain = (list: ApiDomain[], name: string) =>
  * other resource runs its own remove(), so there is nothing to do here when the
  * domain is already gone.
  */
-export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number> {
+export async function ensureDomain(ctx: Context): Promise<number> {
 	ctx.domain = findDomain(await ctx.store.listDomains(), ctx.domainName) ?? null;
 	if (ctx.domain) return 0;
 	if (ctx.flags.cleanup) return 0;
@@ -38,11 +38,6 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number>
 		console.log(`  ⚠ ${ctx.domainName} already has MX records — onboarding changes where its mail goes:`);
 		for (const record of mx) console.log(`      ${record.priority ?? ""} ${record.content}`);
 	}
-	if (ctx.flags.dryRun) {
-		const extras = `${ctx.spec?.accounts?.length ? ` + ${ctx.spec.accounts.length} account(s)` : ""}${ctx.spec?.routing?.length ? ` + ${ctx.spec.routing.length} routing rule(s)` : ""}`;
-		console.log(`  → would onboard ${ctx.domainName}, then create ${roles.map(({ role }) => `${role}@${ctx.domainName}`).join(", ")}${extras}`);
-		return 0;
-	}
 	if (mx?.length && !ctx.flags.confirmMx) {
 		console.error(`\nRefusing to onboard ${ctx.domainName}: it already receives mail.`);
 		console.error("Re-run with --confirm-mx to knowingly take over its MX, or pick a domain with no mail.");
@@ -50,7 +45,7 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number>
 	}
 
 	console.log(`Onboarding ${ctx.domainName} into Mailflare…`);
-	const added = await ctx.store.onboardDomain(onboardBody(ctx.spec, ctx.flags, ctx.domainName));
+	const added = await ctx.store.onboardDomain(onboardBody(ctx.spec, ctx.domainName));
 	if (added.status !== 200 && added.status !== 201) {
 		console.error(`Could not onboard ${ctx.domainName}: HTTP ${added.status} ${added.json?.error ?? ""}`);
 		return 1;
@@ -65,10 +60,6 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number>
 
 // Removing the domain (app API) also drops its Email Routing/DNS config.
 export async function removeDomain(ctx: Context): Promise<number> {
-	if (ctx.flags.dryRun) {
-		console.log(`  → would remove domain ${ctx.domainName} from Mailflare (drops its DNS/MX)`);
-		return 0;
-	}
 	const res = await ctx.store.removeDomain(requireDomain(ctx).id);
 	console.log(`${res.status === 200 ? "✓ removed" : `✗ remove failed (HTTP ${res.status})`} domain ${ctx.domainName}`);
 	return res.status === 200 ? 0 : 1;
@@ -87,9 +78,9 @@ export const domainResource: Resource = {
 		if (ctx.domain) return [{ address: `domain.${ctx.domainName}`, action: "unchanged" }];
 		return [{ address: `domain.${ctx.domainName}`, action: "create", detail: "onboard (publishes MX)" }];
 	},
-	apply: (ctx, roles) => ensureDomain(ctx, roles),
-	async remove(ctx, roles) {
-		await ensureDomain(ctx, roles); // resolve only: cleanup never onboards
+	apply: (ctx) => ensureDomain(ctx),
+	async remove(ctx) {
+		await ensureDomain(ctx); // resolve only: cleanup never onboards
 		return ctx.spec?.teardown?.domain === "remove" && ctx.domain ? await removeDomain(ctx) : 0;
 	},
 };

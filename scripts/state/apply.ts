@@ -105,24 +105,6 @@ try {
 		process.exit(1);
 	}
 
-	// The instance document holds the globals. Deriving them here is what lets the CLI be
-	// three verbs and a target without the resources losing their single source of truth.
-	const instance = entries.find((entry) => entry.name.startsWith("instance:"))?.spec;
-	if (instance) {
-		const plan = typeof instance.license === "string" ? instance.license : instance.license?.plan;
-		if (plan) flags.plan = plan;
-		if (instance.push) {
-			flags.push = true;
-			flags.to = instance.push.to;
-			flags.from = instance.push.from;
-			flags.subject = instance.push.subject;
-			if (instance.push.timeout) flags.timeout = String(instance.push.timeout);
-		}
-		if (instance.fresh?.admin) {
-			flags.adminEmail = instance.fresh.admin.email;
-			flags.adminPassword = instance.fresh.admin.password;
-		}
-	}
 } catch (error) {
 	console.error(message(error));
 	process.exit(1);

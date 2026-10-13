@@ -3,7 +3,6 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { assertValidSpec } from "./validate";
 import { join } from "node:path";
 import { validateBody } from "./app";
-import type { Flags } from "./flags";
 import type { Role, Spec } from "./spec";
 
 export function loadSpec(path: string): Spec {
@@ -33,9 +32,9 @@ export function rolesFor(spec: Spec | null): Role[] {
 }
 
 // Onboard body: the document's options, with the flag value winning for MX replacement.
-export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
+export function onboardBody(spec: Spec | null, hostname: string) {
 	const o = spec?.onboard ?? {};
-	const replaceMx = flags.replaceMx || Boolean(o.replaceMxRecords);
+	const replaceMx = Boolean(o.replaceMxRecords);
 	const body: any = { hostname, enableRouting: o.enableRouting ?? true, replaceMxRecords: replaceMx };
 	if (typeof o.enableSending === "boolean") body.enableSending = o.enableSending;
 	if (o.sendingProvider) body.sendingProvider = o.sendingProvider;

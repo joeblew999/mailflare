@@ -21,10 +21,6 @@ export function ensureMcpKey(ctx: Context, entry: McpKeyEntry, mailboxIdsByRole:
 		console.log(`  · mcp key "${name}" — already exists`);
 		return 0;
 	}
-	if (ctx.flags.dryRun) {
-		console.log(`  → would create mcp key "${name}" (${scopes.length} scope(s), ${mailboxIds.length} mailbox(es))`);
-		return 0;
-	}
 	const { fullKey } = ctx.store.createMcpKey({ name, scopes, mailboxIds });
 	console.log(`  ✓ created mcp key "${name}"  ⚠ key (shown once): ${fullKey}`);
 	console.log(`     client JSON: {"mcpServers":{"mailflare":{"type":"http","url":"${ctx.store.base}/mcp","headers":{"Authorization":"Bearer ${fullKey}"}}}}`);
@@ -33,10 +29,6 @@ export function ensureMcpKey(ctx: Context, entry: McpKeyEntry, mailboxIdsByRole:
 
 export function removeMcpKey(ctx: Context, entry: McpKeyEntry): number {
 	const name = String(entry.name ?? "agent").trim();
-	if (ctx.flags.dryRun) {
-		console.log(`  → would remove mcp key "${name}"`);
-		return 0;
-	}
 	ctx.store.deleteMcpKey(ctx.store.admin.id, name);
 	console.log(`  ✓ removed mcp key "${name}"`);
 	return 0;

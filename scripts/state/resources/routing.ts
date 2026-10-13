@@ -94,16 +94,8 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 			console.log(`  · ${plan.label} — already exists`);
 			return 0;
 		}
-		if (ctx.flags.dryRun) {
-			console.log(`  → would update ${plan.label}`);
-			return 0;
-		}
 		ctx.store.updateRoutingRule(plan.existing.id, plan.patch);
 		console.log(`  ✓ updated ${plan.label}`);
-		return 0;
-	}
-	if (ctx.flags.dryRun) {
-		console.log(`  → would add ${plan.label}`);
 		return 0;
 	}
 	ctx.store.insertRoutingRule({
@@ -126,10 +118,6 @@ export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 	// Rules are domain-scoped and cascade with the domain, so a missing domain means
 	// there is nothing left to remove - not an error.
 	if (!ctx.domain) return 0;
-	if (ctx.flags.dryRun) {
-		console.log(`  → would remove routing ${pattern} → ${action}`);
-		return 0;
-	}
 	ctx.store.deleteRoutingRule(requireDomain(ctx).id, pattern, action);
 	console.log(`  ✓ removed routing ${pattern} → ${action}`);
 	return 0;

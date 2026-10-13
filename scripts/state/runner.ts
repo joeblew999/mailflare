@@ -52,7 +52,7 @@ export async function runSpecs(store: Store, flags: Flags, values: any, entries:
 		console.log(`\n──────── ${name}`);
 		const domainName = String(spec.domain ?? "").trim().toLowerCase();
 		const roles = rolesFor(spec);
-		const global = flags.fresh || flags.plan !== undefined || flags.push || Boolean(spec.fresh) || Boolean(spec.license) || Boolean(spec.push);
+		const global = flags.fresh || Boolean(spec.fresh) || Boolean(spec.license) || Boolean(spec.push);
 		if (!domainName && !global) {
 			console.log("  ✗ no domain, and the document asks for nothing global");
 			return { name, ok: false };

@@ -231,8 +231,7 @@ function fakeStore(seed: Seed = {}) {
 }
 
 const flags = (over: Partial<Flags> = {}): Flags => ({
-	dryRun: false, status: false, cleanup: false, confirmMx: false, replaceMx: false,
-	push: false, fresh: false, confirmDestroy: false, timeout: "40", db: "test", local: false, ...over,
+	status: false, cleanup: false, fresh: false, confirmMx: false, confirmDestroy: false, db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
@@ -294,11 +293,11 @@ test("dry-run changes nothing", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }], users: [{ id: "u_helper", email: "helper@dev.example" }] });
 	const code = await runOn(
 		store,
-		flags({dryRun: true}),
+		flags({status: true}),
 		projectFor("dev.example", { routing: [{ pattern: "*", action: "forward", forwardTo: "ops@example.com" }], mcpKeys: [{ name: "agent" }], accounts: [{ username: "sam" }] }),
 		roles({ role: "office", access: [{ email: "helper@dev.example" }] }),
 	);
-	assert.equal(code, 0);
+	assert.equal(code, 1, "a plan with work to do exits non-zero - and writes nothing");
 	assert.deepEqual(
 		calls.filter((c) => /^(createMailbox|grantAccess|insertRoutingRule|updateRoutingRule|deleteMailbox|createMcpKey|createAccount|onboardDomain|removeDomain)/.test(c)),
 		[],
@@ -435,7 +434,7 @@ test("license: applied only when asked, and reverted by --cleanup", async () => 
 	const ctxFor = (f: Flags, project: Spec) => [f, project] as const;
 
 	const fresh = fakeStore();
-	const [f1, p1] = ctxFor(flags({plan: "team"}), {});
+	const [f1, p1] = ctxFor(flags(), { license: { plan: "team" } });
 	await runOn(fresh.store, f1, p1, []);
 	assert.deepEqual(fresh.calls.filter((c) => c.startsWith("setLicense")), ["setLicense:team"]);
 	assert.deepEqual(fresh.state.license, { plan: "team", state: "active" });
@@ -445,7 +444,7 @@ test("license: applied only when asked, and reverted by --cleanup", async () => 
 	assert.ok(fromDocument.calls.includes("setLicense:pro"), "a document section works without a flag");
 
 	const dry = fakeStore();
-	await runOn(dry.store, flags({plan: "team", dryRun: true}), {}, []);
+	await runOn(dry.store, flags({status: true}), { license: { plan: "team" } }, []);
 	assert.ok(!dry.calls.some((c) => c.startsWith("setLicense")), "dry run writes nothing");
 
 	const undo = fakeStore({ license: { plan: "team", state: "active" } });
@@ -460,7 +459,7 @@ test("license: --license-status reports the gates", async () => {
 
 test("a global-only run needs no domain and touches no domain resource", async () => {
 	const { store, calls } = fakeStore();
-	const code = await runOn(store, flags({plan: "team"}), {}, []);
+	const code = await runOn(store, flags(), { license: { plan: "team" } }, []);
 	assert.equal(code, 0);
 	assert.ok(!calls.includes("listDomains"), "domain never resolved");
 	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "no domain-scoped work");
@@ -468,11 +467,11 @@ test("a global-only run needs no domain and touches no domain resource", async (
 
 test("push: sends a test email, waits for arrival, and cleanup clears subscriptions", async () => {
 	const sent = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
-	assert.equal(await runOn(sent.store, flags({push: true}), {}, []), 0);
+	assert.equal(await runOn(sent.store, flags(), { push: {} }, []), 0);
 	assert.equal(sent.calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "one email sent");
 
 	const dry = fakeStore({ pushSubscriptions: 1 });
-	assert.equal(await runOn(dry.store, flags({push: true, dryRun: true}), {}, []), 0);
+	assert.equal(await runOn(dry.store, flags({status: true}), { push: {} }, []), 0);
 	assert.ok(!dry.calls.some((c) => c.startsWith("sendViaCloudflare")), "dry run sends nothing");
 
 	const undo = fakeStore({ pushSubscriptions: 3 });
@@ -507,7 +506,7 @@ test("fresh wipes the instance and creates the primary admin", async () => {
 		domains: [{ id: "d1", hostname: "old.example" }],
 		accounts: [{ id: "u_old", email: "old@old.example" }],
 	});
-	const code = await runOn(store, flags({fresh: true, adminEmail: "root@new.example"}), { fresh: {} }, []);
+	const code = await runOn(store, flags({fresh: true}), { fresh: { admin: { email: "root@new.example" } } }, []);
 	assert.equal(code, 0);
 	assert.ok(calls.includes("wipeData"), "data wiped");
 	assert.ok(calls.includes("insertAdmin:root@new.example"), "admin created");
@@ -517,7 +516,7 @@ test("fresh wipes the instance and creates the primary admin", async () => {
 
 test("fresh in a dry run writes nothing", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "old.example" }] });
-	assert.equal(await runOn(store, flags({fresh: true, dryRun: true}), { fresh: {} }, []), 0);
+	assert.equal(await runOn(store, flags({fresh: true, status: true}), { fresh: {} }, []), 1, "a plan writes nothing, and reports the reset it would do");
 	assert.ok(!calls.includes("wipeData") && !calls.includes("insertAdmin:admin@localhost"), "no writes");
 });
 
@@ -679,5 +678,5 @@ test("an unresolvable grant is reported as a problem, not a create", async () =>
 	});
 	const grant = { email: "outside@elsewhere.test", permission: "full_access" as const };
 	const project = projectFor("dev.example", { mailboxes: [{ role: "support", shared: true, access: [grant] }] });
-	assert.equal(await runOn(store, flags({ status: true }), project, roles({ role: "support", access: [grant] })), 1, "the plan reports work to do");
+	assert.equal(await runOn(store, flags({status: true}), project, roles({ role: "support", access: [grant] })), 1, "the plan reports work to do");
 });

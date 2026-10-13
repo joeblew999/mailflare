@@ -37,16 +37,14 @@ export function parseCli() {
 	// to be flags - onboard, share, the licence plan, web push, the admin, teardown - is read
 	// from the documents, and the globals are derived from the instance document in apply.ts
 	// so the resources keep one source of truth.
+	// Flags are how to RUN it. What to build is in the documents, and the resources read them
+	// directly - there is no second copy of a document value in here.
 	const flags: Flags = {
-		dryRun: false,
 		status: false,
 		cleanup: false,
-		confirmMx: Boolean(values["confirm-mx"]),
-		replaceMx: false,
 		fresh: false,
+		confirmMx: Boolean(values["confirm-mx"]),
 		confirmDestroy: Boolean(values["confirm-destroy"]),
-		push: false,
-		timeout: "40",
 		url: values.url,
 		db: String(values.db ?? "mailflare"),
 		local: Boolean(values.local),

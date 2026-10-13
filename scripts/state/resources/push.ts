@@ -49,7 +49,7 @@ function reportSecrets(ctx: Context) {
 export const pushResource: Resource = {
 	section: "push",
 	needsDomain: false,
-	declared: (ctx) => ctx.flags.push || Boolean(ctx.spec?.push),
+	declared: (ctx) => Boolean(ctx.spec?.push) || Boolean(ctx.spec?.push),
 	async plan(ctx) {
 		const subscriptions = ctx.store.pushSubscriptionCount();
 		const missing = VAPID.filter((name) => !(ctx.store.workerSecrets() ?? []).includes(name));
@@ -66,17 +66,13 @@ export const pushResource: Resource = {
 			console.log('  ⚠ none — enable Settings → Inbox → "Browser push notifications" on the device first');
 		}
 
-		const to = (ctx.flags.to ?? entry.to ?? ctx.store.firstAdminEmail())?.trim();
+		const to = (entry.to ?? ctx.store.firstAdminEmail())?.trim();
 		if (!to) {
 			console.log("  ✗ no recipient: pass --to, or give the instance a user");
 			return 1;
 		}
-		const from = (ctx.flags.from ?? entry.from ?? to).trim();
-		const subject = ctx.flags.subject ?? entry.subject ?? `Mailflare push test ${new Date().toISOString()}`;
-		if (ctx.flags.dryRun) {
-			console.log(`  → would send a test email ${from} → ${to} and wait for it to land`);
-			return 0;
-		}
+		const from = (entry.from ?? to).trim();
+		const subject = entry.subject ?? `Mailflare push test ${new Date().toISOString()}`;
 
 		const { messageId } = await ctx.store.sendViaCloudflare({
 			from,
@@ -88,7 +84,8 @@ export const pushResource: Resource = {
 		console.log(`  ✓ queued (${messageId ?? "sent"})`);
 
 		// Match on the unique subject, since the inbound copy gets its own id.
-		const deadline = Date.now() + Number(ctx.flags.timeout) * 1000;
+		const seconds = entry.timeout ?? 40;
+		const deadline = Date.now() + seconds * 1000;
 		let arrived: { status: string } | null = null;
 		while (Date.now() < deadline) {
 			arrived = await ctx.store.messageStatusBySubject(subject);
@@ -99,14 +96,10 @@ export const pushResource: Resource = {
 			console.log(`  ✓ arrived in the inbox (status: ${arrived.status}) — check your devices for the notification`);
 			return 0;
 		}
-		console.log(`  ✗ not seen in the inbox within ${ctx.flags.timeout}s — check Email Routing/MX and the inbound queue`);
+		console.log(`  ✗ not seen in the inbox within ${seconds}s — check Email Routing/MX and the inbound queue`);
 		return 1;
 	},
 	async remove(ctx) {
-		if (ctx.flags.dryRun) {
-			console.log("  → would delete every push_subscriptions row (re-enable the toggle on each device afterwards)");
-			return 0;
-		}
 		ctx.store.clearPushSubscriptions();
 		console.log("  ✓ cleared push_subscriptions — re-enable the toggle on each device");
 		return 0;

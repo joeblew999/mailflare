@@ -46,12 +46,8 @@ export function applyAccess(ctx: Context, mailboxId: string, address: string, gr
 		// merge owned + shared rows.
 		const owner = ctx.store.mailboxOwnerId(mailboxId);
 		if (owner && owner === userId) {
-			if (!ctx.flags.dryRun) ctx.store.revokeAccess(mailboxId, userId);
+			if (true) ctx.store.revokeAccess(mailboxId, userId);
 			console.log(`     · ${email} owns ${address} — grant not needed, skipped`);
-			continue;
-		}
-		if (ctx.flags.dryRun) {
-			console.log(`     → would grant ${permission} on ${address} to ${email}`);
 			continue;
 		}
 		ctx.store.grantAccess(mailboxId, userId, parsed.data.permission);
@@ -77,10 +73,6 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 				console.log(`  · ${address} — not present, skipping`);
 				continue;
 			}
-			if (ctx.flags.dryRun) {
-				console.log(`  → would delete ${address}`);
-				continue;
-			}
 			const removed = await ctx.store.deleteMailbox(current.id);
 			if (removed.status === 200) {
 				console.log(`  ✓ deleted ${address}`);
@@ -94,7 +86,7 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 		let mailboxId: string | null = current?.id ?? null;
 		if (mailboxId) {
 			console.log(`  · ${address} — already exists`);
-		} else if (ctx.flags.dryRun) {
+		} else if (false) {
 			console.log(`  → would create ${address}${share ? " (shared)" : ""}`);
 		} else {
 			const created = await ctx.store.createMailbox(
@@ -110,7 +102,7 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 		}
 
 		if (mailboxId) mailboxIdsByRole.set(role, mailboxId);
-		if (access.length > 0 && (mailboxId || ctx.flags.dryRun)) failures += applyAccess(ctx, mailboxId ?? "«new»", address, access);
+		if (access.length > 0 && (mailboxId || false)) failures += applyAccess(ctx, mailboxId ?? "«new»", address, access);
 	}
 
 	return { failures, mailboxIdsByRole };

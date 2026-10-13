@@ -40,7 +40,7 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 	console.log(`${ctx.flags.cleanup ? "Destroying" : "Applying"} ${ctx.domainName || "instance"}:\n`);
 	let failures = 0;
 	if (ctx.flags.cleanup) {
-		await ensureDomain(ctx, roles);
+		await ensureDomain(ctx);
 		for (const resource of [...rest].reverse()) failures += await resource.remove(ctx, roles, state);
 		if (domain) failures += await domain.remove(ctx, roles, state);
 	} else {
@@ -48,6 +48,6 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 		for (const resource of rest) failures += await resource.apply(ctx, roles, state);
 	}
 
-	if (ctx.domain && !ctx.flags.dryRun) console.log(`\nMailboxes: ${ctx.store.base}/mailboxes`);
+	if (ctx.domain) console.log(`\nMailboxes: ${ctx.store.base}/mailboxes`);
 	return failures === 0 ? 0 : 1;
 }

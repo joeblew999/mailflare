@@ -20,9 +20,9 @@ export const freshResource: Resource = {
 	},
 	async apply(ctx) {
 		const entry = typeof ctx.spec?.fresh === "object" ? ctx.spec.fresh : {};
-		const email = (ctx.flags.adminEmail ?? entry.admin?.email ?? "admin@localhost").trim().toLowerCase();
-		const password = ctx.flags.adminPassword ?? entry.admin?.password ?? newId();
-		const generated = !ctx.flags.adminPassword && !entry.admin?.password;
+		const email = (entry.admin?.email ?? "admin@localhost").trim().toLowerCase();
+		const password = entry.admin?.password ?? newId();
+		const generated = !entry.admin?.password;
 
 		// A reset touches the database only. Saying so is the difference between a reset and a
 		// surprise: the domains' Cloudflare MX, Email Routing and DNS survive and are orphaned.
@@ -32,10 +32,6 @@ export const freshResource: Resource = {
 			console.log(`  ⚠ ${domains} domain(s) exist — wiping the database does NOT remove their Cloudflare MX/Email Routing/DNS, which will be left orphaned`);
 		}
 
-		if (ctx.flags.dryRun) {
-			console.log(`  → would wipe ${ctx.flags.local ? "the local" : "the remote"} database to empty and create admin ${email}`);
-			return 0;
-		}
 
 		ctx.store.applyMigrations();
 		if (!ctx.store.schemaPresent()) {
