@@ -57,6 +57,8 @@ Email Routing and DNS survive, so on a live instance it **orphans infrastructure
 ```bash
 npm run state -- --spec scripts/state/specs/example.json    # one document
 npm run state -- --all --dry-run                            # every document in specs/
+npm run state -- --instance mailflare --spec <doc>         # a server from specs/fleet.json
+                                                           # (its url and db come from there)
 npm run state -- --spec <file> --status                     # drift report, writes nothing
 npm run state -- --spec <file> --cleanup                    # tear the document down
 npm run state -- --fresh --spec <file>                      # reset the DB, then apply
@@ -116,13 +118,11 @@ admin but also demands Turnstile and a domain, so it is unusable as a bootstrap.
 # 2. Reset it and give it a primary admin. The instance document is applied FIRST, so
 #    server-wide facts (the licence) stop being repeated in every tenant document:
 #    specs/instances/<server>.json — copy instances/example.json
-npm run state -- --fresh --instance scripts/state/specs/instances/mailflare.json \
-  --admin-email root@example.com --admin-password '…'
+npm run state -- --fresh --instance mailflare --admin-email root@example.com --admin-password '…'
 #    (this runs `wrangler d1 migrations apply DB --remote` first)
 
 # 3. Apply each tenant document, then confirm
-npm run state -- --instance scripts/state/specs/instances/mailflare.json \
-  --spec scripts/state/specs/<domain>.json --onboard
+npm run state -- --instance mailflare --spec scripts/state/specs/<domain>.json --onboard
 npm run state -- --spec scripts/state/specs/<domain>.json --status
 ```
 
@@ -162,7 +162,10 @@ scripts/state/
 │   ├── resource.ts       the Resource contract
 │   ├── registry.ts       RESOURCES — the order, and why
 │   └── fresh domain license accounts mailboxes routing mcp-keys push .ts
-├── specs/                the documents (source of truth)
+├── specs/
+│   ├── fleet.json        which servers exist, and where (name -> url + db)
+│   ├── instances/        per-server documents: the licence, web push
+│   └── <domain>.json     the documents (source of truth)
 └── roles.example.txt
 ```
 
@@ -301,6 +304,11 @@ to **take a user and their data down** wherever it lives.
 
 Bug #1 above is the argument for this: instance-level facts should not be repeated in every
 tenant document, and a tenant must not silently depend on something it never declared.
+
+**Started.** `specs/fleet.json` maps a server name to its url and database, `--instance <name>`
+resolves through it (so no `--url`/`--db` is needed), and `specs/instances/<name>.json` holds
+what belongs to the server rather than a tenant. Still to come: jurisdiction/region in the
+fleet entry, and the derived subject index.
 
 ### Erasure is per *subject*, not per tenant
 

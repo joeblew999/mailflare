@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
+import { loadFleet, resolveInstance } from "../scripts/state/document";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
 import type { Store } from "../scripts/state/store/types";
@@ -566,4 +567,24 @@ test("an instance document is applied before the tenant documents", async () => 
 	assert.ok(calls.includes("setLicense:team"), "licence applied");
 	assert.ok(calls.includes("createMailbox:support"), "tenant provisioned");
 	assert.ok(calls.indexOf("setLicense:team") < calls.indexOf("createMailbox:support"), "instance layer ran first");
+});
+
+test("--instance resolves a fleet name, and a path stays a path", () => {
+	const fleet = [{ name: "mailflare", url: "https://x.workers.dev", db: "mailflare" }];
+	assert.deepEqual(resolveInstance("mailflare", fleet), {
+		name: "mailflare", docPath: "scripts/state/specs/instances/mailflare.json",
+		url: "https://x.workers.dev", db: "mailflare",
+	});
+	assert.deepEqual(resolveInstance("scripts/state/specs/instances/example.json", fleet), {
+		name: "scripts/state/specs/instances/example.json",
+		docPath: "scripts/state/specs/instances/example.json",
+	});
+	assert.throws(() => resolveInstance("nope", fleet), /unknown instance/);
+});
+
+test("the checked-in fleet names the live instance so a run needs no --url", () => {
+	const fleet = loadFleet();
+	const live = fleet.find((entry) => entry.name === "mailflare");
+	assert.ok(live, "mailflare is in specs/fleet.json");
+	assert.ok(live?.url?.startsWith("https://"), "and carries its origin");
 });

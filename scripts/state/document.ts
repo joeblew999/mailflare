@@ -58,3 +58,35 @@ export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
 	if (o.receivingProvider) body.receivingProvider = o.receivingProvider;
 	return validateBody("domain", body);
 }
+
+// --- the fleet: which servers exist, and where -----------------------------------
+
+/** One server: its name, its origin, and the database it owns. No personal data. */
+export type InstanceDecl = { name: string; url?: string; db?: string };
+export type Fleet = { instances?: InstanceDecl[] };
+
+export const FLEET_PATH = "scripts/state/specs/fleet.json";
+
+/** The fleet document, or [] when there is none (then --instance must be a path). */
+export function loadFleet(path = FLEET_PATH): InstanceDecl[] {
+	try {
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as Fleet;
+		return Array.isArray(parsed?.instances) ? parsed.instances : [];
+	} catch {
+		return [];
+	}
+}
+
+export type ResolvedInstance = { name: string; docPath: string; url?: string; db?: string };
+
+/**
+ * `--instance` is either a NAME in the fleet - which also supplies the server's origin and
+ * database, so a run needs no --url/--db - or a path to a document, for a one-off.
+ * Naming an instance means the fleet is authoritative for it; pass a path to override.
+ */
+export function resolveInstance(value: string, fleet: InstanceDecl[]): ResolvedInstance {
+	if (value.endsWith(".json")) return { name: value, docPath: value };
+	const decl = fleet.find((entry) => entry.name === value);
+	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${FLEET_PATH}`);
+	return { name: decl.name, docPath: `scripts/state/specs/instances/${decl.name}.json`, url: decl.url, db: decl.db };
+}

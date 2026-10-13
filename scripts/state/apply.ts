@@ -14,7 +14,7 @@
 //   On a domain that already receives mail (a live company domain) that redirects its
 //   real mail, so the script refuses unless you pass --confirm-mx.
 import { parseCli, usage } from "./args";
-import { loadSpec, rolesFor } from "./document";
+import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -37,9 +37,14 @@ if (flags.steps) {
 // --all/--spec load many documents; the global convenience flags run a single target.
 const specMode = Boolean(values.all) || Boolean(values.spec);
 const useSpecs = specMode && !flags.licenseStatus;
-// The instance document is loaded up front so a run consisting only of it (a reset, a
-// licence change) still counts as work to do.
-const instanceSpec = values.instance ? loadSpec(String(values.instance)) : null;
+// The instance layer. `--instance` is a NAME from the fleet - which also supplies the
+// server's origin and database, so no --url/--db is needed - or a path for a one-off.
+// Loaded up front so a run consisting only of it (a reset, a licence change) is still
+// work to do.
+const instanceRef = values.instance ? resolveInstance(String(values.instance), loadFleet()) : null;
+if (instanceRef?.url) flags.url = instanceRef.url;
+if (instanceRef?.db) flags.db = instanceRef.db;
+const instanceSpec = instanceRef ? loadSpec(instanceRef.docPath) : null;
 const hasInstanceWork = Boolean(instanceSpec?.fresh || instanceSpec?.license || instanceSpec?.push);
 
 let entries: SpecEntry[];
@@ -78,7 +83,7 @@ try {
 	// licence the server already has - and stops a tenant silently depending on one it
 	// never declared.
 	if (instanceSpec) {
-		entries.unshift({ name: `instance:${values.instance}`, spec: instanceSpec });
+		entries.unshift({ name: `instance:${instanceRef?.name}`, spec: instanceSpec });
 	}
 } catch (error) {
 	console.error(message(error));
