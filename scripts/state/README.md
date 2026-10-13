@@ -26,6 +26,11 @@ npm run state -- --source-changes
 That catalogue is `src-changes.ts`, and a test asserts every entry points at something under
 `src/` (or `worker.ts`) with a usable reason - so the code and this file cannot drift.
 
+Deploying a server is a thin passthrough for the same reason: it shells `npm run build` and
+`npm run deploy:worker -- --env <name>`, and creates nothing. Reimplementing `wrangler d1
+create` - parsing its output, detecting "already exists", recovering a half-finished attempt -
+would be rebuilding wrangler for no gain.
+
 | Cannot be done from here | Where the change goes | Why it cannot be worked around |
 |---|---|---|
 | Erase a subject from **backup history** | `src/lib/backups/` + restore | A backup holds every subject; rewriting one would destroy other people's data. Crypto-shredding — a per-subject key whose destruction *is* the erasure — is the fix. |
@@ -82,6 +87,7 @@ npm run state -- --spec scripts/state/specs/example.json    # one document
 npm run state -- --all --dry-run                            # every document in specs/
 npm run state -- --all --concurrency 4                      # a few in flight, for thousands
 npm run state -- --instance mailflare --spec <doc>         # a server from specs/fleet.json
+npm run state -- --deploy <name>                          # deploy a server's env, register it
                                                            # (its url and db come from there)
 npm run state -- --spec <file> --status                     # drift report, writes nothing
 npm run state -- --spec <file> --cleanup                    # tear the document down
@@ -139,9 +145,14 @@ clicking. Nothing else in the app can do it — `POST /api/auth/register` create
 admin but also demands Turnstile and a domain, so it is unusable as a bootstrap.
 
 ```bash
-# 1. Deploy the Worker and its D1 (npm run deploy). wrangler.jsonc must have the real
-#    database_id, and the Worker `name`, CF_EMAIL_WORKER_NAME and the WORKER_SELF_REFERENCE
-#    service must all agree.
+# 1. Add an env.<name> block to wrangler.jsonc - its own name, d1 database_id, r2 bucket and
+#    queues - then deploy it. This shells the repo's own deploy path and registers the server:
+npm run state -- --deploy eu1 --dry-run   # the two commands it will run, and what it records
+npm run state -- --deploy eu1             # npm run build + npm run deploy:worker -- --env eu1
+#    It creates NO cloud resources (that is wrangler's job) and needs no src/ changes. The
+#    env block is the source of truth for the database; without one it stops rather than
+#    inventing a database_id. The Worker `name`, CF_EMAIL_WORKER_NAME and the
+#    WORKER_SELF_REFERENCE service must still agree.
 
 # 2. Reset it and give it a primary admin. The instance document is applied FIRST, so
 #    server-wide facts (the licence) stop being repeated in every tenant document:

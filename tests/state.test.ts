@@ -7,6 +7,7 @@ import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
 import { loadFleet, resolveInstance } from "../scripts/state/document";
 import { SOURCE_CHANGES } from "../scripts/state/src-changes";
+import { envBlockFor, stripJsonc, upsertInstance } from "../scripts/state/deploy";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
@@ -643,4 +644,23 @@ test("every source change names a location inside src/, since we may not touch i
 		assert.ok(change.where.startsWith("src/") || change.where.startsWith("worker.ts"), `${change.where} must name the application`);
 		assert.ok(change.why.length > 20, `${change.need}: the reason must be usable, not a placeholder`);
 	}
+});
+
+test("deploy reads the server's env block, and refuses without one", () => {
+	// wrangler.jsonc is JSONC, so it cannot be JSON.parse'd. The env block is the source of
+	// truth for a server's database - this system must never invent one.
+	const config = JSON.parse(stripJsonc(`{
+		// the top-level server
+		"name": "mailflare",
+		"env": { "eu1": { "name": "mailflare-eu1", "d1_databases": [{ "database_name": "mailflare-eu1" },], }, },
+	}`));
+	assert.equal(config.name, "mailflare", "comments and trailing commas survive");
+	assert.equal(envBlockFor(config, "eu1")?.databaseName, "mailflare-eu1");
+	assert.equal(envBlockFor(config, "nope"), null, "an undeclared server is refused, not guessed");
+});
+
+test("registering a server in the fleet is idempotent and sorted", () => {
+	const fleet = upsertInstance([{ name: "b" }], { name: "a" });
+	assert.deepEqual(fleet.map((instance) => instance.name), ["a", "b"]);
+	assert.deepEqual(upsertInstance(fleet, { name: "a", url: "https://x" }), [{ name: "a", url: "https://x" }, { name: "b" }], "re-deploy updates rather than duplicates");
 });

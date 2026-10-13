@@ -147,11 +147,11 @@ export async function cfApi<T>(path: string, token: string) {
 // Resolve the instance URL without hard-coding it: explicit value, then
 // MAILFLARE_URL, then <worker>.<account-subdomain>.workers.dev from the API.
 // Returns null when nothing can be determined.
-export async function resolveInstanceUrl({ url, token, account }: { url?: string; token?: string | null; account?: string | null } = {}) {
+export async function resolveInstanceUrl({ url, token, account, worker }: { url?: string; token?: string | null; account?: string | null; worker?: string } = {}) {
 	const explicit = url || process.env.MAILFLARE_URL;
 	if (explicit) return explicit.replace(/\/+$/, "");
 
-	const name = workerNameFromConfig();
+	const name = worker || workerNameFromConfig();
 	const tokenValue = token || process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
 	const accountValue = account || process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
 	if (!name || !tokenValue || !accountValue) return null;

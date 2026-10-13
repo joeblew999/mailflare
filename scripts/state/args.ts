@@ -11,6 +11,7 @@ export function parseCli() {
 			erase: { type: "boolean", default: false },
 			"source-changes": { type: "boolean", default: false },
 			concurrency: { type: "string", default: "1" },
+			deploy: { type: "string" },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts/state/specs" },
 			roles: { type: "string", default: "" },
@@ -36,7 +37,7 @@ export function parseCli() {
 			subject: { type: "string" },
 			timeout: { type: "string", default: "40" },
 			url: { type: "string" },
-			db: { type: "string", default: "mailflare" },
+			db: { type: "string" },
 			local: { type: "boolean", default: false },
 			help: { type: "boolean", short: "h", default: false },
 		},
@@ -65,7 +66,7 @@ export function parseCli() {
 		subject: values.subject,
 		timeout: String(values.timeout),
 		url: values.url,
-		db: String(values.db),
+		db: String(values.db ?? "mailflare"),
 		local: Boolean(values.local),
 	};
 
@@ -111,6 +112,7 @@ Flags:
   --spec <path>         one document, or many via { "specs": [...] }
   --instance <name|path>  a fleet server (or a document path), applied BEFORE the tenants
   --data-subject <email>  report where one person's data lives (read-only)
+  --deploy <name>         deploy the server's env block and register it in the fleet
   --concurrency <n>       mass runs: how many documents in flight (default 1)
   --source-changes        list what cannot be done without modifying src/, and where
   --erase                 with --data-subject: DESTROY those rows and their R2 objects

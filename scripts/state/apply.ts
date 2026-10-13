@@ -17,6 +17,7 @@ import { parseCli, usage } from "./args";
 import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
 import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
 import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
+import { deployServer } from "./deploy";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -30,6 +31,15 @@ const { values, flags } = parseCli();
 if (values.help) {
 	usage();
 	process.exit(0);
+}
+// Deploying a server: shells the repo's own deploy path for a wrangler env, then records
+// it in the fleet. No cloud resources are created - the env block is the source of truth.
+if (values.deploy) {
+	const code = await deployServer({ name: String(values.deploy), dryRun: flags.dryRun, url: flags.url, db: values.db ? String(values.db) : undefined }).catch((error) => {
+		console.error(message(error));
+		return 1;
+	});
+	process.exit(code);
 }
 if (values["source-changes"]) {
 	printSourceChanges();
