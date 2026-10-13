@@ -1,36 +1,32 @@
-import { onboardBody } from "./document";
-import { requireDomain } from "./context";
-import { removeMcpKey } from "./resources/mcp-keys";
-import { disableAccount } from "./resources/accounts";
-import type { ApiDomain, Context, Role } from "./types";
+import { requireDomain } from "../context";
+import { onboardBody } from "../document";
+import type { Context } from "../context";
+import type { ApiDomain, Role } from "../spec";
+import type { Resource } from "./resource";
 
 export const findDomain = (list: ApiDomain[], name: string) =>
 	list.find((entry) => String(entry.hostname).toLowerCase() === name);
 
-// Resolve the domain, then act on the flags when it is missing: teardown-only,
-// report, or onboard (MX-guarded). Returns null to continue, or an exit code to stop.
-export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number | null> {
+/**
+ * Resolve the document's domain, onboarding it only when this is a create run.
+ * Returns 0 to continue, or an exit code to stop.
+ *
+ * The document-scoped resources all act on this domain, so this is a PREREQUISITE
+ * (see registry.ts). It no longer doubles as a teardown path: under --cleanup every
+ * other resource runs its own remove(), so there is nothing to do here when the
+ * domain is already gone.
+ */
+export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number> {
 	ctx.domain = findDomain(await ctx.store.listDomains(), ctx.domainName) ?? null;
-	if (ctx.domain) return null;
-
-	// Re-runnable teardown: with the domain gone there is nothing domain-scoped left
-	// (mailboxes/routing cascade with it), but the keys and accounts still need it.
-	if (ctx.flags.cleanup) {
-		console.log(`${ctx.domainName} is not in Mailflare — finishing account/key teardown only.`);
-		let failures = 0;
-		for (const entry of ctx.project?.mcpKeys ?? []) failures += removeMcpKey(ctx, entry);
-		if (ctx.flags.disableAccounts) {
-			for (const account of ctx.project?.accounts ?? []) failures += await disableAccount(ctx, account);
-		}
-		return failures === 0 ? 0 : 1;
-	}
+	if (ctx.domain) return 0;
+	if (ctx.flags.cleanup) return 0;
 
 	if (ctx.flags.status) {
 		console.log(`✗ ${ctx.domainName} is not onboarded in Mailflare.`);
 		return 1;
 	}
 
-	const onboard = ctx.flags.onboard || Boolean(ctx.project?.onboard);
+	const onboard = ctx.flags.onboard || Boolean(ctx.spec?.onboard);
 	if (!onboard) {
 		console.error(`"${ctx.domainName}" is not onboarded in Mailflare.`);
 		console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
@@ -43,7 +39,7 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number 
 		for (const record of mx) console.log(`      ${record.priority ?? ""} ${record.content}`);
 	}
 	if (ctx.flags.dryRun) {
-		const extras = `${ctx.project?.accounts?.length ? ` + ${ctx.project.accounts.length} account(s)` : ""}${ctx.project?.routing?.length ? ` + ${ctx.project.routing.length} routing rule(s)` : ""}`;
+		const extras = `${ctx.spec?.accounts?.length ? ` + ${ctx.spec.accounts.length} account(s)` : ""}${ctx.spec?.routing?.length ? ` + ${ctx.spec.routing.length} routing rule(s)` : ""}`;
 		console.log(`  → would onboard ${ctx.domainName}, then create ${roles.map(({ role }) => `${role}@${ctx.domainName}`).join(", ")}${extras}`);
 		return 0;
 	}
@@ -54,7 +50,7 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number 
 	}
 
 	console.log(`Onboarding ${ctx.domainName} into Mailflare…`);
-	const added = await ctx.store.onboardDomain(onboardBody(ctx.project, ctx.flags, ctx.domainName));
+	const added = await ctx.store.onboardDomain(onboardBody(ctx.spec, ctx.flags, ctx.domainName));
 	if (added.status !== 200 && added.status !== 201) {
 		console.error(`Could not onboard ${ctx.domainName}: HTTP ${added.status} ${added.json?.error ?? ""}`);
 		return 1;
@@ -64,7 +60,7 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number 
 		console.error(`Onboarded ${ctx.domainName} but it is not listed afterwards.`);
 		return 1;
 	}
-	return null;
+	return 0;
 }
 
 // Removing the domain (app API) also drops its Email Routing/DNS config.
@@ -74,6 +70,21 @@ export async function removeDomain(ctx: Context): Promise<number> {
 		return 0;
 	}
 	const res = await ctx.store.removeDomain(requireDomain(ctx).id);
-	console.log(`  ${res.status === 200 ? "✓ removed" : `✗ remove failed (HTTP ${res.status})`} domain ${ctx.domainName}`);
+	console.log(`${res.status === 200 ? "✓ removed" : `✗ remove failed (HTTP ${res.status})`} domain ${ctx.domainName}`);
 	return res.status === 200 ? 0 : 1;
 }
+
+// The prerequisite resource: included whenever anything domain-scoped is declared
+// (the registry decides that, so `declared` is never consulted for it).
+export const domainResource: Resource = {
+	section: "domain",
+	needsDomain: false,
+	abortOnFailure: true,
+	declared: () => false,
+	status: (ctx, roles) => ensureDomain(ctx, roles),
+	apply: (ctx, roles) => ensureDomain(ctx, roles),
+	async remove(ctx, roles) {
+		await ensureDomain(ctx, roles); // resolve only: cleanup never onboards
+		return ctx.flags.removeDomain && ctx.domain ? await removeDomain(ctx) : 0;
+	},
+};

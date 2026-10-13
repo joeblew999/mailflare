@@ -1,7 +1,8 @@
 import { mailboxAccessSchema } from "@/lib/validators";
 import { validateBody } from "../app";
 import { requireDomain } from "../context";
-import type { AccessGrant, ApiMailbox, Context, Role } from "../types";
+import type { Context } from "../context";
+import type { AccessGrant, ApiMailbox, Role } from "../spec";
 import type { Resource, RunState } from "./resource";
 
 // The domain's mailboxes, keyed by lower-cased local part. One helper so the

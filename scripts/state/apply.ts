@@ -20,7 +20,7 @@ import { makeContext } from "./context";
 import { run } from "./driver";
 import { pushRunbook } from "./resources/push";
 import { withStore } from "./app";
-import type { Spec, Role } from "./types";
+import type { Role, Spec } from "./spec";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const { values, flags } = parseCli();

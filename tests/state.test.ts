@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
-import type { Flags, Spec, Role } from "../scripts/state/types";
+import type { Flags } from "../scripts/state/flags";
+import type { Role, Spec } from "../scripts/state/spec";
 import type { Store } from "../scripts/state/store/types";
 
 const ok = (json: unknown = {}) => ({ status: 200, text: "", json });

@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import type { Flags } from "./types";
+import type { Flags } from "./flags";
 
 export function parseCli() {
 	const { values } = parseArgs({

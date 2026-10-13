@@ -4,7 +4,7 @@
 // modules depend only on this interface, so tests drive an in-memory fake instead of
 // a live Worker - and swapping how we reach the app never touches the logic.
 import type { ApiResult } from "../wrangler";
-import type { ApiAccount, ApiDomain, ApiMailbox } from "../types";
+import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
 
 // --- keys, access grants and routing rules have no key-authenticated app route,
 // --- so they are written with SQL. These are their stored shapes.

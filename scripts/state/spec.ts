@@ -1,16 +1,15 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- manifest entries are user-authored JSON. */
+/* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
+// The DOCUMENT MODEL: what a desired-state document may contain, and the shapes the
+// app hands back. Response shapes come from the app's own builders, so field access is
+// checked against what the endpoint actually returns (no guessing):
+//   GET /api/v1/domains   -> listUserDomains() rows (+ sendingEnabled)
+//   GET /api/v1/accounts  -> accountListItemFromUser()
+//   GET /api/v1/mailboxes -> the inline select in api/v1/mailboxes/utils.ts
 import type { InferSelectModel } from "drizzle-orm";
 import type { accountListItemFromUser } from "@/app/api/accounts/utils";
 import type { listUserDomains } from "@/lib/domains/service";
 import type { domains as domainsTable, mailboxes as mailboxesTable } from "@/db/schema";
-import type { Store } from "./store/types";
 
-// Response shapes taken from the app's own builders, so field access is checked
-// against what the endpoint actually returns (no guessing).
-//   GET /api/v1/domains   → listUserDomains() rows (+ sendingEnabled)
-//   GET /api/v1/accounts  → accountListItemFromUser()
-//   GET /api/v1/mailboxes → the inline select in api/v1/mailboxes/utils.ts (no named
-//                           export exists, so the columns below mirror that select)
 export type ApiDomain = Awaited<ReturnType<typeof listUserDomains>>[number] & {
 	/** Added by GET /api/v1/domains on top of the stored row. */
 	sendingEnabled?: boolean;
@@ -20,33 +19,6 @@ export type ApiMailbox = Pick<
 	InferSelectModel<typeof mailboxesTable>,
 	"id" | "userId" | "domainId" | "localPart" | "displayName" | "type" | "disabled" | "createdAt"
 > & { hostname: InferSelectModel<typeof domainsTable>["hostname"] };
-
-export type Flags = {
-	dryRun: boolean;
-	status: boolean;
-	cleanup: boolean;
-	onboard: boolean;
-	confirmMx: boolean;
-	replaceMx: boolean;
-	share: boolean;
-	disableAccounts: boolean;
-	removeDomain: boolean;
-	url?: string;
-	db: string;
-	local: boolean;
-	/** Global capabilities: they do not need a domain. */
-	fresh: boolean;
-	adminEmail?: string;
-	adminPassword?: string;
-	plan?: string;
-	licenseStatus: boolean;
-	push: boolean;
-	steps: boolean;
-	to?: string;
-	from?: string;
-	subject?: string;
-	timeout: string;
-};
 
 export type AccessGrant = { email?: string; permission?: string };
 export type Role = { role: string; displayName: string; share: boolean; access: AccessGrant[] };
@@ -69,6 +41,7 @@ export type McpKeyEntry = { name?: string; mailboxes?: string[]; scopes?: string
 export type LicenseEntry = { plan?: string } | string;
 export type PushEntry = { to?: string; from?: string; subject?: string };
 
+/** One desired-state document: any subset of these sections. */
 export type Spec = {
 	domain?: string;
 	onboard?: Record<string, any>;
@@ -82,15 +55,5 @@ export type Spec = {
 	fresh?: { admin?: { email?: string; password?: string } };
 };
 
-/** A file that names many projects at once, for mass runs. */
-export type SpecFile = { projects?: Spec[] };
-
-// Everything a resource helper needs. The store is the only way out of the logic,
-// so a test can hand it a fake and drive a whole run with no D1 and no network.
-export type Context = {
-	store: Store;
-	flags: Flags;
-	project: Spec | null;
-	domainName: string;
-	domain: ApiDomain | null;
-};
+/** A file that declares many documents at once, for a mass run. */
+export type SpecFile = { specs?: Spec[] };

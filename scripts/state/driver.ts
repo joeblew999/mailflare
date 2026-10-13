@@ -1,29 +1,15 @@
-import { ensureDomain, removeDomain } from "./domain";
+import { ensureDomain } from "./resources/domain";
 import { declaredResources } from "./resources/registry";
+import type { Context } from "./context";
+import type { Role } from "./spec";
 import type { RunState } from "./resources/resource";
-import type { Context, Role } from "./types";
 
-// One run, one loop: reset the instance if asked, resolve/onboard the domain if any
-// requested resource needs it, then apply - or, under --cleanup, remove - everything
-// the manifest asks for. There is no per-capability command path: fresh, license, web
-// push and the domain-scoped resources all go through here.
+// The reconcile loop. There is no per-capability command path: reset, domain,
+// license, accounts, mailboxes, routing, MCP keys and push all go through here, in
+// the order registry.ts sets out, against the document the JSON declared.
 export async function run(ctx: Context, roles: Role[]): Promise<number> {
 	const active = declaredResources(ctx, roles);
 	if (active.length === 0) return 0;
-
-	// A reset destroys the domain and admin everything else depends on, so it runs
-	// first and the normal flow then resolves both from scratch.
-	const reset = active.find((resource) => resource.section === "fresh");
-	if (reset && !ctx.flags.status) {
-		const failures = await reset.apply(ctx, roles, { mailboxIdsByRole: new Map() });
-		if (failures > 0) return 1;
-	}
-	const rest = active.filter((resource) => resource !== reset);
-
-	if (rest.some((resource) => resource.needsDomain)) {
-		const early = await ensureDomain(ctx, roles);
-		if (early !== null) return early;
-	}
 
 	const state: RunState = { mailboxIdsByRole: new Map() };
 
@@ -37,15 +23,28 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 		return missing === 0 ? 0 : 1;
 	}
 
-	console.log(`${ctx.flags.cleanup ? "Removing" : "Provisioning"} ${ctx.domainName || "instance"}:\n`);
+	// The two prerequisites are handled explicitly, because they bracket everything
+	// else and do not follow the reversible order:
+	//   fresh  resets the instance, so it must precede all of it;
+	//   domain resolves the domain everything scoped acts on. On cleanup it is only
+	//          RESOLVED here - its removal must come last, since it cascades the rest.
+	const reset = active.find((resource) => resource.section === "fresh");
+	const domain = active.find((resource) => resource.section === "domain");
+	const rest = active.filter((resource) => resource !== reset && resource !== domain);
+
+	if (reset) {
+		const code = await (ctx.flags.cleanup ? reset.remove : reset.apply)(ctx, roles, state);
+		if (code > 0) return 1;
+	}
+
+	console.log(`${ctx.flags.cleanup ? "Removing" : "Applying"} ${ctx.domainName || "instance"}:\n`);
 	let failures = 0;
 	if (ctx.flags.cleanup) {
-		// Reverse of the apply order, so the license (which GATES account management)
-		// is the last thing to go. Reverting it first 403s the account disable and
-		// silently leaves accounts enabled.
+		await ensureDomain(ctx, roles);
 		for (const resource of [...rest].reverse()) failures += await resource.remove(ctx, roles, state);
-		if (ctx.flags.removeDomain && ctx.domain) failures += await removeDomain(ctx);
+		if (domain) failures += await domain.remove(ctx, roles, state);
 	} else {
+		if (domain && (await domain.apply(ctx, roles, state)) > 0) return 1;
 		for (const resource of rest) failures += await resource.apply(ctx, roles, state);
 	}
 

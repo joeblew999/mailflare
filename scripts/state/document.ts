@@ -1,7 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- manifest shape is user-authored JSON. */
 import { readFileSync } from "node:fs";
 import { validateBody } from "./app";
-import type { Flags, Spec, Role } from "./types";
+import type { Flags } from "./flags";
+import type { Role, Spec } from "./spec";
 
 export function loadSpec(path: string): Spec {
 	try {

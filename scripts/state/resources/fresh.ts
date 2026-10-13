@@ -12,7 +12,7 @@ import type { Resource } from "./resource";
 export const freshResource: Resource = {
 	section: "fresh",
 	needsDomain: false,
-	declared: (ctx) => ctx.flags.fresh || Boolean(ctx.project?.fresh),
+	declared: (ctx) => ctx.flags.fresh || Boolean(ctx.spec?.fresh),
 	async status(ctx) {
 		const present = ctx.store.schemaPresent();
 		const admin = present ? ctx.store.firstAdminEmail() : null;
@@ -20,7 +20,7 @@ export const freshResource: Resource = {
 		return present && admin ? 0 : 1;
 	},
 	async apply(ctx) {
-		const entry = typeof ctx.project?.fresh === "object" ? ctx.project.fresh : {};
+		const entry = typeof ctx.spec?.fresh === "object" ? ctx.spec.fresh : {};
 		const email = (ctx.flags.adminEmail ?? entry.admin?.email ?? "admin@localhost").trim().toLowerCase();
 		const password = ctx.flags.adminPassword ?? entry.admin?.password ?? newId();
 		const generated = !ctx.flags.adminPassword && !entry.admin?.password;

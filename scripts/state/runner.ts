@@ -9,7 +9,8 @@ import { join } from "node:path";
 import { makeContext } from "./context";
 import { run } from "./driver";
 import { loadSpec, rolesFor } from "./document";
-import type { Flags, Spec } from "./types";
+import type { Flags } from "./flags";
+import type { Spec } from "./spec";
 import type { Store } from "./store/types";
 
 export type SpecEntry = { name: string; spec: Spec };

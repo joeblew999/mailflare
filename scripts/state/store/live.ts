@@ -9,7 +9,7 @@ import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
-import type { ApiAccount, ApiDomain, ApiMailbox } from "../types";
+import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store } from "./types";
 
 // A SQL literal: NULL, or an escaped quoted string.

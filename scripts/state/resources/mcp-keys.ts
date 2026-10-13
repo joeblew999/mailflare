@@ -1,4 +1,5 @@
-import type { Context, McpKeyEntry } from "../types";
+import type { Context } from "../context";
+import type { McpKeyEntry } from "../spec";
 import type { Resource } from "./resource";
 
 // MCP tool scopes (mirrors MCP_SCOPES in src/lib/mcp/auth.ts).
@@ -56,7 +57,7 @@ function resolveMailboxes(name: string, entry: McpKeyEntry, mailboxIdsByRole: Ma
 
 async function statusMcpKeys(ctx: Context): Promise<number> {
 	let missing = 0;
-	for (const entry of ctx.project?.mcpKeys ?? []) {
+	for (const entry of ctx.spec?.mcpKeys ?? []) {
 		const name = String(entry.name ?? "agent").trim();
 		const exists = ctx.store.mcpKey(ctx.store.admin.id, name) !== null;
 		if (!exists) missing += 1;
@@ -68,16 +69,16 @@ async function statusMcpKeys(ctx: Context): Promise<number> {
 export const mcpKeysResource: Resource = {
 	section: "mcpKeys",
 	needsDomain: true,
-	declared: (ctx) => (ctx.project?.mcpKeys?.length ?? 0) > 0,
+	declared: (ctx) => (ctx.spec?.mcpKeys?.length ?? 0) > 0,
 	status: (ctx) => statusMcpKeys(ctx),
 	async apply(ctx, _roles, state) {
 		let failures = 0;
-		for (const entry of ctx.project?.mcpKeys ?? []) failures += ensureMcpKey(ctx, entry, state.mailboxIdsByRole);
+		for (const entry of ctx.spec?.mcpKeys ?? []) failures += ensureMcpKey(ctx, entry, state.mailboxIdsByRole);
 		return failures;
 	},
 	async remove(ctx) {
 		let failures = 0;
-		for (const entry of ctx.project?.mcpKeys ?? []) failures += removeMcpKey(ctx, entry);
+		for (const entry of ctx.spec?.mcpKeys ?? []) failures += removeMcpKey(ctx, entry);
 		return failures;
 	},
 };

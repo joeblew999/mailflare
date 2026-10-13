@@ -2,7 +2,8 @@ import { newId } from "@/lib/ids";
 import { validateBody } from "../app";
 import { requireDomain } from "../context";
 import { mailboxesForDomain } from "./mailboxes";
-import type { AccountEntry, ApiAccount, Context } from "../types";
+import type { Context } from "../context";
+import type { AccountEntry, ApiAccount } from "../spec";
 import type { Resource } from "./resource";
 
 // Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
@@ -130,7 +131,7 @@ async function statusAccounts(ctx: Context): Promise<number> {
 	const accounts = await ctx.store.listAccounts();
 	const boxes = await mailboxesForDomain(ctx);
 	let missing = 0;
-	for (const entry of ctx.project?.accounts ?? []) {
+	for (const entry of ctx.spec?.accounts ?? []) {
 		const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
 		const email = `${username}@${ctx.domainName}`;
 		const account = accounts.find((row) => String(row.email).toLowerCase() === email);
@@ -144,17 +145,17 @@ async function statusAccounts(ctx: Context): Promise<number> {
 export const accountsResource: Resource = {
 	section: "accounts",
 	needsDomain: true,
-	declared: (ctx) => (ctx.project?.accounts?.length ?? 0) > 0,
+	declared: (ctx) => (ctx.spec?.accounts?.length ?? 0) > 0,
 	status: (ctx) => statusAccounts(ctx),
 	async apply(ctx) {
 		let failures = 0;
-		for (const account of ctx.project?.accounts ?? []) failures += await ensureAccount(ctx, account);
+		for (const account of ctx.spec?.accounts ?? []) failures += await ensureAccount(ctx, account);
 		return failures;
 	},
 	async remove(ctx) {
 		if (!ctx.flags.disableAccounts) return 0;
 		let failures = 0;
-		for (const account of ctx.project?.accounts ?? []) failures += await disableAccount(ctx, account);
+		for (const account of ctx.spec?.accounts ?? []) failures += await disableAccount(ctx, account);
 		return failures;
 	},
 };

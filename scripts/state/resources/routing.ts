@@ -1,6 +1,7 @@
 import { domainRoutingRuleSchema } from "@/lib/validators";
 import { requireDomain } from "../context";
-import type { Context, RoutingEntry } from "../types";
+import type { Context } from "../context";
+import type { RoutingEntry } from "../spec";
 import type { Resource } from "./resource";
 import type { RoutingRulePatch, RoutingRuleRow } from "../store/types";
 
@@ -121,6 +122,9 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 	const pattern = String(entry.pattern ?? "*").trim();
 	const action = String(entry.action ?? "forward").trim();
+	// Rules are domain-scoped and cascade with the domain, so a missing domain means
+	// there is nothing left to remove - not an error.
+	if (!ctx.domain) return 0;
 	if (ctx.flags.dryRun) {
 		console.log(`  → would remove routing ${pattern} → ${action}`);
 		return 0;
@@ -149,16 +153,16 @@ async function statusRouting(ctx: Context, entries: RoutingEntry[], mailboxIdsBy
 export const routingResource: Resource = {
 	section: "routing",
 	needsDomain: true,
-	declared: (ctx) => (ctx.project?.routing?.length ?? 0) > 0,
-	status: (ctx, _roles, state) => statusRouting(ctx, ctx.project?.routing ?? [], state.mailboxIdsByRole),
+	declared: (ctx) => (ctx.spec?.routing?.length ?? 0) > 0,
+	status: (ctx, _roles, state) => statusRouting(ctx, ctx.spec?.routing ?? [], state.mailboxIdsByRole),
 	async apply(ctx, _roles, state) {
 		let failures = 0;
-		for (const entry of ctx.project?.routing ?? []) failures += ensureRouting(ctx, entry, state.mailboxIdsByRole);
+		for (const entry of ctx.spec?.routing ?? []) failures += ensureRouting(ctx, entry, state.mailboxIdsByRole);
 		return failures;
 	},
 	async remove(ctx) {
 		let failures = 0;
-		for (const entry of ctx.project?.routing ?? []) failures += removeRouting(ctx, entry);
+		for (const entry of ctx.spec?.routing ?? []) failures += removeRouting(ctx, entry);
 		return failures;
 	},
 };

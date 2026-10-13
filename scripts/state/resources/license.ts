@@ -1,5 +1,5 @@
 import { entitlementsFor } from "../wrangler";
-import type { LicenseEntry } from "../types";
+import type { LicenseEntry } from "../spec";
 import type { Resource } from "./resource";
 
 // The plan the license resource should write: null means "revert to community".
@@ -28,13 +28,13 @@ export function reportLicense(ctx: Parameters<Resource["status"]>[0]) {
 export const licenseResource: Resource = {
 	section: "license",
 	needsDomain: false,
-	declared: (ctx) => ctx.flags.plan !== undefined || Boolean(ctx.project?.license),
+	declared: (ctx) => ctx.flags.plan !== undefined || Boolean(ctx.spec?.license),
 	async status(ctx) {
 		reportLicense(ctx);
 		return 0;
 	},
 	async apply(ctx) {
-		const plan = declaredPlan(ctx.project?.license, ctx.flags.plan);
+		const plan = declaredPlan(ctx.spec?.license, ctx.flags.plan);
 		if (!plan) {
 			console.log("  · license — no plan requested");
 			return 0;
