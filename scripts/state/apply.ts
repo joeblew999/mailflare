@@ -14,7 +14,7 @@
 //   On a domain that already receives mail (a live company domain) that redirects its
 //   real mail, so the script refuses unless you pass --confirm-mx.
 import { parseCli, usage } from "./args";
-import { loadFleet, loadProject, loadSpec, resolveInstance, rolesFor } from "./document";
+import { loadFleet, loadProject, loadServer, loadSpec, resolveInstance, rolesFor } from "./document";
 import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
 import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
 import { deployServer, destroyServer } from "./deploy";
@@ -168,6 +168,24 @@ try {
 	process.exit(1);
 }
 
+// Pointing at a FOLDER reconciles the server itself, not just its tenants: deploy it when it
+// is not registered, and on --cleanup remove it (undeploy still needs --confirm-destroy).
+// A registered server (one with an origin) is left alone, so this is idempotent.
+if (values.project) {
+	const server = loadServer(String(values.project));
+	if (server.url) flags.url = server.url;
+	if (server.db) flags.db = server.db;
+	if (flags.cleanup) {
+		console.log(`\nServer "${server.name}":`);
+	} else if (!server.url) {
+		const code = await deployServer({ name: server.name, dryRun: flags.dryRun, url: flags.url }).catch((error) => {
+			console.error(message(error));
+			return 1;
+		});
+		if (code > 0) process.exit(code);
+	}
+}
+
 let exitCode = 1;
 try {
 	exitCode = await withStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
@@ -177,5 +195,14 @@ try {
 	});
 } catch (error) {
 	console.error(message(error));
+}
+// The teardown finishes with the server, so the tenants are gone before the Worker is.
+if (values.project && flags.cleanup) {
+	const server = loadServer(String(values.project));
+	const code = await destroyServer({ name: server.name, dryRun: flags.dryRun, confirmed: flags.confirmDestroy }).catch((error) => {
+		console.error(message(error));
+		return 1;
+	});
+	if (code > 0) exitCode = code;
 }
 process.exit(exitCode);

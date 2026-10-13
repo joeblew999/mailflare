@@ -92,6 +92,11 @@ npm run state -- --deploy eu1 --dry-run     # the two commands it will run, and 
 npm run state -- --deploy eu1               # build, deploy, record the origin
 npm run state -- --destroy eu1 --dry-run    # its inverse: undeploy and deregister
 npm run state -- --destroy eu1 --confirm-destroy
+
+#    The top-level config in wrangler.jsonc is itself a server — the DEFAULT environment,
+#    deployed by `npm run deploy` with no --env — so it needs no env block. Every additional
+#    server does. `--project <name>` deploys whichever kind is missing, so you rarely call
+#    --deploy by hand.
 ```
 
 **2. Reset it and give it a primary admin.** Nothing else in the app can do this.
@@ -109,6 +114,16 @@ npm run state -- --project mailflare --status   # drift report, writes nothing
 npm run state -- --project mailflare --dry-run  # what would change
 ```
 
+**Pointing at a folder reconciles the server too, not just its contents.** If the project is
+not registered (its `server.json` has no origin) it is deployed first; if it is, it is left
+alone, so this is idempotent. One command per project, whether that project is one tenant or
+a hundred.
+
+```bash
+npm run state -- --project mailflare --cleanup                     # everything goes: tenants, then the server
+npm run state -- --project mailflare --cleanup --confirm-destroy    # ...and actually undeploy
+```
+
 **4. Change things over time.** Edit a document and run it again — every resource is
 idempotent and reconciles drift, so this is the only supported way to change things.
 
@@ -116,10 +131,14 @@ idempotent and reconciles drift, so this is the only supported way to change thi
 npm run state -- --project mailflare
 ```
 
-**5. Tear down.** Reverse order, and safe to re-run.
+**5. Tear down.** Reverse order, and safe to re-run. `--project <name> --cleanup` removes
+the tenants *and* the server (the Worker — undeploying needs `--confirm-destroy`); the
+database, bucket and queues are left alone and their exact wrangler commands printed, because
+this system does not create them either.
 
 ```bash
-npm run state -- --spec <path> --cleanup --disable-accounts --remove-domain
+npm run state -- --project mailflare --cleanup --disable-accounts --confirm-destroy
+npm run state -- --spec <path> --cleanup --disable-accounts --remove-domain   # one tenant
 ```
 
 **Everything, and the checks:**

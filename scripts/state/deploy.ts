@@ -44,8 +44,12 @@ export function upsertInstance(fleet: InstanceDecl[], entry: InstanceDecl): Inst
 
 export async function deployServer({ name, dryRun, url, db }: { name: string; dryRun: boolean; url?: string; db?: string }): Promise<number> {
 	const server = loadServer(name); // throws when the project folder has no server.json
-	const block = envBlockFor(readWranglerConfig(), name);
-	if (!block) {
+	const config = readWranglerConfig();
+	const block = envBlockFor(config, name);
+	// The top-level config is itself a server - the DEFAULT environment, deployed by
+	// `npm run deploy` with no --env. Everything else needs its own env block.
+	const isDefault = !block && config.name === name;
+	if (!block && !isDefault) {
 		console.error(`No env.${name} in ${WRANGLER_PATH} — there is nothing to deploy for "${name}".`);
 		console.error(`Add an env.${name} block to ${WRANGLER_PATH}, alongside the top-level one:`);
 		console.error(`  "env": { "${name}": { "name": "${name}", "d1_databases": [ { "binding": "DB", "database_name": "${server.db ?? name}", "database_id": "<its own id>" } ] } }`);
@@ -53,16 +57,16 @@ export async function deployServer({ name, dryRun, url, db }: { name: string; dr
 		return 1;
 	}
 	// The folder and the env block must agree, or the deploy would target the wrong database.
-	if (server.db && block.databaseName && server.db !== block.databaseName) {
+	if (server.db && block?.databaseName && server.db !== block.databaseName) {
 		console.error(`"${name}" disagrees with itself: ${serverDocPath(name)} says db "${server.db}", ${WRANGLER_PATH} says "${block.databaseName}".`);
 		return 1;
 	}
 
-	const database = db ?? block.databaseName ?? server.db ?? name;
+	const database = db ?? block?.databaseName ?? server.db ?? name;
 	if (dryRun) {
 		console.log(`Would deploy the server "${name}":\n`);
 		console.log(`  1. npm run build`);
-		console.log(`  2. npm run deploy:worker -- --env ${name}`);
+		console.log(`  2. ${isDefault ? "npm run deploy" : `npm run deploy:worker -- --env ${name}`}`);
 		console.log(`  3. record its origin in ${serverDocPath(name)} (database ${database})`);
 		console.log(`\n  then: npm run state -- --fresh --instance ${name}`);
 		return 0;
@@ -73,7 +77,7 @@ export async function deployServer({ name, dryRun, url, db }: { name: string; dr
 		console.error(built.stderr || built.stdout || "the build failed");
 		return 1;
 	}
-	const deployed = run("npm", ["run", "deploy:worker", "--", "--env", name]);
+	const deployed = isDefault ? run("npm", ["run", "deploy"]) : run("npm", ["run", "deploy:worker", "--", "--env", name]);
 	if (deployed.status !== 0) {
 		console.error(deployed.stderr || deployed.stdout || "the deploy failed");
 		return 1;
@@ -97,7 +101,8 @@ export async function deployServer({ name, dryRun, url, db }: { name: string; dr
 export async function destroyServer({ name, dryRun, confirmed }: { name: string; dryRun: boolean; confirmed: boolean }): Promise<number> {
 	const server = loadServer(name);
 	console.log(`Destroying the server "${name}" (database ${server.db ?? "unset"}):\n`);
-	console.log(`  1. npx wrangler delete --env ${name}          removes the Worker`);
+	const target = envBlockFor(readWranglerConfig(), name) ? `--env ${name}` : "";
+	console.log(`  1. npx wrangler delete ${target}          removes the Worker`);
 	console.log(`  2. ${serverDocPath(name)} loses its origin     deregisters it from the fleet`);
 	console.log(`  3. NOT removed: the database, bucket and queues — delete them with wrangler`);
 	console.log(`     (wrangler d1 delete ${server.db ?? "<db>"}, wrangler r2 bucket delete <bucket>, wrangler queues delete <queue>)`);
@@ -106,7 +111,7 @@ export async function destroyServer({ name, dryRun, confirmed }: { name: string;
 		if (!confirmed) console.log("\nRe-run with --confirm-destroy to do steps 1 and 2.");
 		return 0;
 	}
-	const deleted = run("npx", ["wrangler", "delete", "--env", name]);
+	const deleted = envBlockFor(readWranglerConfig(), name) ? run("npx", ["wrangler", "delete", "--env", name]) : run("npx", ["wrangler", "delete"]);
 	if (deleted.status !== 0) {
 		console.error(deleted.stderr || deleted.stdout || "wrangler delete failed");
 		return 1;
