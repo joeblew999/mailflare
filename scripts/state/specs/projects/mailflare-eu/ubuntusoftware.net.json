@@ -1,5 +1,8 @@
 {
   "domain": "ubuntusoftware.net",
+  "onboard": {
+    "enableRouting": true
+  },
   "mailboxes": [
     {
       "role": "office",
@@ -10,13 +13,20 @@
       "displayName": "Admin"
     },
     {
-      "role": "support",
-      "displayName": "Support",
+      "role": "helpdesk",
+      "displayName": "Helpdesk",
       "shared": true,
       "access": [
         {
           "email": "gerard@ubuntusoftware.net",
           "permission": "full_access"
+        }
+      ],
+      "signature": "<p>Ubuntu Software Helpdesk</p>",
+      "folders": [
+        {
+          "name": "Tickets",
+          "color": "#0d9488"
         }
       ]
     }
@@ -26,7 +36,12 @@
       "username": "gerard",
       "name": "Gerard",
       "role": "admin",
-      "passwordEnv": "MAILFLARE_PROV_PASSWORD"
+      "preferences": {
+        "timeZone": "Europe/Berlin"
+      },
+      "mailbox": {
+        "signature": "Gerard, Ubuntu Software"
+      }
     }
   ]
 }

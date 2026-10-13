@@ -1,3 +1,55 @@
 {
-  "license": { "plan": "team" }
+  "license": {
+    "plan": "team"
+  },
+  "settings": {
+    "appName": "Mailflare Sandbox",
+    "outboundAttachmentMaxMb": 20,
+    "driveStorageLimitGb": 5,
+    "assistant": {
+      "enabled": false
+    }
+  },
+  "backups": {
+    "enabled": true,
+    "schedule": "weekly",
+    "scheduleValue": 1,
+    "retentionDays": 14,
+    "exclude": [
+      "assistant"
+    ]
+  },
+  "fresh": {
+    "admin": {
+      "email": "root@sandbox.test",
+      "password": "sandbox-admin-pass-123"
+    }
+  },
+  "admin": {
+    "preferences": {
+      "timeZone": "UTC",
+      "keyboardShortcuts": true
+    },
+    "contacts": [
+      {
+        "email": "legal@partner.test",
+        "name": "Legal"
+      }
+    ],
+    "drive": {
+      "folders": [
+        "Policies"
+      ]
+    },
+    "webhooks": [
+      {
+        "url": "https://hooks.partner.test/mail",
+        "events": [
+          "message.inbound",
+          "message.failed"
+        ],
+        "description": "Partner CRM"
+      }
+    ]
+  }
 }

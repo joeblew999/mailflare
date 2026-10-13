@@ -1,0 +1,18 @@
+{
+  "domain": "one.conformance.test",
+  "country": "de",
+  "onboard": {
+    "receivingProvider": "none",
+    "sendingProvider": "none"
+  },
+  "mailboxes": [
+    {
+      "role": "office",
+      "displayName": "Office"
+    }
+  ],
+  "teardown": {
+    "accounts": "disable",
+    "domain": "remove"
+  }
+}

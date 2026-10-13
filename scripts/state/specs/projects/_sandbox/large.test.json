@@ -1,0 +1,261 @@
+{
+  "domain": "large.test",
+  "onboard": {
+    "receivingProvider": "none",
+    "sendingProvider": "none"
+  },
+  "mailboxes": [
+    {
+      "role": "office",
+      "displayName": "Office",
+      "signature": "<p>Large Ltd</p>"
+    },
+    {
+      "role": "admin",
+      "displayName": "Admin"
+    },
+    {
+      "role": "support",
+      "displayName": "Support",
+      "shared": true,
+      "access": [
+        {
+          "email": "sam@large.test",
+          "permission": "full_access"
+        },
+        {
+          "email": "alex@large.test",
+          "permission": "read_only"
+        }
+      ],
+      "signature": "<p>Large Support</p>",
+      "autoReply": {
+        "enabled": true,
+        "subject": "We have your message",
+        "body": "Thanks - we reply within a day."
+      },
+      "aliases": [
+        "help",
+        "service"
+      ],
+      "folders": [
+        {
+          "name": "Bugs",
+          "color": "#dc2626"
+        },
+        {
+          "name": "Invoices",
+          "color": "#2563eb"
+        }
+      ],
+      "rules": [
+        {
+          "field": "title",
+          "value": "invoice",
+          "folder": "Invoices",
+          "priority": 10
+        },
+        {
+          "field": "title",
+          "operator": "contains",
+          "value": "bug",
+          "folder": "Bugs"
+        },
+        {
+          "value": "noreply@spam.test",
+          "action": "spam"
+        }
+      ],
+      "assistant": {
+        "enabled": true,
+        "autoDraft": false,
+        "instructions": "Be brief and kind.",
+        "dailyLimit": 25,
+        "reviewer": "sam@large.test"
+      }
+    },
+    {
+      "role": "billing",
+      "displayName": "Billing",
+      "shared": true,
+      "access": [
+        {
+          "email": "alex@large.test",
+          "permission": "send_as"
+        }
+      ]
+    },
+    {
+      "role": "events",
+      "displayName": "Events",
+      "shared": true
+    }
+  ],
+  "accounts": [
+    {
+      "username": "sam",
+      "name": "Sam",
+      "role": "user",
+      "password": "sandbox-password-123",
+      "resetEmail": "sam@elsewhere.test",
+      "canManageMailboxes": true,
+      "preferences": {
+        "timeZone": "Europe/Berlin",
+        "keyboardShortcuts": false,
+        "spamProtection": true,
+        "trashRetentionDays": 30,
+        "showFullRecipientAddresses": true
+      },
+      "mailbox": {
+        "signature": "Sam, Large Ltd",
+        "folders": [
+          {
+            "name": "Receipts"
+          },
+          {
+            "name": "Travel",
+            "color": "#16a34a"
+          }
+        ],
+        "rules": [
+          {
+            "field": "title",
+            "value": "receipt",
+            "folder": "Receipts"
+          },
+          {
+            "value": "junk@spam.test",
+            "action": "trash"
+          }
+        ]
+      },
+      "templates": [
+        {
+          "name": "Welcome",
+          "body": "Hello, and welcome aboard."
+        },
+        {
+          "name": "Follow up",
+          "body": "Just checking in on this.",
+          "html": "<p>Just checking in on this.</p>"
+        }
+      ],
+      "contacts": [
+        {
+          "email": "ops@partner.test",
+          "name": "Ops"
+        },
+        {
+          "email": "pest@spam.test",
+          "name": "Pest",
+          "blocked": true
+        }
+      ],
+      "calendar": {
+        "bookingUsername": "sam-large",
+        "bookingPages": [
+          {
+            "name": "Intro call",
+            "slug": "intro",
+            "description": "A first conversation.",
+            "durationMinutes": 30,
+            "location": "Video",
+            "weekdays": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "startTime": "09:00",
+            "endTime": "17:00",
+            "timeZone": "Europe/Berlin"
+          }
+        ],
+        "events": [
+          {
+            "title": "Standup",
+            "startsAt": "2026-11-02T09:00:00Z",
+            "endsAt": "2026-11-02T09:15:00Z",
+            "repeat": "weekdays",
+            "location": "Video"
+          }
+        ]
+      },
+      "drive": {
+        "folders": [
+          "Contracts/2026",
+          "Scans"
+        ]
+      },
+      "apiKeys": [
+        {
+          "name": "ci",
+          "scopes": [
+            "send",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "username": "alex",
+      "name": "Alex",
+      "role": "admin",
+      "password": "sandbox-password-456",
+      "preferences": {
+        "timeZone": "America/New_York"
+      },
+      "mailbox": {
+        "autoReply": {
+          "enabled": false,
+          "subject": "Away",
+          "body": "Back on Monday."
+        }
+      }
+    }
+  ],
+  "routing": [
+    {
+      "pattern": "*",
+      "action": "forward",
+      "forwardTo": "ops@example.com",
+      "keepCopy": true,
+      "mailbox": "support"
+    },
+    {
+      "pattern": "no-reply",
+      "action": "reject",
+      "rejectReason": "No such user"
+    },
+    {
+      "pattern": "archive",
+      "action": "store",
+      "mailbox": "office",
+      "priority": 10
+    }
+  ],
+  "mcpKeys": [
+    {
+      "name": "large-agent",
+      "mailboxes": [
+        "support",
+        "office"
+      ],
+      "scopes": [
+        "mcp:read",
+        "mcp:draft",
+        "mcp:request-send"
+      ]
+    },
+    {
+      "name": "large-reader",
+      "scopes": [
+        "mcp:read"
+      ]
+    }
+  ],
+  "teardown": {
+    "accounts": "disable",
+    "domain": "remove"
+  }
+}

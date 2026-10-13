@@ -1,10 +1,9 @@
 import { validateBody } from "../app";
-import { requireDomain } from "../context";
-import type { Context } from "../context";
+import { declaresUser, requireDomain, usernameOf, type Context } from "../context";
+import { expectOk, type Item, type Resource } from "./resource";
 import type { ApiMailbox } from "../spec";
-import type { Item, Resource } from "./resource";
 
-/** This domain's mailboxes, by local part. Read once per walk. */
+/** This domain's mailboxes, by local part. */
 export async function mailboxesForDomain(ctx: Context): Promise<Map<string, ApiMailbox>> {
 	const boxes = new Map<string, ApiMailbox>();
 	for (const box of await ctx.store.listMailboxes()) {
@@ -13,96 +12,111 @@ export async function mailboxesForDomain(ctx: Context): Promise<Map<string, ApiM
 	return boxes;
 }
 
-const idOf = async (ctx: Context, role: string) => (await mailboxesForDomain(ctx)).get(role)?.id ?? null;
-
-/** Publish this domain's mailbox ids into the run state. Destroy walks in reverse, so the
- *  rules and keys need them before the mailboxes resource is reached. */
-export async function publishMailboxIds(ctx: Context, state: { mailboxIdsByRole: Map<string, string> }): Promise<void> {
-	for (const [role, box] of await mailboxesForDomain(ctx)) state.mailboxIdsByRole.set(role, box.id);
+/** Publish this domain's mailbox ids: routing rules and MCP keys name mailboxes by role. */
+export async function publishMailboxIds(ctx: Context): Promise<Map<string, ApiMailbox>> {
+	const boxes = await mailboxesForDomain(ctx);
+	for (const [role, box] of boxes) ctx.mailboxIds.set(role, box.id);
+	return boxes;
 }
 
 export const mailboxesResource: Resource = {
 	section: "mailboxes",
-	needsDomain: true,
-	declared: (_ctx, roles) => roles.length > 0,
-	async items(ctx, roles, state) {
-		const boxes = await mailboxesForDomain(ctx);
-		// Routing rules and MCP keys name mailboxes by role, so publish what we found.
-		for (const [role, box] of boxes) state.mailboxIdsByRole.set(role, box.id);
-
+	// A written section is complete, even when it is empty; one left out is not managed.
+	declared: (ctx) => ctx.spec.mailboxes !== undefined,
+	async items(ctx) {
+		const boxes = await publishMailboxIds(ctx);
+		// The app will not take an address over from a rule someone made in Cloudflare, and nor
+		// should it: that rule is where the mail goes today.
+		const receives = (ctx.domain?.receivingProvider ?? ctx.spec.onboard?.receivingProvider ?? "cloudflare") === "cloudflare";
+		const elsewhere = receives && ctx.roles.some((entry) => !boxes.has(entry.role)) ? await ctx.store.routedElsewhere(ctx.domainName) : {};
+		// Every grant on the declared mailboxes, read once.
+		const declaredBoxes = ctx.roles.map((entry) => boxes.get(entry.role)).filter((box): box is ApiMailbox => !!box);
+		const grants = await ctx.store.accessList(declaredBoxes.map((box) => box.id));
 		const items: Item[] = [];
-		for (const { role, share, access } of roles) {
+		for (const { role, displayName, shared, access, managesAccess } of ctx.roles) {
 			const box = boxes.get(role);
+			const address = `${role}@${ctx.domainName}`;
+			const type = shared ? "shared" : "personal";
 			items.push({
-				address: `mailbox.${role}@${ctx.domainName}`,
-				wants: share ? "shared" : "personal",
+				address: `mailbox.${address}`,
+				wants: box ? `display name "${box.displayName ?? ""}" → "${displayName}"` : type,
+				// The app has no way to turn one kind of mailbox into the other.
+				problem: box && box.type !== type
+					? `exists as a ${box.type} mailbox, and the document wants ${type} — the app cannot convert one`
+					: !box && elsewhere[address]
+						? `Cloudflare already routes ${address} elsewhere (${elsewhere[address]}) — remove that Email Routing rule, or use another address`
+						: undefined,
 				actual: async () => box ?? null,
+				satisfied: (actual) => !!actual && (displayName === null || (actual as ApiMailbox).displayName === displayName),
 				create: async () => {
-					const res = await ctx.store.createMailbox(validateBody("mailbox", {
-						domainId: requireDomain(ctx).id, localPart: role, displayName: role, type: share ? "shared" : "personal",
-					}));
-					if (res.status !== 200 && res.status !== 201) {
-						console.log(`  ✗ create ${role}@${ctx.domainName} (HTTP ${res.status}) ${JSON.stringify(res.json?.error ?? "")}`);
-						return 1;
-					}
-					console.log(`  ✓ created ${role}@${ctx.domainName}${share ? " (shared)" : ""}`);
-					// Publish the id straight away: routing rules and MCP keys name mailboxes by
-					// role, and they run after this.
-					const created = res.json?.mailbox?.id ?? res.json?.id ?? (await idOf(ctx, role));
-					if (created) state.mailboxIdsByRole.set(role, String(created));
-					return 0;
+					const res = expectOk(await ctx.store.createMailbox(validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: role, displayName: displayName ?? role, type })));
+					ctx.mailboxIds.set(role, String(res.json?.id));
+					return type;
 				},
-				remove: async () => {
-					const id = box?.id ?? (await idOf(ctx, role));
-					if (!id) return 0;
-					const res = await ctx.store.deleteMailbox(id);
-					console.log(`${res.status === 200 ? "✓ deleted" : `✗ delete failed (HTTP ${res.status})`} ${role}@${ctx.domainName}`);
-					return res.status === 200 ? 0 : 1;
+				update: async (actual) => {
+					expectOk(await ctx.store.updateMailbox((actual as ApiMailbox).id, validateBody("mailboxUpdate", { displayName })));
+					return `display name "${displayName}"`;
+				},
+				remove: async (present) => {
+					expectOk(await ctx.store.deleteMailbox((present as ApiMailbox).id));
+					ctx.mailboxIds.delete(role);
 				},
 			});
 
 			for (const grant of access) {
-				const email = String(grant.email ?? "").trim().toLowerCase();
-				const permission = String(grant.permission ?? "full_access");
-				const userId = ctx.store.userIdByEmail(email);
-				const owner = box ? ctx.store.mailboxOwnerId(box.id) : null;
+				const email = grant.email.trim().toLowerCase();
+				const permission = grant.permission ?? "full_access";
+				const userId = await ctx.store.userIdByEmail(email);
 				// The owner of a mailbox needs no grant for it, and one that exists is redundant.
-				const isOwner = Boolean(userId && owner && userId === owner);
+				const isOwner = Boolean(userId && box && box.userId === userId);
+				const mailboxId = () => ctx.mailboxIds.get(role) ?? null;
+				const current = async () => grants.find((entry) => entry.mailboxId === mailboxId() && entry.userId === userId)?.permission ?? null;
+				const write = async () => {
+					const user = userId ?? (await ctx.store.userIdByEmail(email));
+					if (!mailboxId() || !user) throw new Error(`${!mailboxId() ? `${address} does not exist` : `${email} does not exist`}, so there is nothing to grant`);
+					if (isOwner) {
+						await ctx.store.revokeAccess(mailboxId()!, user);
+						return "cleared — the owner needs no grant";
+					}
+					await ctx.store.grantAccess(mailboxId()!, user, permission);
+					return permission;
+				};
 				items.push({
 					address: `mailbox_access.${role}.${email}`,
-					wants: isOwner ? "owner needs no grant" : permission,
-					// A grant names a LOCAL user. An outside address can never resolve, so it is
-					// reported as a problem rather than attempted.
-					problem: userId ? undefined : "no local user with that address - the grant cannot resolve",
-					actual: async () => {
-						const id = box?.id ?? (await idOf(ctx, role));
-						return id && userId ? ctx.store.accessPermission(id, userId) : null;
-					},
+					wants: isOwner ? "clear — the owner needs no grant" : permission,
+					// A grant names a LOCAL user: one that exists, or one this document creates.
+					problem: userId || declaresUser(ctx, email) ? undefined : "no local user with that address — declare the account, or the grant cannot resolve",
+					actual: current,
 					satisfied: (actual) => (isOwner ? actual === null : actual === permission),
-					create: async () => write(ctx, box?.id ?? (await idOf(ctx, role)), userId, permission, isOwner, role, email),
-					update: async () => write(ctx, box?.id ?? (await idOf(ctx, role)), userId, permission, isOwner, role, email),
+					create: write,
+					update: write,
 					remove: async () => {
-						const id = box?.id ?? (await idOf(ctx, role));
-						if (id && userId) ctx.store.revokeAccess(id, userId);
-						console.log(`  ✓ revoked ${permission} on ${role}@${ctx.domainName} → ${email}`);
-						return 0;
+						if (mailboxId() && userId) await ctx.store.revokeAccess(mailboxId()!, userId);
 					},
 				});
 			}
+			// A mailbox that writes its `access` list has only those grants.
+			const named = new Set(access.map((grant) => grant.email.trim().toLowerCase()));
+			for (const grant of managesAccess && box ? grants.filter((entry) => entry.mailboxId === box.id && !named.has(entry.email)) : []) {
+				items.push({ address: `mailbox_access.${role}.${grant.email}`, undeclared: true, actual: async () => grant, remove: async () => ctx.store.revokeAccess(grant.mailboxId, grant.userId) });
+			}
+		}
+
+		// The admin's mailboxes on the domain are this section's; an account's own belongs to the account.
+		const admin = await ctx.store.admin();
+		const accounted = new Set([...ctx.roles.map((entry) => entry.role), ...(ctx.spec.accounts ?? []).map(usernameOf)]);
+		for (const [role, box] of boxes) {
+			if (box.userId !== admin.id || accounted.has(role)) continue;
+			items.push({
+				address: `mailbox.${role}@${ctx.domainName}`,
+				undeclared: true,
+				actual: async () => box,
+				remove: async () => {
+					expectOk(await ctx.store.deleteMailbox(box.id));
+					ctx.mailboxIds.delete(role);
+				},
+			});
 		}
 		return items;
 	},
 };
-
-/** Grant, or clear the redundant grant an owner should never have had. */
-async function write(ctx: Context, mailboxId: string | null, userId: string | null, permission: string, isOwner: boolean, role: string, email: string): Promise<number> {
-	if (!mailboxId || !userId) return 1;
-	if (isOwner) {
-		ctx.store.revokeAccess(mailboxId, userId);
-		console.log(`  ✓ cleared a redundant grant: ${role}@${ctx.domainName} is owned by ${email}`);
-		return 0;
-	}
-	ctx.store.grantAccess(mailboxId, userId, permission);
-	console.log(`  ✓ ${permission} on ${role}@${ctx.domainName} → ${email}`);
-	return 0;
-}

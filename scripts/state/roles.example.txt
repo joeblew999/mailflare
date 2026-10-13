@@ -1,6 +1,0 @@
-# Roles for a project (one per line; "#" starts a comment).
-# Use with: npm run state -- --domain <hostname> --roles-file scripts/state/roles.example.txt
-office
-admin
-events
-support

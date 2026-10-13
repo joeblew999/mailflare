@@ -1,129 +1,105 @@
-import { newId } from "@/lib/ids";
 import { validateBody } from "../app";
-import { requireDomain } from "../context";
+import { requireDomain, usernameOf } from "../context";
+import { newPassword } from "../vault";
+import { credential } from "../wrangler";
 import { mailboxesForDomain } from "./mailboxes";
-import type { Context } from "../context";
+import { expectOk, type Item, type Resource } from "./resource";
 import type { AccountEntry, ApiAccount } from "../spec";
-import type { Resource } from "./resource";
 
-// Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
-// Existing accounts are re-enabled, since the app cannot delete a user.
-export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<number> {
-	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
-	if (!username) {
-		console.log(`  ✗ account entry needs a username: ${JSON.stringify(entry)}`);
-		return 1;
-	}
-	const email = `${username}@${ctx.domainName}`;
-	const accounts = await ctx.store.listAccounts();
-	const existing = accounts.find((account) => String(account.email).toLowerCase() === email);
+/** The password to set: the declared one, else the one on record, else a new one. */
+const passwordFor = (entry: AccountEntry, onRecord: string | null): string =>
+	entry.password ?? (entry.passwordEnv ? credential(entry.passwordEnv) : null) ?? onRecord ?? newPassword();
 
-	if (existing) {
-		if (existing.disabled) {
-		} else {
-			console.log(`  · account ${email} — already exists`);
-		}
-		return await ensureAccountMailbox(ctx, existing, username, email);
-	}
+// updateManagedAccountSchema requires the whole object, so every update carries all of it.
+const updateBody = (account: ApiAccount, values: { name: string; role: string; disabled: boolean; password?: string }) =>
+	validateBody("accountUpdate", { ...values, canManageMailboxes: Boolean(account.canManageMailboxes) });
 
-	const fromEnv = entry.passwordEnv ? process.env[entry.passwordEnv] : null;
-	const password = entry.password || fromEnv || newId();
-	const generated = !entry.password && !fromEnv;
-	const created = await ctx.store.createAccount(
-		validateBody("account", {
-			username,
-			domainId: requireDomain(ctx).id,
-			password,
-			role: entry.role === "admin" ? "admin" : "user",
-			useAllDomains: false,
-			aliases: [],
-		}),
-	);
-	if (created.status !== 200 && created.status !== 201) {
-		console.log(`  ✗ account failed (HTTP ${created.status}) ${email} — ${created.json?.error ?? ""}`);
-		return 1;
-	}
-	console.log(`  ✓ created account ${email}${generated ? `  ⚠ password (shown once): ${password}` : ""}`);
-	return 0;
-}
-
-// updateManagedAccountSchema requires the whole object, so every update carries the
-function updateBody(account: ApiAccount, username: string, disabled: boolean) {
-	const body = {
-		name: account.name?.trim() || username,
-		role: account.role ?? "user",
-		disabled,
-		canManageMailboxes: Boolean(account.canManageMailboxes),
-	};
-	validateBody("accountUpdate", body);
-	return body;
-}
-
-// An account's own mailbox is cascaded away when its domain is removed, and the
-async function ensureAccountMailbox(ctx: Context, account: ApiAccount, username: string, email: string): Promise<number> {
-	const boxes = await mailboxesForDomain(ctx);
-	if (boxes.has(username)) return 0;
-	const created = await ctx.store.createMailbox(
-		validateBody("mailbox", {
-			domainId: requireDomain(ctx).id,
-			localPart: username,
-			displayName: account.name ?? username,
-			type: "personal",
-			ownerUserId: account.id,
-		}),
-	);
-	if (created.status === 201) {
-		console.log(`  ✓ created mailbox ${email}`);
-		return 0;
-	}
-	console.log(`  ✗ mailbox ${email} failed (HTTP ${created.status}) — ${created.json?.error ?? ""}`);
-	return 1;
-}
-
-// The app has no user-delete, so tearing an account down means disabling it.
-export async function disableAccount(ctx: Context, entry: AccountEntry): Promise<number> {
-	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
-	const email = `${username}@${ctx.domainName}`;
-	const accounts = await ctx.store.listAccounts();
-	const account = accounts.find((row) => String(row.email).toLowerCase() === email);
-	if (!account) {
-		console.log(`  · account ${email} — not found, skipping`);
-		return 0;
-	}
-	if (account.isPrimaryAdmin) {
-		console.log(`  ⚠ ${email} is the primary admin — not disabling`);
-		return 0;
-	}
-	const res = await ctx.store.updateAccount(account.id, updateBody(account, username, true));
-	console.log(`${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status}) — ${JSON.stringify(res.json?.error ?? "")}`} account ${email}`);
-	return res.status === 200 ? 0 : 1;
-}
-
-// Read-only report: each declared account exists, is enabled, and owns its mailbox.
 export const accountsResource: Resource = {
 	section: "accounts",
-	needsDomain: true,
-	declared: (ctx) => (ctx.spec?.accounts?.length ?? 0) > 0,
+	declared: (ctx) => ctx.spec.accounts !== undefined,
 	async items(ctx) {
 		const accounts = await ctx.store.listAccounts();
 		const boxes = await mailboxesForDomain(ctx);
-		return (ctx.spec?.accounts ?? []).map((entry) => {
-			const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
+		const declared: Item[] = (ctx.spec.accounts ?? []).map((entry) => {
+			const username = usernameOf(entry);
 			const email = `${username}@${ctx.domainName}`;
 			const account = accounts.find((row) => String(row.email).toLowerCase() === email) ?? null;
+			const role = entry.role ?? "user";
+			// The app names a new account after its username, so a declared name is a follow-up.
+			const name = entry.name?.trim() ?? null;
+			// A stored hash cannot be read back, so a password is only known when this system set it.
+			// Rotating sets a fresh one, which signs the person out everywhere.
+			const rotate = !!account && ctx.flags.rotatePasswords && !account.isPrimaryAdmin;
+			const differs = account
+				? [
+					...(rotate ? ["set a new password"] : []),
+					...(account.disabled ? ["re-enable"] : []),
+					// The primary admin is always an admin, whatever a document says.
+					...(account.role !== role && !account.isPrimaryAdmin ? [`role ${account.role} → ${role}`] : []),
+					...(name !== null && account.name !== name ? [`name "${account.name}" → "${name}"`] : []),
+				]
+				: [];
+			const lacksMailbox = !!account && !boxes.has(username);
+
+			const record = (password: string) => {
+				ctx.vault.at(ctx.store.base);
+				ctx.vault.recordLogin(email, { name: name ?? username, role, password });
+			};
+			const patch = async (target: ApiAccount, password?: string) => {
+				expectOk(await ctx.store.updateAccount(target.id, updateBody(target, { name: name ?? (target.name?.trim() || username), role: target.isPrimaryAdmin ? "admin" : role, disabled: false, ...(password ? { password } : {}) })));
+				if (password) record(password);
+			};
+			// An account's own mailbox goes when its domain is removed; the account itself stays.
+			const restoreMailbox = async (target: ApiAccount) => {
+				expectOk(await ctx.store.createMailbox(validateBody("mailbox", { domainId: requireDomain(ctx).id, localPart: username, displayName: name ?? username, type: "personal" as const, ownerUserId: target.id })));
+			};
+
 			return {
 				address: `account.${username}`,
-				wants: entry.role ?? "user",
+				wants: account ? [...differs, ...(lacksMailbox ? ["restore its mailbox"] : [])].join(", ") : `${role}${name ? ` "${name}"` : ""}`,
+				keep: ctx.spec.teardown?.accounts !== "disable" ? 'teardown.accounts is not "disable"' : account?.isPrimaryAdmin ? "the primary admin is never disabled" : undefined,
 				actual: async () => account,
-				// An existing, enabled account that owns its mailbox is already what we want.
-				satisfied: (actual: unknown) => {
-					const found = actual as ApiAccount | null;
-					return !!found && !found.disabled && boxes.has(username);
+				satisfied: (actual) => !!actual && differs.length === 0 && !lacksMailbox,
+				create: async () => {
+					const password = passwordFor(entry, ctx.vault.password(email));
+					const res = expectOk(await ctx.store.createAccount(validateBody("account", { username, domainId: requireDomain(ctx).id, password, role, useAllDomains: false, aliases: [] })));
+					record(password);
+					const created = res.json?.account as ApiAccount | undefined;
+					if (name !== null && name !== username && created) await patch(created);
+					return `login written to ${ctx.vault.where}`;
 				},
-				create: async () => ensureAccount(ctx, entry),
-				update: async () => ensureAccount(ctx, entry),
-				remove: async () => (ctx.spec?.teardown?.accounts === "disable" ? disableAccount(ctx, entry) : 0),
+				update: async (actual) => {
+					// A rotation never reuses the password on record: that is the one being retired.
+					if (differs.length > 0) await patch(actual as ApiAccount, rotate ? passwordFor(entry, null) : undefined);
+					if (lacksMailbox) await restoreMailbox(actual as ApiAccount);
+					return [...differs, ...(lacksMailbox ? ["mailbox restored"] : [])].join(", ");
+				},
+				// The app cannot delete a user, so tearing an account down means disabling it.
+				removable: async () => (account && !account.disabled ? account : null),
+				remove: async (present) => {
+					const target = present as ApiAccount;
+					expectOk(await ctx.store.updateAccount(target.id, updateBody(target, { name: target.name?.trim() || username, role: target.role, disabled: true })));
+					return "disabled";
+				},
 			};
 		});
+
+		// Anyone else with a login on this domain is not in the document. The app cannot delete
+		// a user, so they are disabled - never the admin whose key this is, and never the primary one.
+		const admin = await ctx.store.admin();
+		const named = new Set((ctx.spec.accounts ?? []).map((entry) => `${usernameOf(entry)}@${ctx.domainName}`));
+		const others = accounts.filter((account) => {
+			const email = String(account.email).toLowerCase();
+			return email.endsWith(`@${ctx.domainName}`) && !named.has(email) && !account.disabled && !account.isPrimaryAdmin && account.id !== admin.id;
+		});
+		return [...declared, ...others.map((account): Item => ({
+			address: `account.${String(account.email).split("@")[0].toLowerCase()}`,
+			undeclared: true,
+			actual: async () => account,
+			remove: async () => {
+				expectOk(await ctx.store.updateAccount(account.id, updateBody(account, { name: account.name?.trim() || String(account.email).split("@")[0], role: account.role, disabled: true })));
+				return "disabled";
+			},
+		}))];
 	},
 };

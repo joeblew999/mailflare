@@ -10,7 +10,7 @@ import { isInboundQueueMessage, isWebhookRetryMessage } from "./worker-utils";
 import { processWebhookRetry, type WebhookRetryMessage } from "./src/lib/email/webhooks";
 import { resolveIncomingMail, forwardMessage } from "./src/lib/email/incoming";
 import { getUserFromSession } from "./src/lib/auth/session";
-import { getSessionTokenFromRequest } from "./src/lib/realtime/utils";
+import { getSessionTokenFromRequest, realtimeNamespace } from "./src/lib/realtime/utils";
 import { inboundAttachmentLimitReasonFromRaw } from "./src/lib/email/inbound-attachments";
 import { hasValidSessionMutationOrigin } from "./src/lib/auth/origin";
 import {
@@ -41,7 +41,7 @@ export default {
 				return new Response("Unauthorized", { status: 401 });
 			}
 
-			const hub = env.REALTIME.getByName(user.id);
+			const hub = realtimeNamespace(env).getByName(user.id);
 			const hubRequest = new Request("https://mailflare-realtime/connect", request);
 			hubRequest.headers.set("X-Mailflare-Realtime-User", user.id);
 			return hub.fetch(hubRequest);

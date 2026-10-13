@@ -1,0 +1,32 @@
+{
+  "domain": "medium.test",
+  "onboard": { "receivingProvider": "none", "sendingProvider": "none" },
+  "mailboxes": [
+    { "role": "office", "displayName": "Office", "signature": "<p>The Office</p>" },
+    {
+      "role": "support",
+      "displayName": "Support",
+      "shared": true,
+      "access": [{ "email": "sam@medium.test", "permission": "read_only" }],
+      "autoReply": { "enabled": true, "subject": "We have your message", "body": "Thanks - we reply within a day." },
+      "folders": [{ "name": "Invoices", "color": "#2563eb" }],
+      "rules": [{ "field": "title", "value": "invoice", "folder": "Invoices" }]
+    }
+  ],
+  "accounts": [
+    {
+      "username": "sam",
+      "name": "Sam",
+      "role": "user",
+      "password": "sandbox-password-123",
+      "preferences": { "timeZone": "Europe/Berlin" },
+      "mailbox": { "signature": "Sam, Medium Ltd" },
+      "templates": [{ "name": "Welcome", "body": "Hello, and welcome aboard." }],
+      "contacts": [{ "email": "ops@partner.test", "name": "Ops" }]
+    }
+  ],
+  "routing": [
+    { "pattern": "*", "action": "forward", "forwardTo": "ops@example.com" }
+  ],
+  "teardown": { "accounts": "disable", "domain": "remove" }
+}

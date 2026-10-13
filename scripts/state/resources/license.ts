@@ -1,41 +1,33 @@
-import type { LicenseEntry } from "../spec";
+import type { LicenseEntry, Plan } from "../spec";
 import type { Resource } from "./resource";
 
-// The plan the license resource should write: null means "revert to community".
-export function wantedPlan(entry: LicenseEntry | undefined): string | null {
-	const raw = typeof entry === "string" ? entry : entry?.plan;
-	const plan = (raw ?? "").trim().toLowerCase();
-	if (!plan || plan === "community" || plan === "off") return null;
-	return plan;
-}
+export const planOf = (entry: LicenseEntry | undefined): Plan | undefined => (typeof entry === "string" ? entry : entry?.plan);
 
-// The self-hosted license plan is one row, so this is pure data - no domain needed.
+// The self-hosted licence plan is one row, so this is pure data - no domain needed.
 export const licenseResource: Resource = {
 	section: "license",
-	needsDomain: false,
-	// An empty licence section asks for nothing. Reading it as "revert to community" would
-	// silently downgrade a live licence.
-	declared: (ctx) => Boolean(wantedPlan(ctx.spec?.license)),
+	declared: (ctx) => planOf(ctx.spec.license) !== undefined,
 	async items(ctx) {
-		const wanted = wantedPlan(ctx.spec?.license) as string;
-		const row = ctx.store.licenseRow();
+		const wanted = planOf(ctx.spec.license)!;
+		const row = await ctx.store.licenseRow();
 		const active = row?.state === "active" ? row.plan : "community";
 		const set = async () => {
-			ctx.store.setLicense(wanted);
-			console.log(`  ✓ licence set to ${wanted}`);
-			return 0;
+			await ctx.store.setLicense(wanted === "community" ? null : wanted);
+			return wanted;
 		};
 		return [{
 			address: "license",
 			wants: `${active} → ${wanted}`,
-			actual: async () => (row ? row.plan : null),
+			// There is always a plan: no row at all is the community one.
+			actual: async () => active,
 			satisfied: () => active === wanted,
 			create: set,
 			update: set,
+			// Destroy takes back the plan the document gave. A document asking for community gave none.
+			removable: async () => (wanted !== "community" && active !== "community" ? active : null),
 			remove: async () => {
-				ctx.store.setLicense(null);
-				console.log("  ✓ reverted the licence to community");
-				return 0;
+				await ctx.store.setLicense(null);
+				return "reverted to community";
 			},
 		}];
 	},

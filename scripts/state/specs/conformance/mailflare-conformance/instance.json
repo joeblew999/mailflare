@@ -1,0 +1,13 @@
+{
+  "license": {
+    "plan": "team"
+  },
+  "settings": {
+    "appName": "Mailflare Conformance"
+  },
+  "fresh": {
+    "admin": {
+      "email": "root@one.conformance.test"
+    }
+  }
+}

@@ -1,58 +1,41 @@
 import { domainRoutingRuleSchema } from "@/lib/validators";
-import { requireDomain } from "../context";
-import type { Context } from "../context";
+import { declaresMailbox, requireDomain, type Context } from "../context";
+import { publishMailboxIds } from "./mailboxes";
 import type { RoutingEntry } from "../spec";
 import type { Item, Resource } from "./resource";
 import type { RoutingRulePatch, RoutingRuleRow } from "../store/types";
 
-type RoutingPlan =
-	| { ok: false; error: string }
-	| {
-			ok: true;
-			pattern: string;
-			name: string;
-			matchField: string;
-			matchOperator: string;
-			action: string;
-			label: string;
-			patch: RoutingRulePatch;
-			existing: RoutingRuleRow | null;
-	  };
+type Wanted = { name: string; matchField: string; matchOperator: string; action: string; patch: RoutingRulePatch };
 
-// Validate an entry with the app's own domainRoutingRuleSchema and reduce it to the
-function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): RoutingPlan {
-	const pattern = String(entry.pattern ?? "*").trim();
-	// keepCopy / store need a destination mailbox; the document names one by role.
-	let mailboxId: string | null = entry.mailboxId ?? null;
-	if (entry.mailbox) {
-		mailboxId = mailboxIdsByRole.get(String(entry.mailbox).toLowerCase()) ?? null;
-		if (!mailboxId) console.log(`  ⚠ routing "${pattern}": mailbox role "${entry.mailbox}" not found`);
-	}
+const PENDING = "pending";
+
+/**
+ * Check an entry against the app's own schema and reduce it to what a rule stores. Throws with
+ * the schema's reason. `mailboxId` is null when the rule names no mailbox.
+ */
+function wanted(entry: RoutingEntry, domainId: string, mailboxId: string | null): Wanted {
+	const pattern = entry.pattern.trim();
 	const parsed = domainRoutingRuleSchema.safeParse({
-		domainId: requireDomain(ctx).id,
+		domainId,
 		name: entry.name,
 		enabled: true,
 		matchField: "recipient",
 		matchOperator: "contains",
-		matchValue: String(entry.matchValue ?? pattern),
+		matchValue: entry.matchValue ?? pattern,
 		action: entry.action ?? "forward",
 		mailboxId,
 		forwardTo: entry.forwardTo ?? null,
 		keepCopy: Boolean(entry.keepCopy),
 		rejectReason: entry.rejectReason ?? null,
-		priority: Number(entry.priority) || 0,
+		priority: entry.priority ?? 0,
 	});
-	if (!parsed.success) return { ok: false, error: JSON.stringify(parsed.error.flatten().fieldErrors) };
-
+	if (!parsed.success) throw new Error(JSON.stringify(parsed.error.flatten().fieldErrors));
 	const rule = parsed.data;
 	return {
-		ok: true,
-		pattern,
 		name: rule.name ?? pattern,
 		matchField: rule.matchField,
 		matchOperator: rule.matchOperator,
 		action: rule.action,
-		label: `routing ${pattern} → ${rule.action}${rule.forwardTo ? ` ${rule.forwardTo}` : ""}`,
 		patch: {
 			matchValue: rule.matchValue,
 			forwardTo: rule.forwardTo ?? null,
@@ -62,7 +45,6 @@ function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<st
 			priority: rule.priority,
 			enabled: rule.enabled ? 1 : 0,
 		},
-		existing: ctx.store.routingRule(requireDomain(ctx).id, pattern, rule.action),
 	};
 }
 
@@ -79,74 +61,68 @@ function matches(row: RoutingRuleRow, patch: RoutingRulePatch): boolean {
 	);
 }
 
-// Provision (or reconcile) one domain-scope routing rule: reject, forward, or store.
-export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): number {
-	const plan = planRouting(ctx, entry, mailboxIdsByRole);
-	if (!plan.ok) {
-		console.log(`  ✗ routing ${entry.pattern ?? "*"}: ${plan.error}`);
-		return 1;
-	}
-	if (plan.existing) {
-		if (matches(plan.existing, plan.patch)) {
-			console.log(`  · ${plan.label} — already exists`);
-			return 0;
-		}
-		ctx.store.updateRoutingRule(plan.existing.id, plan.patch);
-		console.log(`  ✓ updated ${plan.label}`);
-		return 0;
-	}
-	ctx.store.insertRoutingRule({
-		userId: ctx.store.admin.id,
-		domainId: requireDomain(ctx).id,
-		name: plan.name,
-		pattern: plan.pattern,
-		matchField: plan.matchField,
-		matchOperator: plan.matchOperator,
-		action: plan.action,
-		...plan.patch,
-	});
-	console.log(`  ✓ added ${plan.label}`);
-	return 0;
-}
-
-export function removeRouting(ctx: Context, entry: RoutingEntry): number {
-	const pattern = String(entry.pattern ?? "*").trim();
-	const action = String(entry.action ?? "forward").trim();
-	// Rules are domain-scoped and cascade with the domain, so a missing domain means
-	// there is nothing left to remove - not an error.
-	if (!ctx.domain) return 0;
-	ctx.store.deleteRoutingRule(requireDomain(ctx).id, pattern, action);
-	console.log(`  ✓ removed routing ${pattern} → ${action}`);
-	return 0;
+/** The mailbox a rule delivers to: its id, or why there is not one yet. */
+function destination(ctx: Context, entry: RoutingEntry): { id: string | null; pending: boolean; missing?: string } {
+	if (!entry.mailbox) return { id: entry.mailboxId ?? null, pending: false };
+	const role = entry.mailbox.trim().toLowerCase();
+	const id = ctx.mailboxIds.get(role);
+	if (id) return { id, pending: false };
+	// Not there yet, but this document makes it: the rule follows the mailbox.
+	if (declaresMailbox(ctx, role)) return { id: null, pending: true };
+	return { id: null, pending: false, missing: `mailbox "${role}" is neither on the domain nor declared in this document` };
 }
 
 export const routingResource: Resource = {
 	section: "routing",
-	needsDomain: true,
-	declared: (ctx) => (ctx.spec?.routing?.length ?? 0) > 0,
-	async items(ctx, _roles, state) {
+	declared: (ctx) => ctx.spec.routing !== undefined,
+	async items(ctx) {
+		// A rule may name any mailbox on the domain, declared here or not - an account's own, say.
+		if (ctx.domain) await publishMailboxIds(ctx);
+		const rows = ctx.domain ? await ctx.store.routingRules(ctx.domain.id) : [];
+		const claimed = new Set<string>();
+		const remove = async (present: unknown) => ctx.store.deleteRoutingRule((present as RoutingRuleRow).id);
 		const items: Item[] = [];
-		for (const entry of ctx.spec?.routing ?? []) {
-			const pattern = String(entry.pattern ?? "*").trim();
-			const planned = ctx.domain
-				? planRouting(ctx, entry, state.mailboxIdsByRole)
-				: { ok: false as const, error: "the domain is not resolved" };
-			if (!planned.ok) {
-				// It cannot be created, but if a rule with this pattern and action exists it must still be
-				// removable - otherwise an invalid document leaves litter behind.
-				items.push({ address: `routing.${pattern}`, problem: planned.error, actual: async () => null, create: async () => 1, remove: async () => removeRouting(ctx, entry) });
-				continue;
+		for (const entry of ctx.spec.routing ?? []) {
+			const pattern = entry.pattern.trim();
+			const action = entry.action ?? "forward";
+			const address = `routing.${pattern}.${action}`;
+			const existing = rows.find((row) => row.pattern === pattern && row.action === action) ?? null;
+			if (existing) claimed.add(existing.id);
+			const target = destination(ctx, entry);
+
+			let rule: Wanted | null = null;
+			let problem = target.missing;
+			if (!problem) {
+				try {
+					rule = wanted(entry, ctx.domain?.id ?? PENDING, target.pending ? PENDING : target.id);
+				} catch (error) {
+					problem = error instanceof Error ? error.message : String(error);
+				}
 			}
+			// Written at the moment of the write, when a mailbox made earlier in the run has its id.
+			const write = async () => {
+				const now = destination(ctx, entry);
+				if (now.missing || now.pending) throw new Error(now.missing ?? `mailbox "${entry.mailbox}" was not created, so the rule has nowhere to deliver`);
+				const domain = requireDomain(ctx);
+				const fresh = wanted(entry, domain.id, now.id);
+				if (existing) await ctx.store.updateRoutingRule(existing.id, fresh.patch);
+				else await ctx.store.insertRoutingRule({ userId: (await ctx.store.admin()).id, domainId: domain.id, name: fresh.name, pattern, matchField: fresh.matchField, matchOperator: fresh.matchOperator, action: fresh.action, ...fresh.patch });
+			};
 			items.push({
-				address: `routing.${pattern}`,
-				wants: planned.label,
-				actual: async () => planned.existing,
-				satisfied: (actual: unknown) => !!actual && matches(actual as RoutingRuleRow, planned.patch),
-				// ensureRouting inserts or updates, so it is both the create and the update.
-				create: async () => ensureRouting(ctx, entry, state.mailboxIdsByRole),
-				update: async () => ensureRouting(ctx, entry, state.mailboxIdsByRole),
-				remove: async () => removeRouting(ctx, entry),
+				address,
+				wants: `${action}${entry.forwardTo ? ` to ${entry.forwardTo}` : ""}${entry.mailbox ? ` (mailbox ${entry.mailbox})` : ""}`,
+				problem,
+				// Even a rule the document gets wrong must stay removable, or it leaves litter behind.
+				actual: async () => existing,
+				satisfied: (actual) => !!actual && !!rule && !target.pending && matches(actual as RoutingRuleRow, rule.patch),
+				create: write,
+				update: write,
+				remove,
 			});
+		}
+		// Every other domain rule is one the document does not have.
+		for (const row of rows.filter((entry) => !claimed.has(entry.id))) {
+			items.push({ address: `routing.${row.pattern}.${row.action}`, undeclared: true, actual: async () => row, remove });
 		}
 		return items;
 	},

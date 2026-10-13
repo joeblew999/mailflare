@@ -29,54 +29,47 @@ To rotate and keep a copy in fnox:
 
   5. In the app: Settings → Inbox → toggle "Browser push notifications" OFF, then ON.
 
-  6. Verify
-       npm run state:push`);
+  6. Verify: add "push": {} to the project's instance.json, then
+       npm run state -- <project> apply`);
 }
 
-// Verify Web Push end to end: send a real email back into our own inbox, then wait
-// for it to land. No domain needed - it uses the instance's own admin address.
+// Verify Web Push end to end: send a real email back into our own inbox, then wait for it to
+// land. A round trip is not a state to converge on: declaring it means "run the test".
 export const pushResource: Resource = {
 	section: "push",
-	needsDomain: false,
-	declared: (ctx) => Boolean(ctx.spec?.push),
+	declared: (ctx) => ctx.spec.push !== undefined,
 	async items(ctx) {
-		const entry = ctx.spec?.push ?? {};
-		const missing = VAPID.filter((name) => !(ctx.store.workerSecrets() ?? []).includes(name));
-		const to = (entry.to ?? ctx.store.firstAdminEmail())?.trim();
+		const entry = ctx.spec.push ?? {};
+		const to = (entry.to ?? (await ctx.store.firstAdminEmail()))?.trim();
+		// Null means the secrets could not be listed, which says nothing about what is set.
+		const secrets = to ? await ctx.store.workerSecrets() : null;
+		const lacking = secrets ? VAPID.filter((name) => !secrets.includes(name)) : [];
 		return [{
 			address: "push",
-			problem: !to ? "no recipient: set push.to, or give the instance a user" : undefined,
-			wants: to && missing.length > 0 ? `test email to ${to} (worker missing ${missing.join(", ")})` : to ? `test email to ${to}` : undefined,
-			// A round trip is not a state to converge on: declaring it means "run the test".
+			problem: !to ? "no recipient: set push.to, or give the instance an admin" : undefined,
+			wants: `test email to ${to}${lacking.length > 0 ? ` (the Worker is missing ${lacking.join(", ")})` : ""}`,
 			actual: async () => null,
 			create: async () => {
-				const from = (entry.from ?? to ?? "").trim();
 				const subject = entry.subject ?? `Mailflare push test ${new Date().toISOString()}`;
-				const { messageId } = await ctx.store.sendViaCloudflare({
-					from, to: to ?? "", subject,
+				await ctx.store.sendViaCloudflare({
+					from: (entry.from ?? to ?? "").trim(), to: to ?? "", subject,
 					text: "If your device shows a notification, Web Push is working.",
 					html: "<p>If your device shows a notification, <strong>Web Push</strong> is working.</p>",
 				});
-				console.log(`  ✓ queued (${messageId ?? "sent"})`);
 				const seconds = entry.timeout ?? 40;
 				const deadline = Date.now() + seconds * 1000;
-				let arrived: { status: string } | null = null;
-				while (Date.now() < deadline) {
-					arrived = await ctx.store.messageStatusBySubject(subject);
-					if (arrived) break;
+				for (;;) {
+					const arrived = await ctx.store.messageStatusBySubject(subject);
+					if (arrived) return `arrived (${arrived.status}) — check your devices for the notification`;
+					if (Date.now() >= deadline) throw new Error(`sent, but not seen in the inbox within ${seconds}s — check Email Routing, MX and the inbound queue`);
 					await ctx.store.wait(3000);
 				}
-				if (arrived) {
-					console.log(`  ✓ arrived in the inbox (status: ${arrived.status}) — check your devices for the notification`);
-					return 0;
-				}
-				console.log(`  ✗ not seen in the inbox within ${seconds}s — check Email Routing/MX and the inbound queue`);
-				return 1;
 			},
-			remove: async () => {
-				ctx.store.clearPushSubscriptions();
-				console.log("  ✓ cleared push_subscriptions — re-enable the toggle on each device");
-				return 0;
+			// Destroy drops the subscriptions, which are bound to the key pair being retired.
+			removable: async () => (await ctx.store.pushSubscriptionCount()) || null,
+			remove: async (present) => {
+				await ctx.store.clearPushSubscriptions();
+				return `${present} subscription(s) cleared — re-enable the toggle on each device`;
 			},
 		}];
 	},

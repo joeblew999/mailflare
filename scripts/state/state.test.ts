@@ -1,63 +1,94 @@
-// Drives the whole reconciler through the Store seam, so a full run is exercised
-// with no D1, no Workers binding and no network. Run with `npm run state:test`.
+// Drives the whole reconciler through the Store seam: a full lifecycle with no D1, no Workers
+// binding and no network. The fake is ours, so green here is necessary, not sufficient - the
+// sandbox is what runs the real app. Run with `npm run state:test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { is } from "drizzle-orm";
+import { SQLiteTable, getTableConfig } from "drizzle-orm/sqlite-core";
+import * as schema from "@/db/schema";
+import { BACKUP_TABLE_GROUPS } from "@/lib/backups/table-groups";
+import { UsageError, parseCli } from "./args";
+import { coloOf, countryOfColo, hasColo, loadColos, parseColoList } from "./colos";
 import { makeContext } from "./context";
+import { deploySteps, secretsFor } from "./deploy";
+import { loadDocuments, loadProject, loadProjects } from "./document";
 import { run } from "./driver";
-import { loadSpecs, runSpecs } from "./runner";
-import { loadProject } from "./document";
-import { validateSpec } from "./validate";
-import { SOURCE_CHANGES } from "./src-changes";
-import { envBlockFor, stripJsonc } from "./deploy";
-import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
+import { conform, reporter, rounds } from "./conform";
+import { resolveInstance, runFleet, type FleetDeps } from "./fleet";
+import { fleetMap, fleetVersion } from "./router";
+import { memoryVault } from "./vault";
+import { foreignMx } from "./resources/domain";
+import { limiter, runDocuments } from "./runner";
+import { SOURCE_CHANGES, SOURCE_CHANGES_MADE } from "./src-changes";
+import { BACKUP_GROUPS, MCP_SCOPES, PLACEMENTS } from "./spec";
+import { SEED_ROWS, type Instance } from "./store/live";
+import { INDIRECT_SCOPE, INSTANCE_OBJECT_KEYS, INSTANCE_TABLES, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, depthOf, isSubjectScoped, subjectLines, subjectPredicate, subjectTotal, subjectUnknown } from "./subject-scope";
+import { validateInstanceDocument, validateServer, validateSpec, validateTenantDocument } from "./validate";
+import { deploymentFor, serverConfig, stripJsonc, type WranglerConfig } from "./wrangler";
 import type { Flags } from "./flags";
-import type { Role, Spec } from "./spec";
-import type { Store } from "./store/types";
+import type { Spec } from "./spec";
+import type { McpKeyRow, SettingsRow, Store } from "./store/types";
 
 const ok = (json: unknown = {}) => ({ status: 200, text: "", json });
 const created = (json: unknown = {}) => ({ status: 201, text: "", json });
+const refused = (status: number, error: string) => ({ status, text: error, json: { error } });
 
+type Box = { id: string; domainId: string; localPart: string; hostname: string; displayName: string | null; type: string; userId: string };
+type Account = { id: string; email: string; name: string; role: string; disabled: boolean; canManageMailboxes: boolean; isPrimaryAdmin?: boolean };
 type Seed = {
 	domains?: Array<{ id: string; hostname: string }>;
-	mailboxes?: Array<{ id: string; domainId: string; localPart: string; hostname: string; type?: string; userId?: string }>;
-	accounts?: Array<{ id: string; email: string; name?: string; role?: string; disabled?: boolean; canManageMailboxes?: boolean; isPrimaryAdmin?: boolean }>;
-	users?: Array<{ id: string; email: string }>;
+	mailboxes?: Array<Partial<Box> & { id: string; localPart: string }>;
+	accounts?: Array<Partial<Account> & { id: string; email: string }>;
 	access?: Array<{ mailboxId: string; userId: string; permission: string }>;
 	routing?: Array<Record<string, unknown>>;
-	mcpKeys?: Array<{ id: string; name: string }>;
+	keys?: Array<McpKeyRow & { name: string }>;
 	license?: { plan: string; state: string } | null;
-	workerSecrets?: string[] | null;
+	settings?: { app_settings?: SettingsRow; backup_settings?: SettingsRow };
+	mx?: Array<{ content: string }>;
+	elsewhere?: Record<string, string>;
 	pushSubscriptions?: number;
 	schema?: boolean;
 };
 
+/** The app in miniature: enough of its behaviour that a lifecycle means something. */
 function fakeStore(seed: Seed = {}) {
 	const state = {
 		domains: seed.domains ?? [],
-		mailboxes: seed.mailboxes ?? [],
-		accounts: seed.accounts ?? [],
-		users: seed.users ?? [],
+		mailboxes: (seed.mailboxes ?? []).map((box) => ({ domainId: "d1", hostname: seed.domains?.[0]?.hostname ?? "dev.example", displayName: null, type: "personal", userId: "u_admin", ...box })) as Box[],
+		accounts: (seed.accounts ?? []).map((account) => ({ name: account.email.split("@")[0], role: "user", disabled: false, canManageMailboxes: false, ...account })) as Account[],
 		access: seed.access ?? [],
-		routing: seed.routing ?? [],
-		mcpKeys: seed.mcpKeys ?? [],
+		routing: (seed.routing ?? []) as Array<Record<string, unknown>>,
+		keys: seed.keys ?? [],
 		license: seed.license ?? null,
-		workerSecrets: seed.workerSecrets ?? ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"],
+		// Every other table the generic row methods touch, and what they added to people and boxes.
+		tables: { app_settings: seed.settings?.app_settings ? [{ id: "default", ...seed.settings.app_settings }] : [], backup_settings: seed.settings?.backup_settings ? [{ id: "default", ...seed.settings.backup_settings }] : [] } as Record<string, SettingsRow[]>,
+		extra: new Map<string, SettingsRow>(),
 		pushSubscriptions: seed.pushSubscriptions ?? 0,
 		sent: [] as string[],
 		schema: seed.schema ?? true,
-		subjectUserId: "u1" as string | null,
-		subjectMailboxIds: ["m1"],
-		subjectCounts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }],
-		lastAccountUpdate: {} as Record<string, unknown>,
+		admin: { id: "u_admin", email: "admin@instance.test" } as { id: string; email: string } | null,
 	};
 	const calls: string[] = [];
 	let seq = 0;
+	const hostnameOf = (domainId: string) => state.domains.find((domain) => domain.id === domainId)?.hostname ?? "";
+	// `users` and `mailboxes` are the fake's own people and boxes, seen as rows.
+	const all = (table: string): SettingsRow[] => {
+		if (table === "users") return [...state.accounts.map((account) => ({ id: account.id, email: account.email })), ...(state.admin && !state.accounts.some((account) => account.id === state.admin!.id) ? [state.admin] : [])].map((row) => ({ ...row, ...(state.extra.get(`users:${row.id}`) ?? {}) }));
+		if (table === "mailboxes") return state.mailboxes.map((box) => ({ id: box.id, user_id: box.userId, ...(state.extra.get(`mailboxes:${box.id}`) ?? {}) }));
+		return state.tables[table] ?? [];
+	};
 	const store: Store = {
 		base: "https://instance.test",
-		admin: { id: "u_admin", email: "admin@instance.test" },
+		async admin() {
+			if (!state.admin) throw new Error("no admin user");
+			return state.admin;
+		},
 		async currentMx() {
-			calls.push("currentMx");
-			return [];
+			return seed.mx ?? [];
+		},
+		async routedElsewhere() {
+			return seed.elsewhere ?? {};
 		},
 		async listDomains() {
 			calls.push("listDomains");
@@ -70,607 +101,883 @@ function fakeStore(seed: Seed = {}) {
 		},
 		async removeDomain(id) {
 			calls.push(`removeDomain:${id}`);
+			const gone = state.mailboxes.filter((box) => box.domainId === id).map((box) => box.id);
+			state.domains = state.domains.filter((domain) => domain.id !== id);
+			state.mailboxes = state.mailboxes.filter((box) => box.domainId !== id);
+			state.routing = state.routing.filter((rule) => rule.domainId !== id);
+			state.access = state.access.filter((grant) => !gone.includes(grant.mailboxId));
 			return ok();
 		},
 		async listMailboxes() {
-			calls.push("listMailboxes");
 			return state.mailboxes as never;
 		},
 		async createMailbox(body) {
-			const b = body as { domainId: string; localPart: string; type?: string; ownerUserId?: string };
+			const b = body as { domainId: string; localPart: string; displayName?: string; type?: string; ownerUserId?: string };
 			calls.push(`createMailbox:${b.localPart}`);
+			if (state.mailboxes.some((box) => box.domainId === b.domainId && box.localPart === b.localPart)) return refused(409, "Mailbox already exists");
+			if (b.type === "shared" && state.license?.plan !== "team") return refused(403, "A Team license is required to create shared inboxes");
 			const id = `mbx_${++seq}`;
-			state.mailboxes.push({
-				id,
-				domainId: b.domainId,
-				localPart: b.localPart,
-				hostname: state.domains.find((d) => d.id === b.domainId)?.hostname ?? "",
-				type: b.type,
-				userId: b.ownerUserId ?? "u_admin",
-			});
+			state.mailboxes.push({ id, domainId: b.domainId, localPart: b.localPart, hostname: hostnameOf(b.domainId), displayName: b.displayName ?? null, type: b.type ?? "personal", userId: b.ownerUserId ?? state.admin?.id ?? "u_admin" });
 			return created({ id });
+		},
+		async updateMailbox(id, body) {
+			calls.push(`updateMailbox:${id}`);
+			const box = state.mailboxes.find((entry) => entry.id === id);
+			if (box) box.displayName = (body as { displayName: string }).displayName;
+			return ok();
 		},
 		async deleteMailbox(id) {
 			calls.push(`deleteMailbox:${id}`);
-			state.mailboxes = state.mailboxes.filter((m) => m.id !== id);
+			state.mailboxes = state.mailboxes.filter((box) => box.id !== id);
+			state.access = state.access.filter((grant) => grant.mailboxId !== id);
 			return ok();
 		},
-		mailboxOwnerId(id) {
-			return state.mailboxes.find((m) => m.id === id)?.userId ?? null;
-		},
 		async listAccounts() {
-			calls.push("listAccounts");
 			return state.accounts as never;
 		},
 		async createAccount(body) {
-			const b = body as { username: string; role?: string };
+			const b = body as { username: string; role: string; domainId: string };
 			calls.push(`createAccount:${b.username}`);
-			state.accounts.push({ id: `u_${++seq}`, email: `${b.username}@dev.example`, name: b.username, role: b.role, disabled: false, canManageMailboxes: false });
-			return created();
+			if (!["pro", "team"].includes(state.license?.plan ?? "")) return refused(403, "A Pro or Team license is required to manage accounts");
+			const account = { id: `u_${++seq}`, email: `${b.username}@${hostnameOf(b.domainId)}`, name: b.username, role: b.role, disabled: false, canManageMailboxes: false };
+			state.accounts.push(account);
+			// The app gives every account a mailbox of its own name.
+			state.mailboxes.push({ id: `mbx_${++seq}`, domainId: b.domainId, localPart: b.username, hostname: hostnameOf(b.domainId), displayName: b.username, type: "personal", userId: account.id });
+			return created({ account });
 		},
 		async updateAccount(id, body) {
-			const b = body as { disabled: boolean };
-			state.lastAccountUpdate = body as Record<string, unknown>;
-			calls.push(`updateAccount:${id}:disabled=${b.disabled}`);
-			const account = state.accounts.find((a) => a.id === id);
-			if (account) account.disabled = b.disabled;
+			calls.push(`updateAccount:${id}:${JSON.stringify(body)}`);
+			if (!["pro", "team"].includes(state.license?.plan ?? "")) return refused(403, "A Pro or Team license is required to manage accounts");
+			const account = state.accounts.find((entry) => entry.id === id);
+			if (account) Object.assign(account, body);
 			return ok();
 		},
-		userIdByEmail(email) {
-			return state.users.find((u) => u.email.toLowerCase() === email.toLowerCase())?.id ?? null;
+		async userIdByEmail(email) {
+			return state.accounts.find((account) => account.email === email.toLowerCase())?.id ?? null;
 		},
-		accessPermission(mailboxId, userId) {
-			return state.access.find((a) => a.mailboxId === mailboxId && a.userId === userId)?.permission ?? null;
+		async accessList(mailboxIds) {
+			return state.access.filter((grant) => mailboxIds.includes(grant.mailboxId)).map((grant) => ({ ...grant, email: state.accounts.find((account) => account.id === grant.userId)?.email ?? "" }));
 		},
-		grantAccess(mailboxId, userId, permission) {
+		async grantAccess(mailboxId, userId, permission) {
 			calls.push(`grantAccess:${userId}:${permission}`);
-			const existing = state.access.find((a) => a.mailboxId === mailboxId && a.userId === userId);
-			if (existing) existing.permission = permission;
-			else state.access.push({ mailboxId, userId, permission });
+			state.access = [...state.access.filter((grant) => !(grant.mailboxId === mailboxId && grant.userId === userId)), { mailboxId, userId, permission }];
 		},
-		revokeAccess(mailboxId, userId) {
+		async revokeAccess(mailboxId, userId) {
 			calls.push(`revokeAccess:${userId}`);
-			state.access = state.access.filter((a) => !(a.mailboxId === mailboxId && a.userId === userId));
+			state.access = state.access.filter((grant) => !(grant.mailboxId === mailboxId && grant.userId === userId));
 		},
-		routingRule(domainId, pattern, action) {
-			return (state.routing.find((r) => r.domainId === domainId && r.pattern === pattern && r.action === action) as never) ?? null;
+		async routingRules(domainId) {
+			return state.routing.filter((rule) => rule.domainId === domainId) as never;
 		},
-		insertRoutingRule(values) {
-			calls.push(`insertRoutingRule:${values.pattern}:${values.action}`);
-			state.routing.push({ id: `rr_${++seq}`, ...values });
+		async insertRoutingRule(v) {
+			calls.push(`insertRoutingRule:${v.pattern}:${v.action}`);
+			state.routing.push({ id: `rr_${++seq}`, domainId: v.domainId, pattern: v.pattern, action: v.action, match_value: v.matchValue, forward_to: v.forwardTo, keep_copy: v.keepCopy, mailbox_id: v.mailboxId, reject_reason: v.rejectReason, priority: v.priority, enabled: v.enabled });
 		},
-		updateRoutingRule(id, patch) {
+		async updateRoutingRule(id, patch) {
 			calls.push(`updateRoutingRule:${id}`);
-			const rule = state.routing.find((r) => r.id === id);
-			if (rule) Object.assign(rule, patch);
+			const rule = state.routing.find((entry) => entry.id === id);
+			if (rule) Object.assign(rule, { match_value: patch.matchValue, forward_to: patch.forwardTo, keep_copy: patch.keepCopy, mailbox_id: patch.mailboxId, reject_reason: patch.rejectReason, priority: patch.priority, enabled: patch.enabled });
 		},
-		deleteRoutingRule(domainId, pattern, action) {
-			calls.push(`deleteRoutingRule:${pattern}:${action}`);
-			state.routing = state.routing.filter((r) => !(r.domainId === domainId && r.pattern === pattern && r.action === action));
+		async deleteRoutingRule(id) {
+			calls.push(`deleteRoutingRule:${id}`);
+			state.routing = state.routing.filter((rule) => rule.id !== id);
 		},
-		licenseRow() {
+		async mcpKey(name) {
+			return state.keys.find((key) => key.name === name) ?? null;
+		},
+		async mcpKeyNames() {
+			return state.keys.map((key) => ({ id: key.id, name: key.name }));
+		},
+		async domainNames() {
+			return state.domains.map((domain) => domain.hostname);
+		},
+		async createMcpKey({ name, scopes, mailboxIds }) {
+			calls.push(`createMcpKey:${name}`);
+			state.keys.push({ id: `key_${++seq}`, name, scopes, mailboxIds });
+			return { fullKey: `ep_${name}` };
+		},
+		async updateMcpKey(id, values) {
+			calls.push(`updateMcpKey:${id}`);
+			Object.assign(state.keys.find((key) => key.id === id) ?? {}, values);
+		},
+		async deleteMcpKey(id) {
+			calls.push(`deleteMcpKey:${id}`);
+			state.keys = state.keys.filter((key) => key.id !== id);
+		},
+		async licenseRow() {
 			return state.license;
 		},
-		setLicense(plan) {
+		async setLicense(plan) {
 			calls.push(`setLicense:${plan ?? "community"}`);
 			state.license = plan === null ? { plan: "community", state: "inactive" } : { plan, state: "active" };
 		},
-		workerSecrets() {
-			return state.workerSecrets;
+		async rows(table, where) {
+			return all(table).filter((row) => Object.entries(where).every(([column, value]) => (row[column] ?? null) === value));
 		},
-		pushSubscriptionCount() {
+		async insertRow(table, values) {
+			calls.push(`insertRow:${table}`);
+			(state.tables[table] ??= []).push({ ...values });
+		},
+		async updateRows(table, where, values) {
+			calls.push(`updateRows:${table}:${Object.keys(values).join(",")}`);
+			for (const row of await store.rows(table, where)) {
+				if (table === "users" || table === "mailboxes") state.extra.set(`${table}:${row.id}`, { ...(state.extra.get(`${table}:${row.id}`) ?? {}), ...values });
+				else Object.assign(row, values);
+			}
+		},
+		async deleteRows(table, where) {
+			calls.push(`deleteRows:${table}`);
+			const gone = new Set(await store.rows(table, where));
+			state.tables[table] = (state.tables[table] ?? []).filter((row) => !gone.has(row));
+		},
+		async upsertRow(table, key, values) {
+			calls.push(`upsertRow:${table}:${Object.keys(values).join(",")}`);
+			const [existing] = await store.rows(table, key);
+			if (existing) Object.assign(existing, values);
+			else (state.tables[table] ??= []).push({ ...key, ...values });
+		},
+		async subjectReport(email) {
+			return { email, userId: null, mailboxIds: [], counts: [], blockers: [] };
+		},
+		async eraseSubject(email) {
+			return { email, userId: null, deleted: [], objectKeys: [], objectsDeleted: 0 };
+		},
+		async applyMigrations() {
+			calls.push("applyMigrations");
+		},
+		async schemaPresent() {
+			return state.schema;
+		},
+		async userCount() {
+			return state.schema ? state.accounts.length + (state.admin && !state.accounts.some((account) => account.id === state.admin!.id) ? 1 : 0) : null;
+		},
+		async domainCount() {
+			return state.domains.length;
+		},
+		async wipeData() {
+			calls.push("wipeData");
+			Object.assign(state, { domains: [], mailboxes: [], accounts: [], access: [], routing: [], keys: [], license: null, admin: null, tables: {}, extra: new Map() });
+		},
+		async insertAdmin({ id, email }) {
+			calls.push(`insertAdmin:${email}`);
+			state.admin = { id, email };
+			state.accounts.push({ id, email, name: "root", role: "admin", disabled: false, canManageMailboxes: true, isPrimaryAdmin: true });
+		},
+		async workerSecrets() {
+			return ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"];
+		},
+		async pushSubscriptionCount() {
 			return state.pushSubscriptions;
 		},
-		firstAdminEmail() {
-			return state.users[0]?.email ?? "admin@instance.test";
+		async clearPushSubscriptions() {
+			calls.push("clearPushSubscriptions");
+			state.pushSubscriptions = 0;
+		},
+		async firstAdminEmail() {
+			return state.admin?.email ?? null;
 		},
 		async sendViaCloudflare({ subject }) {
-			calls.push(`sendViaCloudflare:${subject}`);
+			calls.push("sendViaCloudflare");
 			state.sent.push(subject);
 			return { messageId: "cf_1" };
 		},
 		async messageStatusBySubject(subject) {
 			return state.sent.includes(subject) ? { status: "received" } : null;
 		},
-		async eraseSubject(email) {
-			calls.push(`eraseSubject:${email}`);
-			state.subjectCounts = state.subjectCounts.map((count) => ({ ...count, rows: 0 }));
-			state.subjectUserId = null;
-			return { email, userId: "u1", deleted: [{ table: "messages", rows: 12 }, { table: "sessions", rows: 2 }], objectKeys: ["raw/1.eml", "att/2"], objectsDeleted: 2, skipped: [{ table: "domains", reason: "infrastructure" }] };
-		},
-		async subjectReport(email) {
-			calls.push(`subjectReport:${email}`);
-			return { email, userId: state.subjectUserId, mailboxIds: state.subjectMailboxIds, counts: state.subjectCounts };
-		},
-		domainCount() {
-			return state.domains.length;
-		},
-		applyMigrations() {
-			calls.push("applyMigrations");
-		},
-		schemaPresent() {
-			return state.schema;
-		},
-		wipeData() {
-			calls.push("wipeData");
-			state.domains = [];
-			state.mailboxes = [];
-			state.accounts = [];
-			state.users = [];
-			state.access = [];
-			state.routing = [];
-			state.mcpKeys = [];
-			state.license = null;
-			state.schema = true;
-		},
-		insertAdmin({ email }) {
-			calls.push(`insertAdmin:${email}`);
-			state.users.push({ id: "u_root", email });
-		},
-		dispose() {},
-		clearPushSubscriptions() {
-			calls.push("clearPushSubscriptions");
-			state.pushSubscriptions = 0;
-		},
 		async wait() {},
-
-		mcpKey(userId, name) {
-			return state.mcpKeys.some((k) => k.name === name) ? { id: "k" } : null;
-		},
-		createMcpKey({ name, scopes, mailboxIds }) {
-			calls.push(`createMcpKey:${name}:${scopes.length}:${mailboxIds.length}`);
-			state.mcpKeys.push({ id: `key_${++seq}`, name });
-			return { fullKey: `ep_${name}` };
-		},
-		deleteMcpKey(userId, name) {
-			calls.push(`deleteMcpKey:${name}`);
-			state.mcpKeys = state.mcpKeys.filter((k) => k.name !== name);
-		},
+		async dispose() {},
 	};
 	return { store, state, calls };
 }
 
-const flags = (over: Partial<Flags> = {}): Flags => ({
-	status: false, cleanup: false, fresh: false, confirmMx: false, confirmDestroy: false, db: "test", local: false, ...over,
+const flags = (over: Partial<Flags> = {}): Flags => ({ status: false, cleanup: false, fresh: false, confirmMx: false, confirmDestroy: false, rotatePasswords: false, db: "test", local: false, ...over });
+const PLAN = flags({ status: true });
+const DESTROY = flags({ cleanup: true, confirmDestroy: true });
+
+/** Run one document and return its exit code and what it printed. */
+async function runOn(store: Store, f: Flags, spec: Spec, vault = memoryVault()) {
+	const lines: string[] = [];
+	const code = await run(makeContext(store, f, spec, { log: (line) => lines.push(line), vault }));
+	return { code, text: lines.join("\n") };
+}
+const writes = (calls: string[]) => calls.filter((call) => !call.startsWith("list"));
+
+const TEAM = { plan: "team", state: "active" };
+const DOMAIN = [{ id: "d1", hostname: "dev.example" }];
+
+// A tenant that uses everything, with each kind of reference to something it makes itself.
+const FULL: Spec = {
+	domain: "dev.example",
+	onboard: { receivingProvider: "none" },
+	mailboxes: [
+		{ role: "office", displayName: "Office" },
+		{ role: "support", displayName: "Support", shared: true, access: [{ email: "sam@dev.example", permission: "read_only" }] },
+	],
+	accounts: [{ username: "sam", name: "Sam", role: "user", password: "password-123" }],
+	routing: [
+		{ pattern: "*", action: "forward", forwardTo: "ops@example.com", keepCopy: true, mailbox: "support" },
+		{ pattern: "no-reply", action: "reject", rejectReason: "No such user" },
+	],
+	mcpKeys: [{ name: "agent", mailboxes: ["support", "sam"], scopes: ["mcp:read"] }, { name: "reader" }],
+	teardown: { accounts: "disable", domain: "remove" },
+};
+
+// --- the lifecycle ----------------------------------------------------------------
+
+test("a mailbox of the wrong kind is a problem, since the app cannot convert one", async () => {
+	const { store, calls } = fakeStore({ domains: DOMAIN, mailboxes: [{ id: "m1", localPart: "team", type: "personal" }] });
+	const wrong = await runOn(store, PLAN, { domain: "dev.example", mailboxes: [{ role: "team", shared: true }] });
+	assert.match(wrong.text, /! mailbox\.team@dev\.example\s+exists as a personal mailbox/);
+	assert.equal((await runOn(store, flags(), { domain: "dev.example", mailboxes: [{ role: "team", shared: true }] })).code, 1);
+	assert.deepEqual(writes(calls), []);
 });
 
-const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
-	entries.map((entry) => ({ displayName: entry.role, share: false, access: [], ...entry }));
+// --- the document wins: what a written section does not hold is removed -------------
 
-const projectFor = (domain: string, over: Partial<Spec> = {}): Spec => ({ domain, ...over });
+test("a document only speaks for the sections it writes, and never for another's people", async () => {
+	const seed = {
+		domains: DOMAIN,
+		license: TEAM,
+		accounts: [{ id: "u_sam", email: "sam@dev.example" }, { id: "u_else", email: "someone@other.example" }],
+		mailboxes: [{ id: "m1", localPart: "office" }, { id: "m2", localPart: "retired" }, { id: "m3", localPart: "sam", userId: "u_sam" }],
+		access: [{ mailboxId: "m1", userId: "u_sam", permission: "read_only" }],
+		routing: [{ id: "rr_1", domainId: "d1", pattern: "*", action: "forward" }],
+	};
+	// A section left out is not managed: this document says nothing about mailboxes, accounts or rules.
+	assert.equal((await runOn(fakeStore(seed).store, PLAN, { domain: "dev.example" })).code, 0);
+	// A mailbox that writes no `access` list keeps whatever grants it has; an empty list is a complete one.
+	assert.equal((await runOn(fakeStore(seed).store, PLAN, { domain: "dev.example", mailboxes: [{ role: "office" }, { role: "retired" }] })).code, 0);
+	assert.match((await runOn(fakeStore(seed).store, PLAN, { domain: "dev.example", mailboxes: [{ role: "office", access: [] }, { role: "retired" }] })).text, /- mailbox_access\.office\.sam@dev\.example/);
 
-// The logic prints as it goes; keep the test output clean.
-async function quiet<T>(fn: () => Promise<T> | T): Promise<T> {
-	const original = { log: console.log, error: console.error, warn: console.warn };
-	console.log = () => {};
-	console.error = () => {};
-	console.warn = () => {};
-	try {
-		return await fn();
-	} finally {
-		Object.assign(console, original);
-	}
+	// Written sections are complete - but an account's own mailbox goes with the account, and
+	// someone on another domain is not this document's to disable.
+	const planned = await runOn(fakeStore(seed).store, PLAN, { domain: "dev.example", mailboxes: [{ role: "office" }], accounts: [] });
+	assert.match(planned.text, /- mailbox\.retired@dev\.example\s+not in the document/);
+	assert.match(planned.text, /- account\.sam\s/);
+	assert.ok(!planned.text.includes("mailbox.sam@") && !planned.text.includes("someone"));
+});
+
+test("a key no document names is removed, and a domain no document names is only said - when the whole project is run", async () => {
+	const seed = { domains: [{ id: "d1", hostname: "a.example" }, { id: "d9", hostname: "stray.example" }], license: TEAM, keys: [{ id: "k1", name: "kept", scopes: [...MCP_SCOPES], mailboxIds: null }, { id: "k2", name: "forgotten", scopes: [...MCP_SCOPES], mailboxIds: null }] };
+	const entries = [{ name: "p/instance", spec: { license: { plan: "team" } } as Spec }, { name: "p/a.example", spec: { domain: "a.example", mcpKeys: [{ name: "kept" }] } as Spec }];
+	const out: string[] = [];
+	const print = { print: (text: string) => void out.push(text) };
+
+	const whole = fakeStore(seed);
+	const planned = await runDocuments(whole.store, PLAN, entries, { ...print, complete: true });
+	assert.deepEqual(planned.map((result) => result.ok), [false, true]);
+	assert.match(out.join("\n"), /- mcpKey\.forgotten\s+not in the document/);
+	assert.match(out.join("\n"), /\? domain\.stray\.example\s+on the server, and no document declares it/);
+	await runDocuments(whole.store, flags({ confirmDestroy: true }), entries, { ...quiet, complete: true });
+	assert.deepEqual(whole.state.keys.map((key) => key.name), ["kept"]);
+	assert.equal(whole.state.domains.length, 2, "a domain is never removed for want of a document");
+	assert.deepEqual((await runDocuments(whole.store, PLAN, entries, { ...quiet, complete: true })).map((result) => result.ok), [true, true], "a stray domain is said, and does not stand in the way");
+
+	// One document cannot speak for the others, so on its own it removes nobody's keys.
+	const part = fakeStore(seed);
+	await runDocuments(part.store, flags({ confirmDestroy: true }), entries, quiet);
+	assert.equal(part.state.keys.length, 2);
+	// And until some document writes an mcpKeys section, keys are not managed at all.
+	const unmanaged = fakeStore(seed);
+	await runDocuments(unmanaged.store, flags({ confirmDestroy: true }), [entries[0], { name: "p/a.example", spec: { domain: "a.example" } as Spec }], { ...quiet, complete: true });
+	assert.equal(unmanaged.state.keys.length, 2);
+});
+
+test("an address Cloudflare already routes elsewhere is a problem in the plan, and is never taken over", async () => {
+	const { store, calls } = fakeStore({ domains: DOMAIN, elsewhere: { "support@dev.example": "forward to me@elsewhere.example" } });
+	const spec: Spec = { domain: "dev.example", mailboxes: [{ role: "office" }, { role: "support" }] };
+	const planned = await runOn(store, PLAN, spec);
+	assert.match(planned.text, /! mailbox\.support@dev\.example\s+Cloudflare already routes support@dev\.example elsewhere \(forward to me@elsewhere\.example\)/);
+	assert.match(planned.text, /\+ mailbox\.office@dev\.example/, "the rest of the document is unaffected");
+	assert.equal((await runOn(store, flags(), spec)).code, 1);
+	assert.deepEqual(calls.filter((call) => call.startsWith("createMailbox")), ["createMailbox:office"]);
+});
+
+test("the owner of a mailbox needs no grant: none is steady state, and a redundant one is cleared", async () => {
+	const seed = { domains: DOMAIN, accounts: [{ id: "u_owner", email: "owner@dev.example" }], mailboxes: [{ id: "m1", localPart: "owner", userId: "u_owner" }] };
+	const spec: Spec = { domain: "dev.example", mailboxes: [{ role: "owner", access: [{ email: "owner@dev.example" }] }] };
+	assert.equal((await runOn(fakeStore(seed).store, PLAN, spec)).code, 0, "no grant, none wanted: nothing to do");
+
+	const redundant = fakeStore({ ...seed, access: [{ mailboxId: "m1", userId: "u_owner", permission: "full_access" }] });
+	assert.equal((await runOn(redundant.store, PLAN, spec)).code, 1);
+	await runOn(redundant.store, flags(), spec);
+	assert.deepEqual(redundant.state.access, []);
+	assert.ok(!redundant.calls.some((call) => call.startsWith("grantAccess")));
+});
+
+test("a grant to an address nobody will have is a problem, and is never attempted", async () => {
+	const { store, calls } = fakeStore({ domains: DOMAIN, mailboxes: [{ id: "m1", localPart: "support" }] });
+	const spec: Spec = { domain: "dev.example", mailboxes: [{ role: "support", access: [{ email: "outside@elsewhere.test" }] }] };
+	assert.match((await runOn(store, PLAN, spec)).text, /no local user with that address/);
+	assert.equal((await runOn(store, flags(), spec)).code, 1);
+	assert.ok(!calls.some((call) => call.startsWith("grantAccess")));
+});
+
+test("a domain that is not onboarded stops the document instead of failing everything after it", async () => {
+	const { store, calls } = fakeStore({ license: TEAM });
+	const spec: Spec = { domain: "new.example", mailboxes: [{ role: "office" }], accounts: [{ username: "sam", password: "password-123" }] };
+	assert.match((await runOn(store, PLAN, spec)).text, /! domain\.new\.example\s+not onboarded/);
+	const applied = await runOn(store, flags(), spec);
+	assert.equal(applied.code, 1);
+	assert.match(applied.text, /stopped: nothing else in this document can work without domain/);
+	assert.deepEqual(writes(calls), [], "nothing was attempted against a domain that is not there");
+});
+
+test("onboarding refuses to take mail from someone else, but Cloudflare's own MX is ours already", async () => {
+	const spec: Spec = { domain: "live.example", onboard: {}, mailboxes: [{ role: "office" }] };
+	const taken = fakeStore({ mx: [{ content: "mx.other.example" }] });
+	const refusedRun = await runOn(taken.store, flags(), spec);
+	assert.equal(refusedRun.code, 1);
+	assert.match(refusedRun.text, /already receives mail through mx\.other\.example/);
+	assert.equal((await runOn(taken.store, flags({ confirmMx: true }), spec)).code, 0, "--confirm-mx is the approval");
+
+	assert.equal((await runOn(fakeStore({ mx: [{ content: "route1.mx.cloudflare.net" }] }).store, flags(), spec)).code, 0);
+	assert.deepEqual(foreignMx([{ content: "route2.mx.cloudflare.net." }, { content: "aspmx.l.google.com" }], "cloudflare"), ["aspmx.l.google.com"]);
+	assert.equal((await runOn(taken.store, flags(), { ...spec, domain: "quiet.example", onboard: { receivingProvider: "none" } })).code, 0, "a domain that will not receive takes nobody's mail");
+});
+
+test("an MCP key is never minted wider than the document says", async () => {
+	const seed = { domains: DOMAIN, mailboxes: [{ id: "m1", localPart: "office" }, { id: "m2", localPart: "support" }] };
+	// A typo'd mailbox would otherwise leave the key restricted to nothing - which the app reads as everything.
+	const typo = fakeStore(seed);
+	const bad: Spec = { domain: "dev.example", mcpKeys: [{ name: "agent", mailboxes: ["offcie"] }] };
+	assert.match((await runOn(typo.store, PLAN, bad)).text, /! mcpKey\.agent\s+mailbox "offcie" is neither/);
+	assert.equal((await runOn(typo.store, flags(), bad)).code, 1);
+	assert.deepEqual(typo.state.keys, [], "no key was minted");
+
+	// A key that exists is rewritten in place: what it reaches changes, its secret does not.
+	const drift = fakeStore({ ...seed, keys: [{ id: "k1", name: "agent", scopes: ["mcp:read"], mailboxIds: ["m1"] }] });
+	const wider: Spec = { domain: "dev.example", mcpKeys: [{ name: "agent", mailboxes: ["office", "support"], scopes: ["mcp:read", "mcp:draft"] }] };
+	assert.equal((await runOn(drift.store, PLAN, wider)).code, 1);
+	await runOn(drift.store, flags(), wider);
+	assert.deepEqual(drift.state.keys, [{ id: "k1", name: "agent", scopes: ["mcp:read", "mcp:draft"], mailboxIds: ["m1", "m2"] }]);
+	assert.ok(!drift.calls.some((call) => call.startsWith("createMcpKey")));
+	assert.equal((await runOn(drift.store, PLAN, wider)).code, 0);
+});
+
+test("accounts: an update carries the whole body the app requires, and the primary admin is never disabled", async () => {
+	const seed = { domains: DOMAIN, license: TEAM, mailboxes: [{ id: "m1", localPart: "sam" }, { id: "m2", localPart: "root" }], accounts: [{ id: "u_sam", email: "sam@dev.example", name: "sam", role: "user" }, { id: "u_root", email: "root@dev.example", role: "admin", isPrimaryAdmin: true }] };
+	const { store, state, calls } = fakeStore(seed);
+	const spec: Spec = { domain: "dev.example", accounts: [{ username: "sam", name: "Sam", role: "admin" }, { username: "root", role: "admin" }], teardown: { accounts: "disable" } };
+	await runOn(store, flags(), spec);
+	const body = JSON.parse(calls.find((call) => call.startsWith("updateAccount:u_sam"))!.split(":").slice(2).join(":"));
+	assert.deepEqual(body, { name: "Sam", role: "admin", disabled: false, canManageMailboxes: false }, "the whole body, and none of the schema's null transforms");
+	await runOn(store, DESTROY, spec);
+	assert.deepEqual(state.accounts.map((account) => account.disabled), [true, false], "the primary admin is kept");
+});
+
+test("logins: what is written down is what was set, a rotation retires it, and nothing secret is printed", async () => {
+	const { store, state } = fakeStore({ domains: DOMAIN, license: TEAM });
+	const vault = memoryVault();
+	const spec: Spec = { domain: "dev.example", accounts: [{ username: "sam", name: "Sam", password: "password-123" }, { username: "new" }], mcpKeys: [{ name: "agent" }] };
+	const applied = await runOn(store, flags(), spec, vault);
+	assert.deepEqual([vault.data.logins["sam@dev.example"].password, vault.data.logins["sam@dev.example"].login, vault.data.mcpKeys.agent.key], ["password-123", "https://instance.test/login", "ep_agent"]);
+	const generated = vault.data.logins["new@dev.example"].password;
+	assert.ok(generated.length >= 16 && !applied.text.includes(generated) && !applied.text.includes("password-123") && !applied.text.includes("ep_agent"));
+	assert.deepEqual(vault.logins().map((login) => login.email), ["new@dev.example", "sam@dev.example"], "one document per person, to send them");
+
+	// An account that already exists keeps its password until it is rotated; so does a key.
+	assert.equal((await runOn(store, PLAN, spec, vault)).code, 0);
+	const keyBefore = state.keys[0].id;
+	assert.match((await runOn(store, flags({ status: true, rotatePasswords: true }), spec, vault)).text, /~ account\.new\s+set a new password/);
+	await runOn(store, flags({ rotatePasswords: true }), spec, vault);
+	assert.notEqual(vault.data.logins["new@dev.example"].password, generated);
+	assert.deepEqual([state.keys.length, state.keys[0].id !== keyBefore], [1, true], "a new key replaced the old one");
+});
+
+// --- the instance layer -----------------------------------------------------------
+
+test("licence: applied when asked, community is a plan like any other, destroy takes back what was given", async () => {
+	const fresh = fakeStore();
+	assert.equal((await runOn(fresh.store, PLAN, { license: { plan: "team" } })).code, 1);
+	assert.deepEqual(writes(fresh.calls), []);
+	await runOn(fresh.store, flags(), { license: "team" });
+	assert.deepEqual(fresh.state.license, TEAM);
+	assert.ok(!fresh.calls.includes("listDomains"), "an instance document reaches for no domain");
+
+	const down = fakeStore({ license: TEAM });
+	await runOn(down.store, flags(), { license: { plan: "community" } });
+	assert.equal(down.state.license?.plan, "community", "an explicit community is applied, not ignored");
+
+	const undo = fakeStore({ license: TEAM });
+	await runOn(undo.store, DESTROY, { license: { plan: "team" } });
+	assert.ok(undo.calls.includes("setLicense:community"));
+	assert.ok(!undo.calls.includes("listDomains"), "destroying an instance document reaches for no domain either");
+});
+
+test("settings: a secret comes from the environment, is written, and is never printed", async () => {
+	process.env.STATE_TEST_RESEND = "re_secret";
+	const { store, state, calls } = fakeStore({ settings: { app_settings: { app_name: "Mailflare", outbound_attachment_max_mb: 25 }, backup_settings: { enabled: 0, schedule_type: "daily", retention_enabled: 0, retention_days: 30, excluded_table_groups: "[]" } } });
+	const spec: Spec = {
+		settings: { outboundAttachmentMaxMb: 25, driveStorageLimitGb: 2, assistant: { provider: "compatible", preset: "openai", models: ["gpt-4o-mini"], apiKeyEnv: "STATE_TEST_RESEND" }, resendApiKeyEnv: "STATE_TEST_RESEND" },
+		backups: { enabled: true, schedule: "weekly", scheduleValue: 1, retentionDays: 14, exclude: ["assistant"] },
+	};
+	const planned = await runOn(store, PLAN, spec);
+	assert.match(planned.text, /· settings\.outboundAttachmentMaxMb/, "a field already as wanted is unchanged");
+	assert.match(planned.text, /~ backups\.schedule\s+daily → weekly on day 1/);
+	const applied = await runOn(store, flags(), spec);
+	assert.equal(applied.code, 0, applied.text);
+	assert.ok(!planned.text.includes("re_secret") && !applied.text.includes("re_secret"), "a secret is never printed");
+	assert.ok(!calls.some((call) => call.includes("outbound_attachment_max_mb")), "the unchanged field was not written");
+	const [app] = state.tables.app_settings;
+	const [backup] = state.tables.backup_settings;
+	assert.deepEqual([app.drive_storage_limit_bytes, app.agent_base_url, app.agent_api_key, app.resend_api_key], [2 * 1024 ** 3, "https://api.openai.com/v1", "re_secret", "re_secret"]);
+	assert.deepEqual([backup.enabled, backup.schedule_type, backup.schedule_value, backup.retention_enabled, backup.retention_days, backup.excluded_table_groups], [1, "weekly", 1, 1, 14, '["assistant"]']);
+	assert.equal((await runOn(store, PLAN, spec)).code, 0);
+
+	delete process.env.STATE_TEST_RESEND;
+	assert.match((await runOn(store, PLAN, { settings: { resendApiKeyEnv: "STATE_TEST_RESEND" } })).text, /! settings\.resendApiKey\s+\$STATE_TEST_RESEND is not set/);
+});
+
+test("push is a round trip rather than a state: declaring it runs the test, destroy clears the subscriptions", async () => {
+	const sent = fakeStore({ pushSubscriptions: 3 });
+	assert.equal((await runOn(sent.store, PLAN, { push: {} })).code, 1, "there is always a test to run");
+	assert.equal((await runOn(sent.store, flags(), { push: { to: "you@example.com" } })).code, 0);
+	assert.equal(sent.calls.filter((call) => call === "sendViaCloudflare").length, 1);
+	await runOn(sent.store, DESTROY, { push: {} });
+	assert.equal(sent.state.pushSubscriptions, 0);
+});
+
+// --- one server's documents ----------------------------------------------------------
+
+const quiet = { print: () => {} };
+const INSTANCE = { name: "p/instance", spec: { license: { plan: "team" }, fresh: { admin: { email: "root@new.example", password: "password-123" } } } as Spec };
+const TENANT = (domain: string): { name: string; spec: Spec } => ({ name: `p/${domain}`, spec: { domain, onboard: { receivingProvider: "none" }, mailboxes: [{ role: "support", shared: true }], accounts: [{ username: "sam", password: "password-123" }], teardown: { accounts: "disable", domain: "remove" } } });
+
+test("an empty instance gets its admin on a plain apply - with no wipe - and one with users never does", async () => {
+	const empty = fakeStore();
+	empty.state.admin = null;
+	const vault = memoryVault();
+	const planned = await runDocuments(empty.store, PLAN, [INSTANCE, TENANT("a.example")], { ...quiet, vault });
+	assert.ok(planned.every((result) => result.pending), "nothing can be read until it has an admin");
+	const results = await runDocuments(empty.store, flags(), [INSTANCE, TENANT("a.example")], { ...quiet, vault });
+	assert.ok(results.every((result) => result.ok));
+	assert.ok(empty.calls.includes("insertAdmin:root@new.example") && !empty.calls.includes("wipeData"));
+	assert.equal(vault.data.logins["root@new.example"].role, "primary admin");
+
+	const live = fakeStore({ license: TEAM });
+	await runDocuments(live.store, flags(), [INSTANCE], quiet);
+	assert.ok(!live.calls.some((call) => call.startsWith("insertAdmin")), "an instance with an admin is left alone");
+});
+
+test("a reset reports a schema that will not come up", async () => {
+	const { store } = fakeStore({ schema: false });
+	const [result] = await runDocuments(store, flags({ fresh: true, confirmDestroy: true }), [INSTANCE], quiet);
+	assert.equal(result.ok, false);
+});
+
+test("a bad document fails by itself, and the rest of the run carries on", async () => {
+	const { store, state } = fakeStore({ license: TEAM });
+	const results = await runDocuments(store, flags(), [{ name: "bad", spec: { mailboxes: [{ role: "x" }] } }, TENANT("a.example")], quiet);
+	assert.deepEqual(results.map((result) => result.ok), [false, true]);
+	assert.equal(state.domains.length, 1);
+});
+
+test("the limiter never runs more than its limit, and runs everything", async () => {
+	const limit = limiter(3);
+	let active = 0;
+	let peak = 0;
+	const done = await Promise.all(Array.from({ length: 20 }, (_, index) => limit(async () => {
+		peak = Math.max(peak, ++active);
+		await new Promise((resolve) => setTimeout(resolve, 1));
+		active -= 1;
+		return index;
+	})));
+	assert.equal(done.length, 20);
+	assert.equal(peak, 3);
+});
+
+// --- the fleet ---------------------------------------------------------------------
+
+const CONFIG: WranglerConfig = {
+	name: "mailflare",
+	services: [{ binding: "WORKER_SELF_REFERENCE", service: "mailflare" }],
+	d1_databases: [{ binding: "DB", database_name: "mailflare", database_id: "id-default" }],
+	r2_buckets: [{ binding: "BUCKET", bucket_name: "mailflare-raw" }],
+	queues: { producers: [{ queue: "mailflare-inbound" }, { queue: "mailflare-outbound" }], consumers: [{ queue: "mailflare-inbound" }, { queue: "mailflare-outbound" }] },
+};
+const RUN = (over: Partial<Flags> = {}, concurrency = 1) => ({ flags: flags(over), concurrency, explicit: { url: false, db: false } });
+const project = (name: string, server: Record<string, unknown> | null, domain: string) => ({ name, dir: "projects", server: server ? { name, ...server } : null, entries: [{ name: `${name}/instance`, spec: { license: { plan: "team" } } as Spec }, TENANT(domain)].map((entry) => ({ ...entry, name: entry.name.replace("p/", `${name}/`) })) });
+
+/** A fleet in memory: one fake store per database. */
+function fleet() {
+	const stores = new Map<string, ReturnType<typeof fakeStore>>();
+	const opened: Instance[] = [];
+	const events: string[] = [];
+	const out: string[] = [];
+	const drift: string[] = [];
+	const deps: FleetDeps = {
+		serverDrift: async () => drift,
+		openStore: async (instance, fn) => {
+			opened.push(instance);
+			if (!stores.has(instance.db)) stores.set(instance.db, fakeStore());
+			return fn(stores.get(instance.db)!.store);
+		},
+		template: () => CONFIG,
+		writeConfig: (_template, deployment) => void (deployment.generated && events.push(`config:${deployment.config}`)),
+		vault: () => memoryVault(),
+		warmUp: async () => void events.push("warm-up"),
+		deploy: async (server, _deployment, options) => {
+			events.push(`${options.dryRun ? "would-deploy" : "deploy"}:${server.name}`);
+			return options.dryRun ? null : { ...server, url: `https://${server.name}.example.workers.dev`, databaseId: "id-new" };
+		},
+		undeploy: async (server, _deployment, options) => {
+			events.push(`${options.dryRun ? "would-undeploy" : "undeploy"}:${server.name}`);
+			return true;
+		},
+		print: (text) => out.push(text),
+	};
+	return { deps, stores, opened, events, out, drift };
 }
 
-const runOn = (store: Store, f: Flags, project: Spec, r: Role[]) =>
-	quiet(() => run(makeContext(store, f, project, String(project.domain)), r));
-
-test("creates missing mailboxes and grants access to other users", async () => {
-	const { store, calls, state } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		users: [{ id: "u_helper", email: "helper@dev.example" }],
-	});
-	const code = await runOn(store, flags(), projectFor("dev.example"), roles({ role: "office", access: [{ email: "helper@dev.example", permission: "full_access" }] }));
-	assert.equal(code, 0);
-	assert.ok(calls.includes("createMailbox:office"), "office mailbox created");
-	assert.deepEqual(state.access, [{ mailboxId: "mbx_1", userId: "u_helper", permission: "full_access" }]);
-});
-
-test("is idempotent: an existing mailbox is left alone", async () => {
-	const { store, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "office", hostname: "dev.example" }],
-	});
-	const code = await runOn(store, flags(), projectFor("dev.example"), roles({ role: "office" }));
-	assert.equal(code, 0);
-	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "no mailbox created");
-});
-
-test("skips the owner's own access grant and clears a redundant one", async () => {
-	const { store, state, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "office", hostname: "dev.example", userId: "u_owner" }],
-		users: [{ id: "u_owner", email: "owner@dev.example" }],
-		access: [{ mailboxId: "mbx_1", userId: "u_owner", permission: "full_access" }],
-	});
-	await runOn(store, flags(), projectFor("dev.example"), roles({ role: "office", access: [{ email: "owner@dev.example" }] }));
-	assert.ok(!calls.some((c) => c.startsWith("grantAccess")), "owner grant not inserted");
-	assert.ok(calls.includes("revokeAccess:u_owner"), "redundant owner grant removed");
-	assert.deepEqual(state.access, []);
-});
-
-test("dry-run changes nothing", async () => {
-	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }], users: [{ id: "u_helper", email: "helper@dev.example" }] });
-	const code = await runOn(
-		store,
-		flags({status: true}),
-		projectFor("dev.example", { routing: [{ pattern: "*", action: "forward", forwardTo: "ops@example.com" }], mcpKeys: [{ name: "agent" }], accounts: [{ username: "sam" }] }),
-		roles({ role: "office", access: [{ email: "helper@dev.example" }] }),
-	);
-	assert.equal(code, 1, "a plan with work to do exits non-zero - and writes nothing");
-	assert.deepEqual(
-		calls.filter((c) => /^(createMailbox|grantAccess|insertRoutingRule|updateRoutingRule|deleteMailbox|createMcpKey|createAccount|onboardDomain|removeDomain)/.test(c)),
-		[],
-		"no writes during a dry run",
-	);
-});
-
-test("onboards a missing domain, then applies into it", async () => {
-	const { store, calls } = fakeStore();
-	const code = await runOn(store, flags(), projectFor("fresh.example", { onboard: {} }), roles({ role: "office" }));
-	assert.equal(code, 0);
-	assert.ok(calls.includes("onboardDomain"), "domain onboarded");
-	assert.ok(calls.includes("createMailbox:office"), "applied after onboarding");
-});
-
-test("refuses to onboard a domain that already has MX unless --confirm-mx", async () => {
-	const { store } = fakeStore();
-	const conflicted: Store = { ...store, currentMx: async () => [{ content: "mx.other.example" }] };
-	assert.equal(await runOn(conflicted, flags(), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 1);
-	assert.equal(await runOn(conflicted, flags({confirmMx: true}), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 0);
-});
-
-test("status reports missing items without writing", async () => {
-	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	const code = await runOn(store, flags({status: true}), projectFor("dev.example"), roles({ role: "office" }, { role: "support" }));
-	assert.equal(code, 1, "missing mailboxes make status fail");
-	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "status never writes");
-});
-
-test("routing: inserts, then leaves an identical rule alone, then reconciles drift", async () => {
-	const project = projectFor("dev.example", { routing: [{ pattern: "*", action: "forward", forwardTo: "ops@example.com" }] });
-
-	const fresh = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	await runOn(fresh.store, flags(), project, roles({ role: "office" }));
-	assert.ok(fresh.calls.includes("insertRoutingRule:*:forward"));
-
-	const identical = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		routing: [{ id: "rr_1", domainId: "d1", pattern: "*", action: "forward", match_value: "*", forward_to: "ops@example.com", keep_copy: 0, mailbox_id: null, reject_reason: null, priority: 0, enabled: 1 }],
-	});
-	await runOn(identical.store, flags(), project, roles({ role: "office" }));
-	assert.ok(!identical.calls.some((c) => c.startsWith("insertRoutingRule") || c.startsWith("updateRoutingRule")), "identical rule untouched");
-
-	const drifted = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		routing: [{ id: "rr_1", domainId: "d1", pattern: "*", action: "forward", match_value: "*", forward_to: "old@example.com", keep_copy: 0, mailbox_id: null, reject_reason: null, priority: 0, enabled: 1 }],
-	});
-	await runOn(drifted.store, flags(), project, roles({ role: "office" }));
-	assert.ok(drifted.calls.includes("updateRoutingRule:rr_1"), "drifted rule updated");
-});
-
-test("mcp keys: rejects an unknown scope, else creates once and is idempotent", async () => {
-	const bad = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	assert.equal(await runOn(bad.store, flags(), projectFor("dev.example", { mcpKeys: [{ name: "agent", scopes: ["mcp:teleport"] }] }), roles({ role: "office" })), 1, "unknown scope fails");
-	assert.ok(!bad.calls.some((c) => c.startsWith("createMcpKey")));
-
-	const good = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	assert.equal(await runOn(good.store, flags(), projectFor("dev.example", { mcpKeys: [{ name: "agent", mailboxes: ["office"] }] }), roles({ role: "office" })), 0);
-	assert.ok(good.calls.includes("createMcpKey:agent:6:1"), "six default scopes, one mailbox");
-
-	const again = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }], mcpKeys: [{ id: "key_1", name: "agent" }] });
-	await runOn(again.store, flags(), projectFor("dev.example", { mcpKeys: [{ name: "agent" }] }), roles({ role: "office" }));
-	assert.ok(!again.calls.some((c) => c.startsWith("createMcpKey")), "existing key not recreated");
-});
-
-test("cleanup removes mailboxes, routing, keys, disables accounts and the domain", async () => {
-	const { store, calls, state } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "office", hostname: "dev.example" }],
-		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "sam", role: "user", disabled: false, canManageMailboxes: false }],
-		mcpKeys: [{ id: "key_1", name: "agent" }],
-		routing: [{ id: "rr_1", domainId: "d1", pattern: "*", action: "forward" }],
-	});
-	const code = await runOn(
-		store,
-		flags({cleanup: true}),
-		projectFor("dev.example", { accounts: [{ username: "sam" }], mcpKeys: [{ name: "agent" }], routing: [{ pattern: "*", action: "forward" }], teardown: { accounts: "disable", domain: "remove" } }),
-		roles({ role: "office" }),
-	);
-	assert.equal(code, 0);
-	assert.ok(calls.includes("deleteMailbox:mbx_1"), "mailbox deleted");
-	assert.ok(calls.includes("deleteRoutingRule:*:forward"), "routing removed");
-	assert.ok(calls.includes("deleteMcpKey:agent"), "key removed");
-	assert.ok(calls.includes("updateAccount:u_sam:disabled=true"), "account disabled");
-	assert.ok(calls.includes("removeDomain:d1"), "domain removed");
-	assert.equal(state.accounts[0].disabled, true);
-});
-
-test("cleanup never disables the primary admin", async () => {
-	const { store, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		accounts: [{ id: "u_root", email: "root@dev.example", name: "root", role: "admin", disabled: false, canManageMailboxes: true, isPrimaryAdmin: true }],
-	});
-	await runOn(store, flags({cleanup: true}), projectFor("dev.example", { accounts: [{ username: "root" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
-	assert.ok(!calls.some((c) => c.includes("u_root")), "primary admin untouched");
-});
-
-test("mass mode processes every project through one store", async () => {
-	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "a.example" }, { id: "d2", hostname: "b.example" }] });
-	const entries = [
-		{ name: "a.example", spec: projectFor("a.example", { mailboxes: [{ role: "office" }] }) },
-		{ name: "b.example", spec: projectFor("b.example", { mailboxes: [{ role: "hello" }] }) },
+test("every project runs against its own server, in parallel, and one failure does not stop the others", async () => {
+	const { deps, stores, opened, events, out } = fleet();
+	const projects = [
+		project("mailflare", { url: "https://mail.example" }, "a.example"),
+		project("mailflare-eu", { url: "https://eu.example", databaseId: "id-eu", jurisdiction: "eu" }, "b.example"),
+		{ ...project("broken", { url: "https://broken.example", databaseId: "id-x" }, "c.example"), entries: [{ name: "broken/bad", spec: { mailboxes: [{ role: "x" }] } as Spec }] },
 	];
-	const code = await quiet(() => runSpecs(store, flags(), { roles: "" }, entries));
-	assert.equal(code, 0);
-	assert.ok(calls.includes("createMailbox:office") && calls.includes("createMailbox:hello"), "both documents applied");
+	assert.equal(await runFleet(projects, RUN({}, 4), deps), 1, "the fleet is not all well");
+	assert.deepEqual(opened.map((instance) => `${instance.db}|${instance.config}|${instance.url}|${instance.jurisdiction ?? "-"}`).sort(), ["broken|wrangler.broken.json|https://broken.example|-", "mailflare-eu|wrangler.mailflare-eu.json|https://eu.example|eu", "mailflare|wrangler.jsonc|https://mail.example|-"]);
+	assert.deepEqual(stores.get("mailflare")!.state.domains.map((domain) => domain.hostname), ["a.example"], "each tenant landed on its own server");
+	assert.deepEqual(stores.get("mailflare-eu")!.state.domains.map((domain) => domain.hostname), ["b.example"]);
+	assert.ok(events.includes("config:wrangler.mailflare-eu.json") && !events.some((event) => event.includes("wrangler.jsonc")), "every server but the default is reached through a config generated for it");
+	assert.equal(events[0], "warm-up", "the shared login is refreshed once, before anything runs in parallel");
+	assert.match(out.join("\n"), /4\/5 document\(s\) ok/);
 });
 
-test("mass mode keeps going and reports failure per project", async () => {
-	const { store } = fakeStore({ domains: [{ id: "d1", hostname: "ok.example" }] });
-	const entries = [
-		{ name: "ok.example", spec: projectFor("ok.example", { mailboxes: [{ role: "office" }] }) },
-		{ name: "broken", spec: { mailboxes: [{ role: "x" }] } },
-	];
-	const code = await quiet(() => runSpecs(store, flags(), { roles: "" }, entries));
-	assert.equal(code, 1, "one bad project fails the run");
+test("a server is the template with its own name, database, bucket, queues and jurisdiction", () => {
+	const eu = deploymentFor(CONFIG, { name: "mailflare-eu", databaseId: "id-eu", jurisdiction: "eu" });
+	assert.deepEqual(eu, { config: "wrangler.mailflare-eu.json", generated: true, worker: "mailflare-eu", database: "mailflare-eu", databaseId: "id-eu", bucket: "mailflare-eu-raw", queues: ["mailflare-eu-inbound", "mailflare-eu-outbound"], jurisdiction: "eu", placement: undefined });
+	const config = serverConfig(CONFIG, eu);
+	assert.deepEqual([config.name, config.services?.[0].service], ["mailflare-eu", "mailflare-eu"], "the Worker calls itself, so it names itself");
+	assert.deepEqual(config.d1_databases?.[0], { binding: "DB", database_name: "mailflare-eu", database_id: "id-eu" });
+	assert.deepEqual(config.r2_buckets?.[0], { binding: "BUCKET", bucket_name: "mailflare-eu-raw", jurisdiction: "eu" }, "the bucket is bound in its jurisdiction");
+	assert.deepEqual(config.queues?.consumers?.map((consumer) => consumer.queue), ["mailflare-eu-inbound", "mailflare-eu-outbound"]);
+	// What src/ reads to deliver mail to THIS Worker, and to pin its Durable Objects.
+	assert.deepEqual(config.vars, { MAILFLARE_WORKER_NAME: "mailflare-eu", MAILFLARE_JURISDICTION: "eu" });
+	assert.equal(CONFIG.name, "mailflare", "the template itself is untouched");
+
+	const home = deploymentFor(CONFIG, { name: "mailflare" });
+	assert.deepEqual([home.config, home.generated, home.databaseId], ["wrangler.jsonc", false, "id-default"], "wrangler.jsonc is the default server");
+	// The Vite plugin picks the config when it BUILDS; `wrangler deploy --env` does not apply.
+	assert.ok(deploySteps({ name: "mailflare-eu", jurisdiction: "eu" }, eu).includes("MAILFLARE_WRANGLER_CONFIG=wrangler.mailflare-eu.json npm run build"));
+	assert.match(deploySteps({ name: "mailflare-eu", jurisdiction: "eu" }, eu)[0], /create the database mailflare-eu in jurisdiction eu/);
+	assert.deepEqual(deploySteps({ name: "mailflare" }, home)[0], "npm run deploy");
+	// A server that names its country runs there: its Worker is placed beside a cloud region in it.
+	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-de", country: "de" })).placement, { region: "aws:eu-central-1" });
+	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-x", country: "de", placement: "gcp:europe-west3" })).placement, { region: "gcp:europe-west3" }, "an exact region wins");
+	assert.equal(serverConfig(CONFIG, eu).placement, undefined, "and one that does not say runs wherever a request arrives");
+	// A server that does not manage DNS is never given a Cloudflare token, so it can touch no zone.
+	assert.ok(secretsFor({ name: "x" }).includes("CF_TOKEN") && !secretsFor({ name: "x", managesDns: false }).includes("CF_TOKEN"));
 });
 
-test("a multi-document file loads every document", () => {
-	const entries = loadSpecs({ spec: "tests/fixtures/state-small.json", dir: "" });
-	assert.deepEqual(entries.map((e) => e.name), ["dev-one.example", "dev-two.example"]);
+test("a server with no recorded origin is deployed by apply, previewed by plan, and skipped by destroy", async () => {
+	const undeployed = () => [project("mailflare-eu", { jurisdiction: "eu" }, "b.example")];
+	const planned = fleet();
+	assert.equal(await runFleet(undeployed(), RUN({ status: true }), planned.deps), 1);
+	assert.deepEqual([planned.events, planned.opened.length], [["would-deploy:mailflare-eu"], 0], "there is no instance to plan against yet");
+	assert.match(planned.out.join("\n"), /~ mailflare-eu\/instance {2}\(changes to make\)/, "not deployed yet is work to do, not a failure");
+
+	const applied = fleet();
+	assert.equal(await runFleet(undeployed(), RUN(), applied.deps), 0);
+	assert.deepEqual([applied.events, applied.opened[0].url], [["deploy:mailflare-eu", "config:wrangler.mailflare-eu.json"], "https://mailflare-eu.example.workers.dev"]);
+
+	const gone = fleet();
+	assert.equal(await runFleet(undeployed(), RUN({ cleanup: true, confirmDestroy: true }), gone.deps), 0);
+	assert.deepEqual([gone.events, gone.opened.length], [[], 0]);
+
+	const template = fleet();
+	assert.equal(await runFleet([project("example", { template: true }, "b.example")], RUN(), template.deps), 1);
+	assert.match(template.out.join("\n"), /"example" is a template/);
+	assert.deepEqual(template.events, [], "a template is never built");
 });
 
-test("scanning the specs folder skips the placeholder and drafts", () => {
-	const entries = loadSpecs({ dir: "scripts/state/specs/projects" });
-	assert.ok(entries.length > 0, "found documents");
-	assert.ok(!entries.some((e) => /^example\//.test(e.name)), "the example project is skipped");
-	assert.ok(!entries.some((e) => /^_/.test(e.name)), "_* projects are skipped");
+test("a server's own document is reconciled: a plan says it differs, an apply deploys it again", async () => {
+	const live = () => [project("mailflare-de", { url: "https://de.example", databaseId: "id-de", country: "de" }, "a.example")];
+	const moved = fleet();
+	moved.drift.push("it runs wherever a request arrives, not beside aws:eu-central-1");
+	assert.equal(await runFleet(live(), RUN({ status: true }), moved.deps), 1, "a server that differs is not reconciled");
+	assert.match(moved.out.join("\n"), /~ server mailflare-de: it runs wherever a request arrives, not beside aws:eu-central-1 — apply deploys it again/);
+	assert.deepEqual(moved.events.filter((event) => event.includes("deploy")), [], "a plan deploys nothing");
+	assert.equal(await runFleet(live(), RUN(), moved.deps), 0);
+	assert.ok(moved.events.includes("deploy:mailflare-de"));
 });
 
-// --- the global capabilities, which need no domain -----------------------------
+test("destroy takes the Worker last and only when confirmed; a local server is never deployed or removed", async () => {
+	const live = () => [project("mailflare", { url: "https://mail.example" }, "a.example")];
+	const preview = fleet();
+	await runFleet(live(), RUN(), preview.deps);
+	assert.equal(await runFleet(live(), RUN({ cleanup: true, status: true }), preview.deps), 1);
+	assert.deepEqual(preview.events, ["would-undeploy:mailflare"]);
+	assert.equal(preview.stores.get("mailflare")!.state.domains.length, 1, "unconfirmed, nothing is removed");
+	assert.match(preview.out.join("\n"), /Re-run with --confirm-destroy to destroy/);
 
-test("license: applied only when asked, and reverted by --cleanup", async () => {
-	const ctxFor = (f: Flags, project: Spec) => [f, project] as const;
+	assert.equal(await runFleet(live(), RUN({ cleanup: true, confirmDestroy: true }), preview.deps), 0);
+	assert.deepEqual(preview.events, ["would-undeploy:mailflare", "undeploy:mailflare"]);
+	assert.equal(preview.stores.get("mailflare")!.state.domains.length, 0);
 
-	const fresh = fakeStore();
-	const [f1, p1] = ctxFor(flags(), { license: { plan: "team" } });
-	await runOn(fresh.store, f1, p1, []);
-	assert.deepEqual(fresh.calls.filter((c) => c.startsWith("setLicense")), ["setLicense:team"]);
-	assert.deepEqual(fresh.state.license, { plan: "team", state: "active" });
-
-	const fromDocument = fakeStore();
-	await runOn(fromDocument.store, flags(), { license: { plan: "pro" } }, []);
-	assert.ok(fromDocument.calls.includes("setLicense:pro"), "a document section works without a flag");
-
-	const dry = fakeStore();
-	await runOn(dry.store, flags({status: true}), { license: { plan: "team" } }, []);
-	assert.ok(!dry.calls.some((c) => c.startsWith("setLicense")), "dry run writes nothing");
-
-	const undo = fakeStore({ license: { plan: "team", state: "active" } });
-	await runOn(undo.store, flags({cleanup: true}), { license: { plan: "team" } }, []);
-	assert.ok(undo.calls.includes("setLicense:community"), "cleanup reverts to community");
+	const local = fleet();
+	const sandbox = [project("_sandbox", { local: true }, "small.test")];
+	assert.equal(await runFleet(sandbox, RUN(), local.deps), 0);
+	assert.equal(await runFleet(sandbox, RUN({ cleanup: true, confirmDestroy: true }), local.deps), 0);
+	assert.deepEqual(local.events, [], "no deploy, no undeploy, no generated config");
+	assert.deepEqual([local.opened[0].local, local.opened[0].url, local.opened[0].db], [true, process.env.MAILFLARE_URL ?? "http://localhost:3000", "mailflare"]);
 });
 
-test("license: --license-status reports the gates", async () => {
-	const { store } = fakeStore({ license: { plan: "team", state: "active" } });
-	assert.equal(await runOn(store, flags({status: true}), { license: {} }, []), 0);
+test("a typed flag wins over the server document, and --local never reaches a deployed origin", () => {
+	const mailflare = project("mailflare", { url: "https://mail.example" }, "a.example");
+	const typed = resolveInstance(mailflare, { flags: flags({ url: "https://other.example", db: "other" }), concurrency: 1, explicit: { url: true, db: true } }, CONFIG);
+	assert.deepEqual([typed.instance.url, typed.instance.db], ["https://other.example", "other"]);
+	const local = resolveInstance(mailflare, { flags: flags({ local: true, url: "http://localhost:3000" }), concurrency: 1, explicit: { url: false, db: false } }, CONFIG);
+	assert.deepEqual([local.instance.local, local.instance.url, local.instance.db, local.deployment], [true, process.env.MAILFLARE_URL ?? "http://localhost:3000", "mailflare", null]);
 });
 
-test("a global-only run needs no domain and touches no domain resource", async () => {
-	const { store, calls } = fakeStore();
-	const code = await runOn(store, flags(), { license: { plan: "team" } }, []);
-	assert.equal(code, 0);
-	assert.ok(!calls.includes("listDomains"), "domain never resolved");
-	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "no domain-scoped work");
+test("the router sends every domain to the server its documents are on, and to no other", () => {
+	const map = fleetMap([
+		project("mailflare", { url: "https://mail.example/" }, "a.example"),
+		project("mailflare-eu", { url: "https://eu.example", jurisdiction: "eu" }, "b.example"),
+		project("pending", { jurisdiction: "eu" }, "c.example"),
+		project("_sandbox", { local: true, url: "http://localhost:3000" }, "small.test"),
+	]);
+	assert.deepEqual(map, { domains: { "a.example": "mailflare", "b.example": "mailflare-eu" }, servers: { mailflare: { url: "https://mail.example" }, "mailflare-eu": { url: "https://eu.example", jurisdiction: "eu" } }, countries: {} }, "a server with no origin, or a local one, is not routed to");
+	// Where someone NEW would be at home, by country: what each server says it serves.
+	const homes = fleetMap([project("mailflare-eu", { url: "https://eu.example", jurisdiction: "eu", country: "de", serves: ["eu"] }, "b.example"), project("mailflare-uk", { url: "https://uk.example", country: "gb" }, "c.example")]);
+	assert.deepEqual([homes.countries.de, homes.countries.fr, homes.countries.gb, homes.countries.us, homes.servers["mailflare-uk"].country], ["mailflare-eu", "mailflare-eu", "mailflare-uk", undefined, "gb"]);
+	assert.notEqual(fleetVersion(map), fleetVersion({ ...map, domains: { ...map.domains, "a.example": "mailflare-eu" } }), "moving a domain is a new fleet");
 });
 
-test("push: sends a test email, waits for arrival, and cleanup clears subscriptions", async () => {
-	const sent = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
-	assert.equal(await runOn(sent.store, flags(), { push: {} }, []), 0);
-	assert.equal(sent.calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "one email sent");
+// --- conformance: the same properties the real servers are held to ---------------------
 
-	const dry = fakeStore({ pushSubscriptions: 1 });
-	assert.equal(await runOn(dry.store, flags({status: true}), { push: {} }, []), 1, "a plan reports the round trip it would run");
-	assert.ok(!dry.calls.some((c) => c.startsWith("sendViaCloudflare")), "dry run sends nothing");
+test("the data-center list says which country an answer came from, and every country a server can run in has one", () => {
+	assert.deepEqual([coloOf("remote-FRA"), coloOf("local-LHR"), coloOf(null), coloOf("somewhere")], ["FRA", "LHR", null, null]);
+	assert.deepEqual([countryOfColo("FRA"), countryOfColo("LHR"), countryOfColo("QQQ")], ["de", "gb", null]);
+	// A country with a built-in region and no data center could be declared and never be run in.
+	assert.deepEqual(Object.keys(PLACEMENTS).filter((country) => !hasColo(country)), []);
 
-	const undo = fakeStore({ pushSubscriptions: 3 });
-	await runOn(undo.store, flags({cleanup: true}), { push: {} }, []);
-	assert.ok(undo.calls.includes("clearPushSubscriptions"), "cleanup clears subscriptions");
+	// The list is someone else's file: only codes and countries are taken, and a broken one is refused.
+	const published = Object.fromEntries(Object.entries(loadColos()).map(([code, cca2]) => [code, { cca2, city: "anything" }]));
+	assert.deepEqual(parseColoList(published), loadColos());
+	assert.throws(() => parseColoList({ FRA: { cca2: "DE" } }), /holds only 1 entries/);
+	assert.throws(() => parseColoList({ ...published, "<script>": { cca2: "DE" } }), /not a code and a country/);
+	assert.throws(() => parseColoList({ ...published, FRA: { cca2: "Germany" } }), /not a code and a country: FRA/);
+	assert.throws(() => parseColoList([]), /not an object of codes/);
 });
 
-test("push: a document section works without the flag", async () => {
-	const { store, calls } = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
-	assert.equal(await runOn(store, flags(), { push: { to: "you@example.com" } }, []), 0);
-	assert.equal(calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "the section alone triggers it");
+test("conformance holds: builds, converges, follows every kind of edit, leaves, and comes back", async () => {
+	const { deps, stores } = fleet();
+	const server = (name: string, domain: string) => ({ name, dir: "conformance", complete: true, server: { name, url: `https://${name}.example`, disposable: true }, entries: [
+		{ name: `${name}/instance`, spec: { license: { plan: "team" }, settings: { appName: "Conformance" }, fresh: { admin: { email: `root@${domain}` } } } as Spec },
+		{ name: `${name}/${domain}`, spec: { domain, onboard: { receivingProvider: "none" }, mailboxes: [{ role: "office" }], teardown: { accounts: "disable", domain: "remove" } } as Spec },
+	] });
+	const projects = [server("one", "one.example"), server("two", "two.example")];
+	const lines: string[] = [];
+	const code = await conform({ concurrency: 2, quick: false, load: () => projects }, deps, reporter((line) => lines.push(line)));
+	assert.equal(code, 0, lines.join("\n"));
+	assert.ok(lines.filter((line) => line.startsWith("  ✓")).length >= 20, "every property was checked");
+	assert.deepEqual([...stores.keys()].sort(), ["one", "two"], "each server through its own store");
+
+	// One of every kind of thing: the additions are everything a document can say.
+	const add = rounds(projects[0])!.add;
+	for (const kind of ["account", "mailbox", "mailbox_access", "alias", "folder", "rule", "routing", "mcpKey", "template", "contact", "bookingPage", "event", "drive", "apiKey", "webhook", "settings"]) {
+		assert.ok(add.expects.some((line) => line.includes(`: + ${kind}.`) || line.includes(`: ~ ${kind}.`)), `${kind} is not among the things conformance adds`);
+	}
+
+	// It resets what it runs on, so it refuses a server that does not say it may be.
+	const said: string[] = [];
+	assert.equal(await conform({ concurrency: 1, quick: true, load: () => [project("mailflare", { url: "https://mail.example" }, "a.example")] }, { ...deps, print: (text) => void said.push(text) }), 1);
+	assert.match(said.join("\n"), /only runs on servers that say they are disposable\. Not: mailflare/);
 });
 
-test("status resolves mailbox roles for routing rules", async () => {
-	// Regression: status must publish mailbox ids, or a routing rule that names a
-	// mailbox by role reports a bogus "mailbox not found" and fails the run.
-	const { store } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "support", hostname: "dev.example", type: "shared" }],
-		routing: [
-			{ id: "rr_1", domainId: "d1", pattern: "*", action: "store", match_value: "*", forward_to: null, keep_copy: 0, mailbox_id: "mbx_1", reject_reason: null, priority: 0, enabled: 1 },
-		],
-	});
-	const project = projectFor("dev.example", { mailboxes: [{ role: "support" }], routing: [{ pattern: "*", action: "store", mailbox: "support" }] });
-	assert.equal(await runOn(store, flags({status: true}), project, roles({ role: "support" })), 0);
-});
+// --- the command line ----------------------------------------------------------------
 
-// --- fresh: take a brand-new server from nothing ---------------------------------
+test("the command line: a target and a verb, in either order, and nothing ambiguous", () => {
+	const run = (...argv: string[]) => parseCli(argv);
+	assert.deepEqual(run("mailflare", "plan").command, { kind: "run", verb: "plan", target: { kind: "project", name: "mailflare" } });
+	assert.deepEqual(run("destroy", "mailflare").command, run("mailflare", "destroy").command, "verb first is the same command, not 'destroy everything'");
+	assert.deepEqual(run("plan").command, { kind: "run", verb: "plan", target: { kind: "all" } });
+	assert.deepEqual(run("a/b/x.json", "apply").command, { kind: "run", verb: "apply", target: { kind: "document", path: "a/b/x.json" } });
+	assert.deepEqual(run("some/folder", "plan").command, { kind: "run", verb: "plan", target: { kind: "folder", path: "some/folder" } });
 
-test("fresh wipes the instance and creates the primary admin", async () => {
-	const { store, state, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "old.example" }],
-		accounts: [{ id: "u_old", email: "old@old.example" }],
-	});
-	const code = await runOn(store, flags({fresh: true}), { fresh: { admin: { email: "root@new.example" } } }, []);
-	assert.equal(code, 0);
-	assert.ok(calls.includes("wipeData"), "data wiped");
-	assert.ok(calls.includes("insertAdmin:root@new.example"), "admin created");
-	assert.deepEqual(state.domains, [], "previous domains gone");
-	assert.deepEqual(state.accounts, [], "previous accounts gone");
-});
+	// A destroy or a reset is a report until it is confirmed.
+	assert.deepEqual([run("x", "destroy").flags.status, run("x", "destroy", "--confirm-destroy").flags.status], [true, false]);
+	assert.deepEqual([run("x", "reset").flags.status, run("x", "reset").flags.fresh, run("x", "reset", "--confirm-destroy").flags.status], [true, true, false]);
+	assert.equal(run("x", "apply").flags.status, false);
 
-test("fresh in a dry run writes nothing", async () => {
-	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "old.example" }] });
-	assert.equal(await runOn(store, flags({fresh: true, status: true}), { fresh: {} }, []), 1, "a plan writes nothing, and reports the reset it would do");
-	assert.ok(!calls.includes("wipeData") && !calls.includes("insertAdmin:admin@localhost"), "no writes");
-});
+	assert.equal(run("x", "plan", "--local").flags.url, process.env.MAILFLARE_URL ?? "http://localhost:3000", "--local means the dev server");
+	assert.equal(run("x", "plan").flags.url, undefined);
+	assert.deepEqual(run("subject", "Sam@Example.com", "destroy").command, { kind: "subject", email: "sam@example.com", action: "destroy" });
+	assert.deepEqual(run("router", "apply").command, { kind: "router", verb: "apply" });
+	assert.deepEqual([run("deploy").command, run("mailflare-eu", "deploy").command], [{ kind: "deploy", target: { kind: "all" } }, { kind: "deploy", target: { kind: "project", name: "mailflare-eu" } }]);
+	assert.deepEqual([run("logins").command, run("mailflare", "logins").command], [{ kind: "logins", project: undefined }, { kind: "logins", project: "mailflare" }]);
+	assert.deepEqual(run("colos").command, { kind: "colos" });
+	assert.deepEqual([run("apply", "--rotate-passwords").flags.rotatePasswords, run("apply").flags.rotatePasswords, run("apply").credentials], [true, false, "scripts/state/credentials"]);
 
-test("fresh runs before the domain work, so a new server bootstraps in one go", async () => {
-	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	const project = projectFor("dev.example", { onboard: { receivingProvider: "none" }, mailboxes: [{ role: "office" }], fresh: {} });
-	assert.equal(await runOn(store, flags({fresh: true}), project, roles({ role: "office" })), 0);
-	assert.ok(calls.indexOf("wipeData") < calls.indexOf("listDomains"), "reset precedes domain resolution");
-	assert.ok(calls.includes("createMailbox:office"), "provisioned after the reset");
-});
-
-test("fresh reports a missing schema as a failure in status", async () => {
-	const { store } = fakeStore({ schema: false });
-	assert.equal(await runOn(store, flags({fresh: true, status: true}), { fresh: {} }, []), 1);
-});
-
-test("teardown reverts the license last, so account management still works", async () => {
-	// Regression: reverting the license first 403s the account disable (it needs a
-	// Pro/Team plan), which silently left accounts enabled after a teardown.
-	const { store, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "sam", role: "user", disabled: false, canManageMailboxes: false }],
-		license: { plan: "team", state: "active" },
-	});
-	const project = projectFor("dev.example", { accounts: [{ username: "sam" }], license: { plan: "team" }, teardown: { accounts: "disable" } });
-	await runOn(store, flags({cleanup: true}), project, roles({ role: "office" }));
-	assert.ok(calls.includes("updateAccount:u_sam:disabled=true"), "account disabled during teardown");
-	assert.ok(calls.indexOf("updateAccount:u_sam:disabled=true") < calls.indexOf("setLicense:community"), "license reverted after the accounts");
-});
-
-test("account updates never send back the schema's null transforms", async () => {
-	// Regression: updateManagedAccountSchema turns an omitted password into null, and
-	// posting that back fails the app's own parse with a 400.
-	const { store, state } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "", role: "user", disabled: false, canManageMailboxes: false }],
-	});
-	await runOn(store, flags({cleanup: true}), projectFor("dev.example", { accounts: [{ username: "sam" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
-	const body = state.lastAccountUpdate as Record<string, unknown>;
-	assert.equal(body.disabled, true);
-	assert.ok(!("password" in body), "no password key");
-	assert.ok(!("forwardingEmail" in body), "no forwardingEmail key");
-	assert.equal(body.name, "sam", "an empty stored name falls back to the username");
-});
-
-test("a reset-only document is accepted without a domain", async () => {
-	// Regression: the "needs no domain" check was hand-built in two places and both
-	// forgot fresh, so a document that only reset the instance was rejected outright.
-	const { store, calls } = fakeStore();
-	const code = await quiet(() => runSpecs(store, flags({fresh: true}), { roles: "" }, [{ name: "instance", spec: { fresh: {} } }]));
-	assert.equal(code, 0);
-	assert.ok(calls.includes("wipeData"), "the reset ran");
-});
-
-test("an instance document is applied before the tenant documents", async () => {
-	// The instance layer exists so a tenant does not have to declare server-wide facts
-	const { store, calls } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		users: [],
-	});
-	const instance = { name: "instance", spec: { license: { plan: "team" } } };
-	const tenant = { name: "dev.example", spec: projectFor("dev.example", { mailboxes: [{ role: "support", shared: true }] }) };
-	assert.equal(await quiet(() => runSpecs(store, flags(), { roles: "" }, [instance, tenant])), 0);
-	assert.ok(calls.includes("setLicense:team"), "licence applied");
-	assert.ok(calls.includes("createMailbox:support"), "tenant provisioned");
-	assert.ok(calls.indexOf("setLicense:team") < calls.indexOf("createMailbox:support"), "instance layer ran first");
-});
-
-
-
-test("the subject index says where a person's data is, and what it cannot see", () => {
-	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }] };
-	assert.equal(subjectTotal(report), 14, "rows that still exist");
-	assert.deepEqual(subjectLines(report), ["      12  messages", "       2  sessions"], "non-empty tables, biggest first");
-	assert.equal(new Set(SUBJECT_SCOPE.map((scope) => scope.table)).size, SUBJECT_SCOPE.length, "no duplicate scope entries");
-	assert.ok(INDIRECT_SCOPE.length > 0, "indirectly-owned tables are listed");
-	assert.equal(parentOf("message_attachments"), "messages", "an indirect table names its parent");
-	assert.ok(isSubjectScoped("shared_attachment_links"), "two hops from a direct table still counts");
-	assert.ok(!isSubjectScoped("app_settings"), "app_settings is not subject data");
-	assert.deepEqual(subjectUnknown({ email: "a@b.c", userId: "u", mailboxIds: [], counts: [{ table: "ai_usage", rows: -1 }, { table: "messages", rows: 3 }] }), ["ai_usage"], "unattributable tables are surfaced, not counted");
-	assert.ok(SUBJECT_SCOPE_UNATTRIBUTABLE.includes("ai_usage"));
-	assert.equal(subjectTotal({ email: "a@b.c", userId: "u", mailboxIds: [], counts: [{ table: "ai_usage", rows: -1 }, { table: "messages", rows: 3 }] }), 3, "unknown rows are never summed as data");
-	assert.ok(SUBJECT_SCOPE.some((scope) => scope.userColumns?.includes("target_user_id")), "audit_logs links both ways");
-});
-
-test("the erasure scope is internally consistent", () => {
-	// These are the invariants that make a destructive pass trustworthy: a table listed
-	const direct = new Set(SUBJECT_SCOPE.map((scope) => scope.table));
-	const indirect = new Set(INDIRECT_SCOPE.map((link) => link.table));
-	for (const table of indirect) assert.ok(!direct.has(table), `${table} is both direct and indirect`);
-	for (const link of INDIRECT_SCOPE) assert.ok(direct.has(link.parent) || indirect.has(link.parent), `${link.table} names an unknown parent ${link.parent}`);
-	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(isSubjectScoped(ref.table) || ref.table === "users", `${ref.table} holds objects but is not in scope`);
-});
-
-test("every source change names a location inside src/, since we may not touch it", () => {
-	// The constraint is that this system never modifies the application. So each entry has
-	assert.ok(SOURCE_CHANGES.length > 0);
-	for (const change of SOURCE_CHANGES) {
-		assert.ok(change.need.length > 0, "says what cannot be done");
-		assert.ok(change.where.startsWith("src/") || change.where.startsWith("worker.ts"), `${change.where} must name the application`);
-		assert.ok(change.why.length > 20, `${change.need}: the reason must be usable, not a placeholder`);
+	for (const bad of [["mailflare"], ["reset"], ["mailflare", "frobnicate"], ["a", "plan", "b"], [], ["x", "plan", "--bogus"], ["x", "plan", "--concurrency", "abc"], ["subject"], ["subject", "sam@example.com", "nuke"], ["router"], ["router", "reset"], ["colos", "plan"]]) {
+		assert.throws(() => parseCli(bad), UsageError, `"${bad.join(" ")}" must be refused`);
 	}
 });
 
-test("deploy reads the server's env block, and refuses without one", () => {
-	// wrangler.jsonc is JSONC, so it cannot be JSON.parse'd. The env block is the source of
-	// truth for a server's database - this system must never invent one.
+// --- documents ------------------------------------------------------------------------
+
+test("a document is checked against the model before anything reads it", () => {
+	assert.deepEqual(validateSpec(FULL), [], "a good document passes");
+	const expects: Array<[Spec | unknown, RegExp]> = [
+		[{ domain: "a.test", mailboxs: [] }, /mailboxs: unknown section/],
+		[{ domain: "a.test", mailboxes: [{ displayName: "Oops" }] }, /mailboxes\[0\]: needs a role/],
+		[{ domain: "a.test", mailboxes: [{ role: "office", shared: "yes" }] }, /shared: must be true or false/],
+		[{ domain: "a.test", mailboxes: [{ role: "office", access: [{ email: "a@a.test", permission: "fullaccess" }] }] }, /"fullaccess" is not one of/],
+		[{ domain: "a.test", mailboxes: [{ role: "office" }, { role: "Office" }] }, /mailbox "Office" is declared twice/],
+		[{ mailboxes: [{ role: "office" }] }, /mailboxes: needs a domain/],
+		[{ domain: "a.test", onboard: null }, /onboard: must be an object/],
+		[{ domain: "a.test", accounts: [{ name: "Sam" }] }, /accounts\[0\]: needs a username/],
+		[{ domain: "a.test", accounts: [{ username: "sam", role: "amdin" }] }, /"amdin" is not one of admin, user/],
+		[{ domain: "a.test", routing: [{ pattern: "*", action: "forward" }] }, /a forward rule needs forwardTo/],
+		[{ domain: "a.test", routing: [{ pattern: "*", action: "store" }] }, /a store rule needs a mailbox/],
+		[{ domain: "a.test", mcpKeys: [{ name: "agent", scopes: ["mcp:teleport"] }] }, /"mcp:teleport" is not one of/],
+		[{ license: { plan: "teem" } }, /"teem" is not one of community, pro, team/],
+		[{ license: {} }, /license: needs a plan/],
+		[{ settings: { outboundAttachmentMaxMb: 99 } }, /must be a whole number from 1 to 25/],
+		[{ settings: { assistant: { provider: "compatible" } } }, /a compatible provider needs models/],
+		[{ backups: { schedule: "weekly" } }, /a weekly schedule needs a day from 0 to 6/],
+		[{ backups: { exclude: ["accounts", "mail", "automation", "assistant", "system"] } }, /cannot leave every group out/],
+		[{ domain: "a.test", mailboxes: [{ role: "office", rules: [{ value: "x", action: "folder" }] }] }, /a rule that files mail needs a folder/],
+		[{ domain: "a.test", mailboxes: [{ role: "office", folders: [{ name: "A" }, { name: "a" }] }] }, /a name "a" is declared twice/],
+		[{ domain: "a.test", mailboxes: [{ role: "office", autoReply: { enabled: "yes" } }] }, /autoReply\.enabled: must be true or false/],
+		[{ admin: { webhooks: [{ url: "https://x.example", events: ["message.read"] }] } }, /"message\.read" is not one of/],
+		[{ domain: "a.test", accounts: [{ username: "sam", apiKeys: [{ name: "ci", scopes: ["domains"] }] }] }, /"domains" is not one of send, read/],
+		[{ domain: "a.test", accounts: [{ username: "sam", calendar: { bookingPages: [{ name: "Call", durationMinutes: 30, weekdays: [1], startTime: "09:10", endTime: "17:00", timeZone: "UTC" }] } }] }, /startTime: must be a time on the quarter hour/],
+		[{ domain: "a.test", accounts: [{ username: "sam", mailbox: { colour: "red" } }] }, /mailbox\.colour: unknown field/],
+		[{ admin: { preferences: { trashRetentionDays: 0 } } }, /trashRetentionDays: must be a whole number of days/],
+		[{ specs: {} }, /specs: must be an array/],
+		[[], /must be a JSON object/],
+	];
+	for (const [doc, problem] of expects) assert.match(validateSpec(doc).join("\n"), problem);
+
+	assert.match(validateInstanceDocument({ license: "team", mailboxes: [] }).join("\n"), /mailboxes: belongs in a <domain>\.json/);
+	assert.match(validateTenantDocument({ domain: "a.test", license: "team" }, "a.test.json").join("\n"), /license: belongs in instance\.json/);
+	assert.match(validateTenantDocument({ domain: "a.test" }, "b.test.json").join("\n"), /name the file after the domain/);
+	assert.match(validateServer({ db: "x", port: 1 }).join("\n"), /port: unknown field/);
+	assert.deepEqual(validateServer({ local: true }), []);
+	assert.deepEqual(validateServer({ jurisdiction: "eu", disposable: true, managesDns: false }), []);
+	assert.match(validateServer({ managesDns: "no" }).join("\n"), /managesDns: must be true or false/);
+	assert.deepEqual(validateServer({ jurisdiction: "eu", region: "weur", databaseId: "x", bucket: "y", url: "https://a.example" }), []);
+	assert.match(validateServer({ jurisdiction: "mars" }).join("\n"), /"mars" is not one of eu, fedramp/);
+
+	// A home country: a server says where it runs and whom it serves, and a tenant must be at home on it.
+	assert.deepEqual(validateServer({ country: "de", serves: ["eu", "ch"], jurisdiction: "eu" }), []);
+	assert.match(validateServer({ country: "us", jurisdiction: "eu" }).join("\n"), /"us" is not in the European Union/);
+	assert.match(validateServer({ country: "pt" }).join("\n"), /no region is known for "pt" — give `placement`/);
+	assert.deepEqual(validateServer({ country: "pt", placement: "azure:somewhere" }), []);
+	assert.match(validateServer({ country: "zz", placement: "azure:somewhere" }).join("\n"), /Cloudflare has no data center in "zz"/);
+	const german = { name: "mailflare-de", country: "de", serves: ["de", "at"] };
+	assert.deepEqual(validateTenantDocument({ domain: "a.test", country: "AT" }, "a.test.json", german), []);
+	assert.match(validateTenantDocument({ domain: "a.test", country: "fr" }, "a.test.json", german).join("\n"), /"fr" is not at home on "mailflare-de", which serves de, at/);
+	assert.match(validateTenantDocument({ domain: "a.test", country: "fr" }, "a.test.json", { name: "plain" }).join("\n"), /does not say which countries it serves/);
+	assert.deepEqual(validateTenantDocument({ domain: "a.test" }, "a.test.json", german), [], "a tenant that names no country is not checked");
+	assert.match(validateSpec({ domain: "a.test", country: "germany" }).join("\n"), /country: must be a two-letter country code/);
+});
+
+test("every checked-in project loads, in order, with a small, a medium and a large tenant", () => {
+	for (const name of ["mailflare", "example", "_sandbox"]) {
+		const loaded = loadProject(name);
+		assert.equal(loaded.entries[0].name, `${name}/instance`, "the instance document comes first");
+		// How much a tenant declares: its mailboxes, grants, accounts, rules and keys.
+		const weight = (spec: Spec) => (spec.mailboxes ?? []).reduce((sum, box) => sum + 1 + (box.access?.length ?? 0), 0) + (spec.accounts?.length ?? 0) + (spec.routing?.length ?? 0) + (spec.mcpKeys?.length ?? 0);
+		const sizes = loaded.entries.slice(1).map((entry) => weight(entry.spec)).sort((a, b) => a - b);
+		assert.ok(sizes.length >= 3 && sizes.at(-1)! >= sizes[0] * 1.5, `${name} has a small, a medium and a large tenant (${sizes.join(", ")})`);
+		assert.ok(loaded.entries.slice(1).every((entry) => entry.spec.onboard), `every ${name} tenant can be rebuilt from its document`);
+	}
+	assert.deepEqual(loadProjects().map((entry) => entry.name), ["mailflare", "mailflare-eu"], "templates and drafts stay out of a fleet run");
+	assert.deepEqual([loadProject("mailflare-eu").server?.jurisdiction, loadProject("example").server?.template], ["eu", true]);
+	assert.equal(loadProject("_sandbox").server?.local, true);
+	assert.throws(() => loadProject("nope"), /no project "nope"/);
+	assert.deepEqual(loadDocuments("scripts/state/fixtures/state-small.json").map((entry) => entry.name), ["dev-one.example", "dev-two.example"], "one file may hold many documents");
+});
+
+// --- held to the app: these fail when src/ moves and this system has not --------------
+
+const tables = Object.values(schema).filter((value) => is(value, SQLiteTable)).map((table) => getTableConfig(table as SQLiteTable));
+
+test("the erasure scope covers the real schema: every table classified, every user and mailbox column accounted for", () => {
+	const direct = new Map(SUBJECT_SCOPE.map((scope) => [scope.table, scope]));
+	const indirect = new Map(INDIRECT_SCOPE.map((link) => [link.table, link]));
+	const names = new Set(tables.map((table) => table.name));
+	for (const table of [...direct.keys(), ...indirect.keys(), ...SUBJECT_SCOPE_UNATTRIBUTABLE, ...INSTANCE_TABLES]) assert.ok(names.has(table), `${table} is in the scope but not in the schema`);
+	assert.equal(new Set([...direct.keys(), ...indirect.keys()]).size, direct.size + indirect.size, "no table is listed twice");
+
+	for (const table of tables) {
+		if (table.name === "users") continue;
+		const classified = direct.has(table.name) || indirect.has(table.name) || SUBJECT_SCOPE_UNATTRIBUTABLE.includes(table.name) || INSTANCE_TABLES.includes(table.name);
+		assert.ok(classified, `${table.name} is a new table: say whose data it holds in subject-scope.ts`);
+		const scope = direct.get(table.name);
+		const columns = new Set(table.columns.map((column) => column.name));
+		for (const column of [...(scope?.userColumns ?? []), ...(scope?.referenceColumns ?? []), ...(scope?.mailboxColumn ? [scope.mailboxColumn] : [])]) assert.ok(columns.has(column), `${table.name}.${column} does not exist`);
+		for (const key of table.foreignKeys) {
+			const reference = key.reference();
+			const target = getTableConfig(reference.foreignTable).name;
+			const column = reference.columns[0].name;
+			if (target === "users") {
+				const owning = scope?.userColumns?.includes(column);
+				assert.ok(owning || scope?.referenceColumns?.includes(column), `${table.name}.${column} names a user and is not in the scope`);
+				// A row the database would delete with the user is the user's; never a mere mention.
+				if (key.onDelete === "cascade") assert.ok(owning, `${table.name}.${column} cascades with the user, so its rows are the subject's`);
+			}
+			if (target === "mailboxes") assert.equal(scope?.mailboxColumn, column, `${table.name}.${column} names a mailbox and is not in the scope`);
+			if (indirect.has(table.name) && column === indirect.get(table.name)!.column) assert.equal(target, indirect.get(table.name)!.parent);
+		}
+	}
+
+	// Every column that holds an object key is either a person's bytes or the instance's.
+	const keys = [...SUBJECT_OBJECT_KEYS, ...INSTANCE_OBJECT_KEYS].map((ref) => `${ref.table}.${ref.column}`);
+	for (const table of tables) for (const column of table.columns) if (/(^|_)r2_key$|avatar_key$|icon_key$/.test(column.name)) assert.ok(keys.includes(`${table.name}.${column.name}`), `${table.name}.${column.name} holds an object and is not listed`);
+	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(isSubjectScoped(ref.table) || ref.table === "users");
+});
+
+test("the subject index: one predicate for the report and the erasure, children before parents", () => {
+	const quote = (value: string) => `'${value}'`;
+	assert.equal(subjectPredicate("messages", "u1", ["m1"], quote), "user_id='u1' OR mailbox_id IN ('m1')");
+	assert.equal(subjectPredicate("shared_attachment_links", "u1", [], quote), `attachment_id IN (SELECT id FROM "message_attachments" WHERE message_id IN (SELECT id FROM "messages" WHERE user_id='u1'))`);
+	assert.equal(subjectPredicate("backups", "u1", ["m1"], quote), null, "a row that only mentions the subject is not theirs to erase");
+	assert.equal(subjectPredicate("app_settings", "u1", [], quote), null);
+	assert.ok(depthOf("shared_attachment_links") > depthOf("message_attachments") && depthOf("message_attachments") > depthOf("messages"));
+
+	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], blockers: [], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }, { table: "ai_usage", rows: -1 }] };
+	assert.equal(subjectTotal(report), 14, "unknown rows are never summed as data");
+	assert.deepEqual(subjectLines(report), ["      12  messages", "       2  sessions"]);
+	assert.deepEqual(subjectUnknown(report), ["ai_usage"]);
+});
+
+test("the mirrors of things src/ does not export still match it", () => {
+	const auth = readFileSync("src/lib/mcp/auth.ts", "utf8");
+	const scopes = auth.match(/const MCP_SCOPES = new Set\(\[([^\]]+)\]\)/)?.[1].match(/"[^"]+"/g)?.map((scope) => scope.slice(1, -1));
+	assert.deepEqual([...MCP_SCOPES].sort(), [...(scopes ?? [])].sort(), "MCP_SCOPES has moved in src/lib/mcp/auth.ts");
+	assert.deepEqual([...BACKUP_GROUPS].sort(), BACKUP_TABLE_GROUPS.map((group) => group.id).sort());
+
+	// A wipe empties every table, so it must put back exactly what the migrations seed.
+	const seeded = readdirSync("drizzle/migrations").filter((file) => file.endsWith(".sql")).flatMap((file) => [...readFileSync(`drizzle/migrations/${file}`, "utf8").matchAll(/^INSERT INTO `(\w+)`/gm)].map((match) => match[1])).filter((table) => !table.endsWith("_fts"));
+	assert.deepEqual(SEED_ROWS.map((row) => row.match(/INSERT INTO (\w+)/)?.[1]).sort(), [...new Set(seeded)].sort(), "a migration seeds a row that a reset does not restore");
+});
+
+test("every source change, needed or made, still matches the code it names", () => {
+	assert.ok(SOURCE_CHANGES.length > 0 && SOURCE_CHANGES_MADE.length > 0);
+	for (const change of [...SOURCE_CHANGES, ...SOURCE_CHANGES_MADE]) {
+		assert.ok(/^(src\/|worker\.ts|vite\.config\.ts)/.test(change.where), `${change.where} must name the application`);
+		assert.ok(change.why.length > 20, `${change.need}: the reason must be usable`);
+		for (const anchor of change.anchors ?? []) {
+			const text = readFileSync(anchor.file, "utf8");
+			const where = anchor.line ? text.split("\n")[anchor.line - 1] ?? "" : text;
+			assert.ok(where.includes(anchor.says), `${anchor.file}${anchor.line ? `:${anchor.line}` : ""} no longer says "${anchor.says}" — the code moved, or a change the fleet needs was reverted`);
+		}
+	}
+});
+
+test("wrangler.jsonc is read as JSONC", () => {
 	const config = JSON.parse(stripJsonc(`{
 		// the top-level server
-		"name": "mailflare",
-		"env": { "eu1": { "name": "mailflare-eu1", "d1_databases": [{ "database_name": "mailflare-eu1" },], }, },
+		"name": "mailflare", /* inline */ "url": "https://example.com/a//b", // trailing
+		"d1_databases": [{ "database_name": "mailflare" },],
 	}`));
-	assert.equal(config.name, "mailflare", "comments and trailing commas survive");
-	assert.equal(envBlockFor(config, "eu1")?.databaseName, "mailflare-eu1");
-	assert.equal(envBlockFor(config, "nope"), null, "an undeclared server is refused, not guessed");
-});
-
-
-test("a project is the instance document, then its tenants", () => {
-	// The unit a user runs: --project <name> applies the server's facts first, then every
-	// tenant in the folder, under one key.
-	const entries = loadProject("mailflare");
-	assert.ok(entries.length >= 3, "instance + tenants");
-	assert.equal(entries[0].name, "instance:mailflare", "the instance document comes first");
-	assert.ok(entries.slice(1).every((entry) => entry.name.startsWith("mailflare/")), "then its tenants");
-	assert.ok(!entries.some((entry) => entry.name.includes("example")), "templates are skipped");
-	assert.throws(() => loadProject("nope"), /no project/);
-});
-
-test("a document is validated before anything reads it", () => {
-	// The alignment that matters: the JSON and the code cannot drift, because the JSON is
-	// checked against the model. A typo fails at plan with the field path, not silently.
-	assert.deepEqual(validateSpec({ domain: "a.test", mailboxes: [{ role: "office" }] }), [], "a good document passes");
-
-	const problems = validateSpec({
-		domain: "a.test",
-		mailboxs: [],
-		mailboxes: [{ role: "office", shared: "yes", access: [{ email: "outside@elsewhere.test", permission: "fullaccess" }] }],
-	});
-	assert.ok(problems.some((p) => p.includes("mailboxs: unknown section")), "a typo'd section is caught");
-	assert.ok(problems.some((p) => p.includes("shared")), "a wrong type is caught");
-	assert.ok(problems.some((p) => p.includes("permission")), "a bad enum is caught");
-
-	assert.deepEqual(validateSpec({ specs: [{ domain: "a.test" }] }), [], "a multi-document file validates each entry");
-});
-
-test("an unresolvable grant is reported as a problem, not a create", async () => {
-	// This is the ubuntusoftware.net bug: a grant naming an outside address. It used to look
-	// like work to do and then fail on apply; now the plan says so.
-	const { store } = fakeStore({
-		domains: [{ id: "d1", hostname: "dev.example" }],
-		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "support", hostname: "dev.example", type: "shared" }],
-	});
-	const grant = { email: "outside@elsewhere.test", permission: "full_access" as const };
-	const project = projectFor("dev.example", { mailboxes: [{ role: "support", shared: true, access: [grant] }] });
-	assert.equal(await runOn(store, flags({status: true}), project, roles({ role: "support", access: [grant] })), 1, "the plan reports work to do");
+	assert.equal(config.url, "https://example.com/a//b", "a // inside a string is not a comment");
+	assert.equal(config.d1_databases[0].database_name, "mailflare", "trailing commas are dropped");
 });

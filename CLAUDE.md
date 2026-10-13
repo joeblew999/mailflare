@@ -77,7 +77,9 @@ Both queries filter on `scope`, so any new rule must set it explicitly. `forward
 
 Domain and mailbox management call the Cloudflare API at runtime (`src/lib/cloudflare-api.ts`, `src/lib/domains/`). Adding a domain enables Email Routing DNS and sending subdomains on the zone; creating a mailbox creates a Cloudflare Email Routing rule targeting `CF_EMAIL_WORKER_NAME`; removing a domain cleans those up (`src/lib/domains/cloudflare-cleanup.ts`).
 
-Consequence: `CF_EMAIL_WORKER_NAME`, the deployed Worker `name`, and `services[].service` for `WORKER_SELF_REFERENCE` in `wrangler.jsonc` must all agree. Cloudflare service bindings need a literal name and cannot reference the top-level `name`.
+Consequence: the name Email Routing rules deliver to (`getEmailWorkerName()`: `MAILFLARE_WORKER_NAME`, else `"mailflare"`), the deployed Worker `name`, and `services[].service` for `WORKER_SELF_REFERENCE` must all agree. Cloudflare service bindings need a literal name and cannot reference the top-level `name`.
+
+`wrangler.jsonc` is the default server and the template for every other. `scripts/state` (see its README) builds each further server from a generated `wrangler.<name>.json` — its own database, bucket and queues, plus `MAILFLARE_WORKER_NAME` and, for a server pinned to a jurisdiction, `MAILFLARE_JURISDICTION`, which `realtimeNamespace()` uses to pin the Durable Objects. The build reads that file through `MAILFLARE_WRANGLER_CONFIG` (`vite.config.ts`).
 
 Auth is `CF_TOKEN` (preferred) or the legacy `CF_EMAIL` + `CF_API_KEY` pair.
 

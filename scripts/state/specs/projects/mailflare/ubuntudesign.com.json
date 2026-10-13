@@ -1,9 +1,13 @@
 {
   "domain": "ubuntudesign.com",
+  "onboard": {
+    "enableRouting": true
+  },
   "mailboxes": [
     {
       "role": "office",
-      "displayName": "Office"
+      "displayName": "Office",
+      "signature": "<p>Ubuntu Design</p>"
     },
     {
       "role": "admin",
@@ -18,6 +22,12 @@
           "email": "gerard@ubuntudesign.com",
           "permission": "full_access"
         }
+      ],
+      "folders": [
+        {
+          "name": "Projects",
+          "color": "#7c3aed"
+        }
       ]
     },
     {
@@ -31,7 +41,9 @@
       "username": "gerard",
       "name": "Gerard",
       "role": "admin",
-      "passwordEnv": "MAILFLARE_PROV_PASSWORD"
+      "mailbox": {
+        "signature": "Gerard, Ubuntu Design"
+      }
     }
   ]
 }

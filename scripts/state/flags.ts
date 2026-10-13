@@ -1,12 +1,17 @@
-// What the command line asked for. Deliberately flat and primitive: each flag is
+// How to run, never what to build. The verb sets the first three; they combine: a destroy or
+// reset that was not confirmed is `status` as well, and reports instead of writing.
 export type Flags = {
-	/** Which verb was asked for. */
+	/** Report only: nothing is written. */
 	status: boolean;
+	/** Walk in reverse, removing. */
 	cleanup: boolean;
+	/** Wipe the instance before anything else. */
 	fresh: boolean;
 	/** Destructive actions need approval, as in terraform. */
 	confirmMx: boolean;
 	confirmDestroy: boolean;
+	/** Give every declared account a new password and every declared key a new secret, and record them. */
+	rotatePasswords: boolean;
 	/** Which instance to act on. */
 	url?: string;
 	db: string;

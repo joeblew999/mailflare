@@ -50,6 +50,10 @@ interface CloudflareEnv {
 	INBOUND_WEBHOOK_SECRET?: string;
 	/** Cloudflare account id, needed for the Email Sending REST API off Workers. */
 	CF_ACCOUNT_ID?: string;
+	/** This Worker's own name, when it is not "mailflare": Email Routing rules deliver to it. Set per server by scripts/state. */
+	MAILFLARE_WORKER_NAME?: string;
+	/** The jurisdiction ("eu", "fedramp") this server's Durable Objects are pinned to. Set per server by scripts/state. */
+	MAILFLARE_JURISDICTION?: string;
 	/** Public origin of this install (https://mail.example.com) when it sits behind a proxy. */
 	APP_URL?: string;
 	/** VAPID public key (uncompressed P-256 point, URL-safe base64) for Web Push. */

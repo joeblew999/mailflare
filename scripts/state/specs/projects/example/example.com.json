@@ -1,28 +1,22 @@
 {
   "domain": "example.com",
+  "country": "de",
   "onboard": {
     "enableRouting": true,
+    "enableSending": true,
+    "sendingProvider": "cloudflare",
+    "receivingProvider": "cloudflare",
     "replaceMxRecords": false
   },
   "mailboxes": [
     {
       "role": "office",
-      "displayName": "Office"
+      "displayName": "Office",
+      "signature": "<p>Large Ltd</p>"
     },
     {
       "role": "admin",
       "displayName": "Admin"
-    },
-    {
-      "role": "events",
-      "displayName": "Events",
-      "shared": true,
-      "access": [
-        {
-          "email": "sam@example.com",
-          "permission": "full_access"
-        }
-      ]
     },
     {
       "role": "support",
@@ -31,9 +25,74 @@
       "access": [
         {
           "email": "sam@example.com",
+          "permission": "full_access"
+        },
+        {
+          "email": "alex@example.com",
           "permission": "read_only"
         }
+      ],
+      "signature": "<p>Large Support</p>",
+      "autoReply": {
+        "enabled": true,
+        "subject": "We have your message",
+        "body": "Thanks - we reply within a day."
+      },
+      "aliases": [
+        "help",
+        "service"
+      ],
+      "folders": [
+        {
+          "name": "Bugs",
+          "color": "#dc2626"
+        },
+        {
+          "name": "Invoices",
+          "color": "#2563eb"
+        }
+      ],
+      "rules": [
+        {
+          "field": "title",
+          "value": "invoice",
+          "folder": "Invoices",
+          "priority": 10
+        },
+        {
+          "field": "title",
+          "operator": "contains",
+          "value": "bug",
+          "folder": "Bugs"
+        },
+        {
+          "value": "noreply@spam.example",
+          "action": "spam"
+        }
+      ],
+      "assistant": {
+        "enabled": true,
+        "autoDraft": false,
+        "instructions": "Be brief and kind.",
+        "dailyLimit": 25,
+        "reviewer": "sam@example.com"
+      }
+    },
+    {
+      "role": "billing",
+      "displayName": "Billing",
+      "shared": true,
+      "access": [
+        {
+          "email": "alex@example.com",
+          "permission": "send_as"
+        }
       ]
+    },
+    {
+      "role": "events",
+      "displayName": "Events",
+      "shared": true
     }
   ],
   "accounts": [
@@ -41,14 +100,127 @@
       "username": "sam",
       "name": "Sam",
       "role": "user",
-      "passwordEnv": "PROV_PASSWORD"
+      "resetEmail": "sam@elsewhere.example",
+      "canManageMailboxes": true,
+      "preferences": {
+        "timeZone": "Europe/Berlin",
+        "keyboardShortcuts": false,
+        "spamProtection": true,
+        "trashRetentionDays": 30,
+        "showFullRecipientAddresses": true
+      },
+      "mailbox": {
+        "signature": "Sam, Large Ltd",
+        "folders": [
+          {
+            "name": "Receipts"
+          },
+          {
+            "name": "Travel",
+            "color": "#16a34a"
+          }
+        ],
+        "rules": [
+          {
+            "field": "title",
+            "value": "receipt",
+            "folder": "Receipts"
+          },
+          {
+            "value": "junk@spam.example",
+            "action": "trash"
+          }
+        ]
+      },
+      "templates": [
+        {
+          "name": "Welcome",
+          "body": "Hello, and welcome aboard."
+        },
+        {
+          "name": "Follow up",
+          "body": "Just checking in on this.",
+          "html": "<p>Just checking in on this.</p>"
+        }
+      ],
+      "contacts": [
+        {
+          "email": "ops@partner.example",
+          "name": "Ops"
+        },
+        {
+          "email": "pest@spam.example",
+          "name": "Pest",
+          "blocked": true
+        }
+      ],
+      "calendar": {
+        "bookingUsername": "sam",
+        "bookingPages": [
+          {
+            "name": "Intro call",
+            "slug": "intro",
+            "description": "A first conversation.",
+            "durationMinutes": 30,
+            "location": "Video",
+            "weekdays": [
+              1,
+              2,
+              3,
+              4
+            ],
+            "startTime": "09:00",
+            "endTime": "17:00",
+            "timeZone": "Europe/Berlin"
+          }
+        ],
+        "events": [
+          {
+            "title": "Standup",
+            "startsAt": "2026-11-02T09:00:00Z",
+            "endsAt": "2026-11-02T09:15:00Z",
+            "repeat": "weekdays",
+            "location": "Video"
+          }
+        ]
+      },
+      "drive": {
+        "folders": [
+          "Contracts/2026",
+          "Scans"
+        ]
+      },
+      "apiKeys": [
+        {
+          "name": "ci",
+          "scopes": [
+            "send",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "username": "alex",
+      "name": "Alex",
+      "role": "admin",
+      "preferences": {
+        "timeZone": "America/New_York"
+      },
+      "mailbox": {
+        "autoReply": {
+          "enabled": false,
+          "subject": "Away",
+          "body": "Back on Monday."
+        }
+      }
     }
   ],
   "routing": [
     {
       "pattern": "*",
       "action": "forward",
-      "forwardTo": "gerard.webb@ubuntudesign.com",
+      "forwardTo": "ops@example.com",
       "keepCopy": true,
       "mailbox": "support"
     },
@@ -56,21 +228,36 @@
       "pattern": "no-reply",
       "action": "reject",
       "rejectReason": "No such user"
+    },
+    {
+      "pattern": "archive",
+      "action": "store",
+      "mailbox": "office",
+      "priority": 10
     }
   ],
   "mcpKeys": [
     {
-      "name": "agent",
+      "name": "example-agent",
       "mailboxes": [
+        "support",
         "office"
       ],
       "scopes": [
         "mcp:read",
-        "mcp:draft"
+        "mcp:draft",
+        "mcp:request-send"
+      ]
+    },
+    {
+      "name": "example-reader",
+      "scopes": [
+        "mcp:read"
       ]
     }
   ],
-  "push": {
-    "to": "you@example.com"
+  "teardown": {
+    "accounts": "disable",
+    "domain": "remove"
   }
 }

@@ -5,6 +5,12 @@ import { isTeamMailboxSharingEnabled } from "@/lib/mailboxes/access-utils";
 import type { NewMessageNotification, AgentDraftNotification } from "./types";
 import { sendPushNotifications } from "@/lib/push/server";
 
+/** The realtime namespace, pinned to the server's jurisdiction when it declares one (MAILFLARE_JURISDICTION). */
+export function realtimeNamespace(env: CloudflareEnv) {
+	const jurisdiction = env.MAILFLARE_JURISDICTION?.trim();
+	return jurisdiction ? env.REALTIME.jurisdiction(jurisdiction as DurableObjectJurisdiction) : env.REALTIME;
+}
+
 export function getSessionTokenFromRequest(request: Request): string | undefined {
 	const cookie = request.headers.get("Cookie");
 	if (!cookie) return undefined;
@@ -58,7 +64,7 @@ export async function notifyUsersOfNewMessage(
 	if (!env.REALTIME) return;
 	await Promise.allSettled([
 		...userIds.map((userId) => {
-			const hub = env.REALTIME.getByName(userId);
+			const hub = realtimeNamespace(env).getByName(userId);
 			return hub.fetch("https://mailflare-realtime/notify", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },

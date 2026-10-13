@@ -1,41 +1,53 @@
-// App-coupled helpers for scripts run under `tsx` (so they resolve `@/` paths).
-import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
-import { makeLiveStore } from "./store/live";
+// App-coupled helpers: the app's own request schemas, and opening the live Store.
+import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateMailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
+import { makeLiveStore, type Instance } from "./store/live";
 import type { Store } from "./store/types";
 
 // The app's own request schemas, keyed by what we send.
 const REQUEST_SCHEMAS = {
 	domain: addDomainSchema,
 	mailbox: mailboxSchema,
+	mailboxUpdate: updateMailboxSchema,
 	account: createUserAccountSchema,
 	accountUpdate: updateManagedAccountSchema,
 };
 
-export function validateBody(kind: string, body: unknown) {
-	const schema = REQUEST_SCHEMAS[kind as keyof typeof REQUEST_SCHEMAS];
-	if (!schema) throw new Error(`no schema registered for "${kind}"`);
-	const parsed = schema.safeParse(body);
-	if (!parsed.success) {
-		throw new Error(`the app's ${kind} schema rejected this body: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
+/** Check a body against the schema the app will apply, so a bad one fails here with a reason. */
+export function validateBody<T>(kind: keyof typeof REQUEST_SCHEMAS, body: T): T {
+	const parsed = REQUEST_SCHEMAS[kind].safeParse(body);
+	if (!parsed.success) throw new Error(`the app's ${kind} schema rejected this: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
+	// The body as written, not as parsed: the schemas' transforms turn omissions into nulls
+	// that the app's own parse then refuses.
+	return body;
+}
+
+export type OpenStore = <T>(instance: Instance, fn: (store: Store) => Promise<T>) => Promise<T>;
+
+// Stores holding a temporary admin key. An interrupted run still removes its key.
+const open = new Set<Store>();
+let hooked = false;
+function disposeOnSignal() {
+	if (hooked) return;
+	hooked = true;
+	for (const signal of ["SIGINT", "SIGTERM"] as const) {
+		process.once(signal, () => {
+			void Promise.allSettled([...open].map((store) => store.dispose())).then(() => process.exit(130));
+		});
 	}
-	return parsed.data;
 }
 
 /**
- * Run `fn` against the live Store and always dispose it. The store resolves the
- * instance URL and mints its temporary admin key lazily, on the first HTTP call, so
- * a run that only touches global data (license, web push) needs neither Cloudflare
- * credentials nor an instance URL. ONE key covers the whole run, which is what lets
- * a mass run touch thousands of domains without thousands of key round-trips.
+ * Run `fn` against a live Store and always dispose it. ONE temporary admin key covers the whole
+ * run, minted on the first HTTP call - so a run that only touches instance data needs no origin.
  */
-export async function withStore(
-	{ db, local, url, name = "state" }: { db?: string; local?: boolean; url?: string; name?: string },
-	fn: (store: Store) => Promise<number>,
-): Promise<number> {
-	const store = makeLiveStore({ db, local, url, name });
+export const withStore: OpenStore = async (instance, fn) => {
+	disposeOnSignal();
+	const store = makeLiveStore(instance);
+	open.add(store);
 	try {
 		return await fn(store);
 	} finally {
-		store.dispose();
+		open.delete(store);
+		await store.dispose().catch((error) => console.warn(`  ⚠ could not remove the temporary admin key: ${error instanceof Error ? error.message : error}`));
 	}
-}
+};

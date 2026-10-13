@@ -1,0 +1,6 @@
+{
+  "license": { "plan": "team" },
+  "settings": { "appName": "Mailflare EU", "outboundAttachmentMaxMb": 25 },
+  "backups": { "enabled": true, "schedule": "daily", "retentionDays": 30 },
+  "fresh": { "admin": { "email": "admin@ubuntusoftware.net" } }
+}
