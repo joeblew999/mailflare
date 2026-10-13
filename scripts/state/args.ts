@@ -9,8 +9,9 @@ export function parseCli() {
 			spec: { type: "string" },
 			instance: { type: "string" },
 			project: { type: "string" },
-			// Set from the positional target, not typed by the user.
+			// Set from the positionals, not typed by the user.
 			target: { type: "string" },
+			verb: { type: "string" },
 			"data-subject": { type: "string" },
 			erase: { type: "boolean", default: false },
 			"source-changes": { type: "boolean", default: false },
@@ -106,6 +107,7 @@ export function parseCli() {
 		target = undefined;
 	}
 	values.target = target;
+	values.verb = verb;
 
 	return { values, flags };
 }

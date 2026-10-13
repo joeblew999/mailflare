@@ -37,6 +37,10 @@ if (values.target) {
 		values.dir = target;
 		values.all = true;
 	} else values.project = target;
+} else if (values.verb === "plan" || values.verb === "apply" || values.verb === "destroy") {
+	// A verb with no target means the whole config root, like terraform run with no -chdir.
+	// Not for reset: wiping every project because a target was forgotten is not a good default.
+	values.all = true;
 }
 if (values.help) {
 	usage();
