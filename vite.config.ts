@@ -12,8 +12,6 @@ export default defineConfig({
 	plugins: [
 		vinext({ images: { optimizer: imagesOptimizer() } }),
 		cloudflare({
-			// scripts/state builds each server of the fleet from its own generated config.
-			...(process.env.MAILFLARE_WRANGLER_CONFIG ? { configPath: process.env.MAILFLARE_WRANGLER_CONFIG } : {}),
 			remoteBindings: process.env.CLOUDFLARE_REMOTE_BINDINGS === "true",
 			viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
 		}),

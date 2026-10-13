@@ -30,6 +30,8 @@ export type Command =
 	| { kind: "logins"; project?: string }
 	/** Pull Cloudflare's list of data centers again: which country each airport code is in. */
 	| { kind: "colos" }
+	/** Keep every server answering from its country: ask each, and move any that is not. For a schedule. */
+	| { kind: "place"; target: Target }
 	/** The fleet's front door, which sends each person to the server their domain lives on. */
 	| { kind: "router"; verb: "plan" | "apply" | "destroy" }
 	| { kind: "run"; verb: Verb; target: Target };
@@ -142,6 +144,11 @@ export function parseCli(argv: string[] = process.argv.slice(2)): Cli {
 		if (positionals.length > 2) throw new UsageError(`unexpected "${third}"`);
 		return cli({ kind: "logins", project: first === "logins" ? second : first });
 	}
+	if (first === "place" || second === "place") {
+		if (positionals.length > 2) throw new UsageError(`unexpected "${third}"`);
+		const word = first === "place" ? second : first;
+		return cli({ kind: "place", target: word ? targetOf(word) : { kind: "all" } });
+	}
 	if (first === "colos") {
 		if (positionals.length > 1) throw new UsageError(`unexpected "${second}"`);
 		return cli({ kind: "colos" });
@@ -195,6 +202,7 @@ out is not managed.
   npm run state -- verify                       the live fleet, read-only: logins, jurisdictions, the front door
   npm run state -- conform                      does it all still work? on real, disposable servers (--quick: no rebuild)
   npm run state -- deploy                       roll the current code out to every server (or: <project> deploy)
+  npm run state -- place                        keep every server answering from its country; moves one that is not (seconds)
   npm run state -- router apply                 the front door: each person to their home server
   npm run state -- logins                       every login on record, as JSON (or: <project> logins)
   npm run state -- colos                        pull Cloudflare's data-center list again (which country each is in)

@@ -123,7 +123,10 @@ function createInsertStatement(db: D1Database, table: DatabaseBackupTable, row: 
 	if (columns.length === 0) throw new Error(`Backup contains an invalid ${table} record`);
 	const placeholders = columns.map(() => "?").join(", ");
 	const identifiers = columns.map((column) => `\`${column.replaceAll("`", "``")}\``).join(", ");
-	return db.prepare(`INSERT INTO ${table} (${identifiers}) VALUES (${placeholders})`).bind(...columns.map((column) => row[column]));
+	// OR REPLACE: a restore is not one transaction, and a server that is being used re-creates
+	// rows the moment they are missing (the default licence row, on any page load). A plain
+	// INSERT then fails on that row and leaves the database half restored.
+	return db.prepare(`INSERT OR REPLACE INTO ${table} (${identifiers}) VALUES (${placeholders})`).bind(...columns.map((column) => row[column]));
 }
 
 /** Backups written before a table joined BACKUP_TABLES simply omit it. */

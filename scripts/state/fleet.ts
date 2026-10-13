@@ -1,12 +1,13 @@
 // Running MANY servers: each project against its own instance, with one shared limit on how
 // much is in flight. Everything outside is injected, so the whole thing runs in a unit test.
-import { deployServer, destroyServer, serverDrift } from "./deploy";
+import { deployServer, destroyServer, place, serverDrift, type Placed } from "./deploy";
 import { LOCAL_URL, type Cli } from "./args";
 import { limiter, runDocuments, type DocResult, type Limiter } from "./runner";
 import { deploymentFor, message, readWranglerConfig, warmUp, writeServerConfig, type Deployment, type WranglerConfig } from "./wrangler";
 import { withStore, type OpenStore } from "./app";
 import { fileVault, type Vault } from "./vault";
 import type { Project } from "./document";
+import type { Server } from "./spec";
 import type { Instance } from "./store/live";
 
 export type FleetDeps = {
@@ -19,6 +20,8 @@ export type FleetDeps = {
 	undeploy: typeof destroyServer;
 	/** How a deployed server differs from its document in what only a deploy can change. */
 	serverDrift: typeof serverDrift;
+	/** Is the server answering from its country? And, when asked to, move it until it is. */
+	place(server: Server, deployment: Deployment, origin: string, options: { fix: boolean }): Promise<Placed>;
 	/** Called once before a parallel run reaches for anything deployed. */
 	warmUp(): Promise<void>;
 	vault(project: string): Vault;
@@ -32,6 +35,7 @@ export const liveDeps = (credentials?: string): FleetDeps => ({
 	deploy: deployServer,
 	undeploy: destroyServer,
 	serverDrift,
+	place,
 	warmUp,
 	vault: (project) => fileVault(project, credentials),
 	print: console.log,
@@ -94,6 +98,13 @@ async function runProject(project: Project, run: Run, deps: FleetDeps, limit: Li
 			}
 		}
 		if (deployment) deps.writeConfig(template, deployment);
+		// Where it runs is checked as a fact, not as a setting: Cloudflare stops honouring a
+		// placement for a while now and then, and the server is moved to another name for its country.
+		if (server && deployment && instance.url && !instance.local && !flags.cleanup) {
+			const placed = await deps.place(server, deployment, instance.url, { fix: !flags.status });
+			if (placed.said) deps.print(`\n~ server ${server.name}: ${placed.said}`);
+			if (!placed.ok) differs = [differs, placed.said].filter(Boolean).join("; ");
+		}
 
 		const vault = deps.vault(server?.name ?? "documents");
 		if (instance.url) vault.at(instance.url);
@@ -112,8 +123,8 @@ async function runProject(project: Project, run: Run, deps: FleetDeps, limit: Li
 export async function reconcile(projects: Project[], run: Run, deps: FleetDeps = liveDeps()): Promise<ProjectResult[]> {
 	const { flags, concurrency } = run;
 	const limit = limiter(concurrency);
-	// Builds share one output folder, so servers deploy one at a time whatever the limit.
-	const building = limiter(1);
+	// One build is every server's (deploy.ts), so deploys are uploads and run side by side.
+	const building = limiter(concurrency);
 	const results: ProjectResult[] = [];
 	if (concurrency === 1) for (const project of projects) results.push(await runProject(project, run, deps, limit, building, false));
 	else if (projects.some((project) => !project.server?.local) && !flags.local) await deps.warmUp();

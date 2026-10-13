@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { placementOf } from "./spec";
+import { placementsOf } from "./spec";
 
 export const WRANGLER_CONFIG = "wrangler.jsonc";
 const WRANGLER = existsSync("node_modules/.bin/wrangler") ? ["node_modules/.bin/wrangler"] : ["npx", "wrangler"];
@@ -15,8 +15,38 @@ export const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done
 
 export type Ran = { status: number; stdout: string; stderr: string };
 
+// Where the time goes: with STATE_TRACE set, every command and request this system makes is
+// timed, each on a line of its own, with the totals by kind when the run ends.
+const TRACE = !!process.env.STATE_TRACE;
+const spent = new Map<string, { calls: number; ms: number }>();
+const started = Date.now();
+export async function timed<T>(kind: string, what: string, work: () => Promise<T>): Promise<T> {
+	if (!TRACE) return work();
+	const from = Date.now();
+	try {
+		return await work();
+	} finally {
+		const ms = Date.now() - from;
+		const total = spent.get(kind) ?? { calls: 0, ms: 0 };
+		spent.set(kind, { calls: total.calls + 1, ms: total.ms + ms });
+		process.stderr.write(`  ⏱ ${(ms / 1000).toFixed(1).padStart(6)}s  ${kind}  ${what.replace(/\s+/g, " ").slice(0, 110)}\n`);
+	}
+}
+if (TRACE) {
+	process.on("exit", () => {
+		process.stderr.write(`\n  ⏱ where ${((Date.now() - started) / 1000).toFixed(1)}s went (commands that ran at once are each counted in full):\n`);
+		for (const [kind, total] of [...spent].sort((a, b) => b[1].ms - a[1].ms)) process.stderr.write(`  ⏱ ${(total.ms / 1000).toFixed(1).padStart(6)}s  ${String(total.calls).padStart(4)} × ${kind}\n`);
+	});
+}
+/** What kind of work a wrangler command is, for the totals. */
+const kindOf = (command: string, args: string[]) => (command.includes("wrangler") || args[0] === "wrangler" ? `wrangler ${args.filter((arg) => arg !== "wrangler" && !arg.startsWith("-")).slice(0, 2).join(" ")}` : `${command} ${args.slice(0, 2).join(" ")}`);
+
 /** Run a command to completion. `inherit` streams its output, for the long ones; `input` goes to its stdin. */
-export function run(command: string, args: string[], { env, inherit = false, input }: { env?: Record<string, string>; inherit?: boolean; input?: string } = {}): Promise<Ran> {
+export function run(command: string, args: string[], options: { env?: Record<string, string>; inherit?: boolean; input?: string } = {}): Promise<Ran> {
+	return timed(kindOf(command, args), args.filter((arg) => arg !== "wrangler").join(" "), () => spawned(command, args, options));
+}
+
+function spawned(command: string, args: string[], { env, inherit = false, input }: { env?: Record<string, string>; inherit?: boolean; input?: string }): Promise<Ran> {
 	return new Promise((done) => {
 		const child = spawn(command, args, { env: env ? { ...process.env, ...env } : process.env, stdio: inherit ? "inherit" : [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
 		let stdout = "";
@@ -88,6 +118,8 @@ export type Deployment = {
 	jurisdiction?: string;
 	/** The cloud region its Worker runs beside. */
 	placement?: string;
+	/** Every cloud region that names where it runs: where it is moved when one is not honoured. */
+	placements: string[];
 };
 
 /** The parts of a server.json that decide its deployment. */
@@ -101,7 +133,7 @@ export function deploymentFor(template: WranglerConfig, server: ServerShape): De
 	const base = template.name ?? "mailflare";
 	const queues = (template.queues?.producers ?? []).map((producer) => String(producer.queue));
 	if (server.name === base) {
-		return { config: WRANGLER_CONFIG, generated: false, worker: base, database: template.d1_databases?.[0]?.database_name ?? base, databaseId: template.d1_databases?.[0]?.database_id, bucket: template.r2_buckets?.[0]?.bucket_name ?? `${base}-raw`, queues, jurisdiction: template.r2_buckets?.[0]?.jurisdiction };
+		return { config: WRANGLER_CONFIG, generated: false, worker: base, database: template.d1_databases?.[0]?.database_name ?? base, databaseId: template.d1_databases?.[0]?.database_id, bucket: template.r2_buckets?.[0]?.bucket_name ?? `${base}-raw`, queues, jurisdiction: template.r2_buckets?.[0]?.jurisdiction, placements: [] };
 	}
 	return {
 		config: `wrangler.${server.name}.json`,
@@ -112,7 +144,8 @@ export function deploymentFor(template: WranglerConfig, server: ServerShape): De
 		bucket: server.bucket ?? `${server.name}-raw`,
 		queues: queues.map((queue) => queue.replace(base, server.name)),
 		jurisdiction: server.jurisdiction,
-		placement: placementOf(server),
+		placement: placementsOf(server)[0],
+		placements: placementsOf(server),
 	};
 }
 
@@ -138,9 +171,28 @@ export function serverConfig(template: WranglerConfig, deployment: Deployment): 
 	return config;
 }
 
-/** Write a generated server's config where wrangler and the build will read it. */
+/** Write a generated server's config where wrangler will read it. */
 export function writeServerConfig(template: WranglerConfig, deployment: Deployment): void {
 	if (deployment.generated) writeFileSync(deployment.config, `${JSON.stringify(serverConfig(template, deployment), null, "\t")}\n`);
+}
+
+/** What the build leaves for wrangler to deploy: the code, and the config of the default server. */
+export const BUILT_CONFIG = "dist/server/wrangler.json";
+
+/**
+ * The config ONE server is deployed with, from a build that is every server's: nothing the
+ * build writes names a server but this file, so it is rewritten beside itself for each.
+ */
+export function writeBuiltConfig(deployment: Deployment): string {
+	if (!deployment.generated) return BUILT_CONFIG;
+	const built = readWranglerConfig(BUILT_CONFIG);
+	const config = serverConfig(built, deployment);
+	// Where the build was told to read its config from: the default server's, which this is not.
+	for (const key of ["configPath", "userConfigPath"]) delete config[key];
+	if ("topLevelName" in config) config.topLevelName = deployment.worker;
+	const path = BUILT_CONFIG.replace(/wrangler\.json$/, `wrangler.${deployment.worker}.json`);
+	writeFileSync(path, `${JSON.stringify(config)}\n`);
+	return path;
 }
 
 // --- D1 -----------------------------------------------------------------------------
@@ -169,8 +221,56 @@ const RETRY_AFTER = [1500, 4000, 9000];
 // The local database is one SQLite file, so its statements go one at a time.
 let localQueue: Promise<unknown> = Promise.resolve();
 
+/** A deployed database's id, from the config that binds it. Null when it is not written there yet. */
+function databaseIdOf({ db, config = WRANGLER_CONFIG }: Database): string | null {
+	try {
+		const id = readWranglerConfig(config).d1_databases?.find((database) => database.database_name === db)?.database_id;
+		return id && /^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(id) ? id : null;
+	} catch {
+		return null;
+	}
+}
+
+// A statement sent straight to Cloudflare's API takes a third of a second; one sent by
+// starting wrangler takes a whole one. A few at once, so a parallel run stays under the
+// API's rate limit.
+let queries = 0;
+let apiRefused = false;
+const queryWaiting: Array<() => void> = [];
+async function d1Api(sql: string, db: string, id: string, token: string, account: string): Promise<Row[]> {
+	if (queries >= 6) await new Promise<void>((go) => queryWaiting.push(go));
+	else queries += 1;
+	try {
+		for (let attempt = 0; ; attempt += 1) {
+			const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${id}/query`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ sql }), signal: AbortSignal.timeout(120_000) }).catch((error: unknown) => message(error));
+			const answer = typeof response === "string" ? null : ((await response.json().catch(() => null)) as { success?: boolean; result?: Array<{ results?: Row[] }>; errors?: Array<{ message?: string }> } | null);
+			if (typeof response !== "string" && response.ok && answer?.success) return answer.result?.[0]?.results ?? [];
+			const reason = typeof response === "string" ? response : (answer?.errors ?? []).map((error) => error.message).filter(Boolean).join("; ") || `HTTP ${response.status}`;
+			const again = typeof response === "string" || response.status === 429 || response.status >= 500 || TRANSIENT.test(reason);
+			if (!again || attempt >= RETRY_AFTER.length) throw new Error(`database ${db}: ${reason}`);
+			await sleep(RETRY_AFTER[attempt]);
+		}
+	} finally {
+		const next = queryWaiting.shift();
+		if (next) next();
+		else queries -= 1;
+	}
+}
+
 /** Run SQL (one statement, or several as one batch) and return the first statement's rows. */
 export async function d1(sql: string, { db, local, config }: Database): Promise<Row[]> {
+	const token = local ? null : credential("CLOUDFLARE_API_TOKEN");
+	const account = local ? null : credential("CLOUDFLARE_ACCOUNT_ID");
+	const id = token && account && !apiRefused ? databaseIdOf({ db, local, config }) : null;
+	if (token && account && id) {
+		try {
+			return await timed("d1 over the api", sql, () => d1Api(sql, db, id, token, account));
+		} catch (error) {
+			// A token that may not touch D1 is not a failed statement: wrangler's own login does it.
+			if (!/HTTP 40[13]|authentication|not authorized|permission/i.test(message(error))) throw error;
+			apiRefused = true;
+		}
+	}
 	const execute = async () => {
 		const args = ["d1", "execute", db, local ? "--local" : "--remote", "--json", "--command", sql];
 		let result = await wrangler(args, { config });
@@ -194,8 +294,12 @@ export async function d1(sql: string, { db, local, config }: Database): Promise<
  * each try to refresh it, and all but one would fail.
  */
 export async function warmUp(): Promise<void> {
+	// The login is good for an hour; asking before every step of a long run only costs time.
+	if (Date.now() - warmedAt < 15 * 60_000) return;
+	warmedAt = Date.now();
 	await wrangler(["whoami"]);
 }
+let warmedAt = 0;
 
 /** Bring a database up to the current schema. */
 export async function applyMigrations({ db, local, config }: Database): Promise<void> {
@@ -341,7 +445,7 @@ export function credential(name: string): string | null {
 
 /** Cloudflare API responses wrap their payload in { result }. Null when the call fails. */
 export async function cfApi<T>(path: string, token: string, init: RequestInit = {}): Promise<{ result?: T } | null> {
-	const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }).catch(() => null);
+	const response = await timed("cloudflare api", `${init.method ?? "GET"} ${path.replace(/^\/accounts\/[^/]+/, "")}`, () => fetch(`https://api.cloudflare.com/client/v4${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }).catch(() => null));
 	if (!response?.ok) return null;
 	return (await response.json().catch(() => null)) as { result?: T } | null;
 }
@@ -370,11 +474,11 @@ export type ApiResult = { status: number; text: string; json: any };
 export async function request(base: string, path: string, { method = "GET", key, body }: { method?: string; key?: string; body?: unknown } = {}): Promise<ApiResult> {
 	let response: Response;
 	try {
-		response = await fetch(`${base}${path}`, {
+		response = await timed("the app", `${method} ${path}`, () => fetch(`${base}${path}`, {
 			method,
 			headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
 			body: body ? JSON.stringify(body) : undefined,
-		});
+		}));
 	} catch (error) {
 		const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : message(error);
 		throw new Error(`could not reach ${base} (${cause})`);

@@ -2,8 +2,9 @@
 // jurisdiction it declares, its Worker, its secrets and its schema. Everything is idempotent,
 // so a deploy that stopped half way is finished by running it again.
 import { rmSync } from "node:fs";
+import { answeredFrom } from "./colos";
 import { saveServer, serverDocPath } from "./document";
-import { applyMigrations, cfApi, credential, resolveInstanceUrl, run, sleep, wrangler, writeServerConfig, type Deployment, type WranglerConfig } from "./wrangler";
+import { BUILT_CONFIG, applyMigrations, cfApi, credential, resolveInstanceUrl, run, sleep, timed, wrangler, writeBuiltConfig, writeServerConfig, type Deployment, type WranglerConfig } from "./wrangler";
 import type { Server } from "./spec";
 
 export type DeployOptions = { base: string; dryRun: boolean; print: (text: string) => void; template: WranglerConfig };
@@ -15,50 +16,162 @@ const secretValue = (name: string) => credential(name) ?? (name === "CF_TOKEN" ?
 /** The secrets a server is given. One that does not manage DNS is never given a Cloudflare token. */
 export const secretsFor = (server: Server) => SERVER_SECRETS.filter((name) => name !== "CF_TOKEN" || server.managesDns !== false);
 
-/** The steps that deploy a server, as text. The Vite plugin picks the config at BUILD time. */
+/** The steps that deploy a server, as text. The build is one for the whole run, whatever the number of servers. */
 export function deploySteps(server: Server, deployment: Deployment): string[] {
 	const where = server.jurisdiction ? ` in jurisdiction ${server.jurisdiction}` : server.region ? ` near ${server.region}` : "";
-	if (!deployment.generated) return ["npm run deploy", `apply the migrations to ${deployment.database}`];
+	const upload = `npx wrangler deploy --config ${BUILT_CONFIG.replace(/wrangler\.json$/, deployment.generated ? `wrangler.${deployment.worker}.json` : "wrangler.json")}`;
+	if (!deployment.generated) return ["npm run build", upload, `apply the migrations to ${deployment.database}`];
 	return [
 		`create the database ${deployment.database}${where}`,
 		`create the bucket ${deployment.bucket}${server.jurisdiction ? ` in jurisdiction ${server.jurisdiction}` : ""}`,
 		`create the queues ${deployment.queues.join(", ")}`,
-		`MAILFLARE_WRANGLER_CONFIG=${deployment.config} npm run build`,
-		"npm run deploy:worker",
+		"npm run build    (once, for every server in the run)",
+		`${upload}${deployment.placement ? `    placed beside ${deployment.placement}` : ""}`,
 		`put the secrets ${secretsFor(server).filter((name) => secretValue(name)).join(", ") || "(none found)"}${server.managesDns === false ? " — and no Cloudflare token" : ""}`,
 		`apply the migrations to ${deployment.database}`,
 	];
 }
 
 /** What Cloudflare says a deployed Worker is told and where it is placed. Null when it cannot be asked. */
-export async function workerSettings(worker: string): Promise<{ vars: Record<string, string | undefined>; secrets: string[]; placement: string | null; /** When it was last deployed, in ms. */ deployedAt: number | null } | null> {
+export async function workerSettings(worker: string): Promise<{ vars: Record<string, string | undefined>; secrets: string[]; placement: string | null } | null> {
 	const token = credential("CLOUDFLARE_API_TOKEN");
 	const account = credential("CLOUDFLARE_ACCOUNT_ID");
 	if (!token || !account) return null;
 	type Settings = { bindings?: Array<{ type: string; name: string; text?: string }> };
 	// The settings name a placement only by an id; the service says which region that id is.
-	type Service = { default_environment?: { script?: { modified_on?: string; placement?: { target?: Array<{ region?: string }> } } } };
+	type Service = { default_environment?: { script?: { placement?: { target?: Array<{ region?: string }> } } } };
 	const settings = (await cfApi<Settings>(`/accounts/${account}/workers/scripts/${worker}/settings`, token))?.result;
 	if (!settings) return null;
 	const service = (await cfApi<Service>(`/accounts/${account}/workers/services/${worker}`, token))?.result;
 	const bindings = settings.bindings ?? [];
-	return { vars: Object.fromEntries(bindings.filter((binding) => binding.type === "plain_text").map((binding) => [binding.name, binding.text])), secrets: bindings.filter((binding) => binding.type === "secret_text").map((binding) => binding.name), placement: service?.default_environment?.script?.placement?.target?.[0]?.region ?? null, deployedAt: service?.default_environment?.script?.modified_on ? new Date(service.default_environment.script.modified_on).getTime() : null };
+	return { vars: Object.fromEntries(bindings.filter((binding) => binding.type === "plain_text").map((binding) => [binding.name, binding.text])), secrets: bindings.filter((binding) => binding.type === "secret_text").map((binding) => binding.name), placement: service?.default_environment?.script?.placement?.target?.[0]?.region ?? null };
 }
 
 /**
- * How a deployed server differs from its document in what only a DEPLOY can change: where it
- * runs, and what it is told about itself. Empty when it matches, or when Cloudflare cannot be asked.
+ * Where Cloudflare says a database is kept. A failure to ask is an error, never "nowhere":
+ * reading an unanswered question as "not pinned" would fail a server that is where it should be.
+ */
+export async function databasePlace(deployment: Deployment): Promise<{ jurisdiction: string | null; region: string | null }> {
+	const token = credential("CLOUDFLARE_API_TOKEN");
+	const account = credential("CLOUDFLARE_ACCOUNT_ID");
+	if (token && account && deployment.databaseId) {
+		const info = (await cfApi<{ jurisdiction?: string | null; running_in_region?: string | null }>(`/accounts/${account}/d1/database/${deployment.databaseId}`, token))?.result;
+		if (info) return { jurisdiction: info.jurisdiction ?? null, region: info.running_in_region ?? null };
+	}
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		const said = await wrangler(["d1", "info", deployment.database], { config: deployment.config });
+		const field = (name: string) => new RegExp(`${name}\\s*│\\s*([A-Za-z]+)`).exec(said.stdout)?.[1] ?? null;
+		// An unpinned database is reported as the word "null".
+		if (said.status === 0 && /jurisdiction\s*│/.test(said.stdout)) return { jurisdiction: field("jurisdiction") === "null" ? null : field("jurisdiction"), region: field("running_in_region") };
+		await sleep(2000);
+	}
+	throw new Error(`Cloudflare could not be asked about the database ${deployment.database}`);
+}
+
+/** Is the server's bucket there, in the jurisdiction it declares? Asked of the API, else of wrangler. */
+export async function bucketIsThere(deployment: Deployment): Promise<boolean> {
+	const token = credential("CLOUDFLARE_API_TOKEN");
+	const account = credential("CLOUDFLARE_ACCOUNT_ID");
+	if (token && account) {
+		const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${deployment.bucket}`, { headers: { Authorization: `Bearer ${token}`, ...(deployment.jurisdiction ? { "cf-r2-jurisdiction": deployment.jurisdiction } : {}) }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+		if (response && (response.ok || response.status === 404)) return response.ok;
+	}
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		const listed = await wrangler(["r2", "bucket", "list", ...(deployment.jurisdiction ? ["--jurisdiction", deployment.jurisdiction] : [])], { config: deployment.config });
+		if (listed.status === 0) return listed.stdout.includes(deployment.bucket);
+		await sleep(2000);
+	}
+	throw new Error(`Cloudflare could not be asked about the bucket ${deployment.bucket}`);
+}
+
+/**
+ * How a deployed server differs from its document in what only a DEPLOY can change: what it is
+ * told about itself, and a placement it should not have. (One it should have is `place`'s: that
+ * is a setting, changed without a deploy.) Empty when it matches, or when Cloudflare cannot be asked.
  */
 export async function serverDrift(deployment: Deployment): Promise<string[]> {
 	if (!deployment.generated) return [];
 	const settings = await workerSettings(deployment.worker);
 	if (!settings) return [];
-	const anywhere = "wherever a request arrives";
 	return [
-		...(settings.placement !== (deployment.placement ?? null) ? [`it runs ${settings.placement ? `beside ${settings.placement}` : anywhere}, not ${deployment.placement ? `beside ${deployment.placement}` : anywhere}`] : []),
+		...(settings.placement && deployment.placements.length === 0 ? [`it runs beside ${settings.placement}, not wherever a request arrives`] : []),
 		...((settings.vars.MAILFLARE_JURISDICTION ?? null) !== (deployment.jurisdiction ?? null) ? [`it is told its jurisdiction is ${settings.vars.MAILFLARE_JURISDICTION ?? "none"}, not ${deployment.jurisdiction ?? "none"}`] : []),
 		...(settings.vars.MAILFLARE_WORKER_NAME !== deployment.worker ? ["it is not told its own name"] : []),
 	];
+}
+
+/** Move a deployed Worker beside another cloud region: one call, and no upload. */
+export async function setPlacement(worker: string, region: string): Promise<void> {
+	const token = credential("CLOUDFLARE_API_TOKEN");
+	const account = credential("CLOUDFLARE_ACCOUNT_ID");
+	if (!token || !account) throw new Error("moving a Worker needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID");
+	const form = new FormData();
+	form.set("settings", new Blob([JSON.stringify({ placement: { mode: "targeted", region } })], { type: "application/json" }));
+	const response = await timed("cloudflare api", `PATCH /workers/scripts/${worker}/settings (placement ${region})`, () => fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${worker}/settings`, { method: "PATCH", headers: { Authorization: `Bearer ${token}` }, body: form, signal: AbortSignal.timeout(60_000) }));
+	if (!response.ok) throw new Error(`could not place ${worker} beside ${region}: ${((await response.json().catch(() => null)) as { errors?: Array<{ message?: string }> } | null)?.errors?.[0]?.message ?? `HTTP ${response.status}`}`);
+}
+
+/** What `place` asks and does, so the deciding can be tested without Cloudflare. */
+export type Placing = {
+	/** The data center that answers the server, and its country - asked until it is `home`, for a few seconds. */
+	answers(origin: string, home: string, seconds: number): Promise<{ colo: string | null; country: string | null }>;
+	/** The cloud region the Worker is placed beside now. Undefined when Cloudflare cannot be asked. */
+	current(worker: string): Promise<string | null | undefined>;
+	move(worker: string, region: string): Promise<void>;
+};
+const livePlacing: Placing = {
+	async answers(origin, home, seconds) {
+		const until = Date.now() + seconds * 1000;
+		for (;;) {
+			const seen = await answeredFrom(origin);
+			if (seen.country === home || Date.now() >= until) return seen;
+			await sleep(1000);
+		}
+	},
+	current: async (worker) => (await workerSettings(worker))?.placement,
+	move: setPlacement,
+};
+
+export type Placed = {
+	/** It answers from its country, or has none to answer from. */
+	ok: boolean;
+	/** What was wrong, and what was or would be done about it. Null when nothing was. */
+	said: string | null;
+};
+
+/**
+ * Keep a server answering from its country. A placement names ONE cloud region, and Cloudflare
+ * stops honouring one at a time - for every Worker on it, for tens of minutes - while another
+ * name for the same place goes on working. So this asks where the server really answers from,
+ * and when that is not its country, moves it to the next way of naming it: one API call, a few
+ * seconds, no upload. With `fix` false it only says what it would do.
+ */
+export async function place(server: Server, deployment: Deployment, origin: string, { fix }: { fix: boolean }, io: Placing = livePlacing): Promise<Placed> {
+	const home = server.country?.toLowerCase();
+	const ways = deployment.placements;
+	if (!home || ways.length === 0) return { ok: true, said: null };
+	const HOME = home.toUpperCase();
+	// The fact first, and it is one request: where does it answer from?
+	const seen = await io.answers(origin, home, 8);
+	if (seen.country === home) return { ok: true, said: null };
+	const current = await io.current(deployment.worker);
+	// Not on any of them: it was never placed, or its document now says somewhere else.
+	const off = current !== undefined && (current === null || !ways.includes(current));
+
+	const why = off ? `it runs ${current ? `beside ${current}` : "wherever a request arrives"}, which is not ${HOME}` : `it is not answering from ${HOME}${seen.colo ? ` but from ${seen.colo}${seen.country ? `, in ${seen.country.toUpperCase()}` : ""}` : ""}: Cloudflare is not honouring ${current ?? "its placement"}`;
+	const others = ways.filter((way) => way !== current);
+	if (current === undefined) return { ok: false, said: `${why} — and Cloudflare cannot be asked or told without CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID` };
+	if (others.length === 0) return { ok: false, said: `${why}, and its document names no other way to run in ${HOME}` };
+	if (!fix) return { ok: false, said: `${why} — apply moves it beside ${others[0]}` };
+
+	const tried: string[] = [];
+	for (const way of others) {
+		await io.move(deployment.worker, way);
+		const now = await io.answers(origin, home, 12);
+		if (now.country === home) return { ok: true, said: `${why}. Moved beside ${way}, and it answers from ${HOME} (the data center ${now.colo})` };
+		tried.push(way);
+	}
+	return { ok: false, said: `${why}, and nor is it honouring ${tried.join(", ")}: it runs wherever a request arrives until one of them is` };
 }
 
 const exists = (text: string) => /already exists|already own|already taken|already been taken|is taken/i.test(text);
@@ -115,6 +228,20 @@ async function putSecrets(server: Server, deployment: Deployment, print: (text: 
 	}
 }
 
+// One build is every server's: the code is the same, and the only thing a build writes that
+// names a server is the config wrangler deploys with. So it is built once in a run, and each
+// server is an upload - which is what lets many be deployed at the same time.
+let built: Promise<void> | null = null;
+function buildOnce(): Promise<void> {
+	built ??= (async () => {
+		const result = await run("npm", ["run", "build"], { inherit: true });
+		if (result.status !== 0) throw new Error("npm run build failed");
+		// The build leaves a redirect to the config it wrote; every wrangler here names its own.
+		rmSync(".wrangler/deploy/config.json", { force: true });
+	})();
+	return built;
+}
+
 /** Provision, build, deploy, migrate, and record what was learned. Returns the server as it now is, or null. */
 export async function deployServer(server: Server, deployment: Deployment, { base, dryRun, print, template }: DeployOptions): Promise<Server | null> {
 	if (dryRun) {
@@ -125,38 +252,64 @@ export async function deployServer(server: Server, deployment: Deployment, { bas
 	}
 
 	print(`\nDeploying the server "${server.name}"…`);
+	const began = Date.now();
 	let current = server;
 	try {
 		let live = deployment;
-		if (deployment.generated) {
+		// What a server is made of is created once. One that is already deployed has it all, so
+		// asking Cloudflare again is skipped - and done after all if the upload says otherwise.
+		const standing = !!server.url && !!deployment.databaseId;
+		const make = async () => {
 			const id = await provision(server, deployment, print);
-			if (id !== server.databaseId) current = saveServer(server.name, { databaseId: id }, base);
+			if (id !== current.databaseId) current = saveServer(server.name, { databaseId: id }, base);
 			live = { ...deployment, databaseId: id };
+		};
+		if (deployment.generated && !standing) await make();
+		// A server that was moved to another way of naming its country stays on it: the upload
+		// carries the placement, and going back to one Cloudflare is not honouring helps nobody.
+		const now = standing && deployment.placements.length > 1 ? await workerSettings(deployment.worker).then((settings) => settings?.placement, () => undefined) : undefined;
+		if (now && deployment.placements.includes(now)) live = { ...live, placement: now };
+		if (deployment.generated) writeServerConfig(template, live);
+		await buildOnce();
+		// Cloudflare's API refuses an upload now and then ("internal authentication error", most
+		// often when several go up at once). It is the same upload again a few seconds later.
+		const upload = async () => {
+			for (let attempt = 0; ; attempt += 1) {
+				const result = await wrangler(["deploy"], { config: writeBuiltConfig(live), inherit: true });
+				if (result.status === 0 || attempt >= 2) return result;
+				await sleep(4000 * (attempt + 1));
+			}
+		};
+		let uploaded = await upload();
+		if (uploaded.status !== 0 && deployment.generated && standing) {
+			await make();
 			writeServerConfig(template, live);
+			uploaded = await upload();
 		}
-		const steps: Array<[string[], Record<string, string>?]> = live.generated
-			? [[["run", "build"], { MAILFLARE_WRANGLER_CONFIG: live.config }], [["run", "deploy:worker"]]]
-			: [[["run", "deploy"]]];
-		for (const [args, env] of steps) {
-			const result = await run("npm", args, { env, inherit: true });
-			if (result.status !== 0) throw new Error(`npm ${args.join(" ")} failed`);
-		}
-		// The build left a redirect to THIS server's config; a later bare `wrangler` must not follow it.
-		if (live.generated) rmSync(".wrangler/deploy/config.json", { force: true });
+		if (uploaded.status !== 0) throw new Error("wrangler deploy failed");
+		const deployedAt = Date.now();
 		if (live.generated) await putSecrets(server, live, print);
 		await applyMigrations({ db: live.database, local: false, config: live.config });
 
 		// Deriving the origin needs Cloudflare credentials; a custom domain goes in server.json by hand.
 		const origin = server.url ?? (await resolveInstanceUrl({ worker: live.worker }));
 		if (!origin) throw new Error(`deployed, but its origin is unknown — add "url" to ${serverDocPath(server.name, base)}`);
-		// A new Worker takes a moment to answer on its address.
-		for (let attempt = 0; attempt < 30; attempt += 1) {
+		// A new Worker takes a moment to answer on its address, and a moment more to answer every
+		// time: it is ready when it has answered three times running.
+		for (let attempt = 0, good = 0; attempt < 40 && good < 3; attempt += 1) {
 			const response = await fetch(origin, { redirect: "manual" }).catch(() => null);
-			if (response && response.status < 500 && response.status !== 404) break;
-			await sleep(2000);
+			good = response && response.status < 500 && response.status !== 404 ? good + 1 : 0;
+			if (good < 3) await sleep(good > 0 ? 500 : 2000);
 		}
 		current = saveServer(server.name, { url: origin }, base);
-		print(`  ✓ "${server.name}" is at ${origin}, recorded in ${serverDocPath(server.name, base)}`);
+		const took = `${Math.round((Date.now() - began) / 1000)}s`;
+		print(`  ✓ "${server.name}" is at ${origin} (${took}), recorded in ${serverDocPath(server.name, base)}`);
+		if (live.placements.length > 0 && server.country) {
+			const placed = await place(server, live, origin, { fix: true });
+			const since = Math.round((Date.now() - deployedAt) / 1000);
+			if (placed.ok) print(`  ✓ and it answers from ${server.country.toUpperCase()}, ${since}s after the upload${placed.said ? ` — ${placed.said}` : ""}`);
+			else print(`  ! ${placed.said}`);
+		}
 		return current;
 	} catch (error) {
 		print(`  ✗ ${error instanceof Error ? error.message : String(error)}`);

@@ -235,19 +235,57 @@ export type Server = {
 };
 export const SERVER_FIELDS = ["db", "databaseId", "bucket", "url", "jurisdiction", "region", "country", "serves", "placement", "local", "template", "disposable", "managesDns"] as const;
 
-// Where a Worker RUNS is chosen by naming a cloud region for Cloudflare to place it beside. A
-// country here is the region in that country; anything else is given as `placement`.
-export const PLACEMENTS: Record<string, string> = {
-	de: "aws:eu-central-1", fr: "aws:eu-west-3", ie: "aws:eu-west-1", gb: "aws:eu-west-2", se: "aws:eu-north-1", it: "aws:eu-south-1", es: "aws:eu-south-2",
-	ch: "aws:eu-central-2", nl: "gcp:europe-west4", be: "gcp:europe-west1", fi: "gcp:europe-north1", pl: "gcp:europe-central2",
-	us: "aws:us-east-1", ca: "aws:ca-central-1", br: "aws:sa-east-1", jp: "aws:ap-northeast-1", kr: "aws:ap-northeast-2", sg: "aws:ap-southeast-1",
-	au: "aws:ap-southeast-2", in: "aws:ap-south-1", id: "aws:ap-southeast-3", hk: "aws:ap-east-1", za: "aws:af-south-1", ae: "aws:me-central-1", il: "aws:il-central-1",
+// Where a Worker RUNS is chosen by naming a cloud region for Cloudflare to place it beside.
+// A country is named SEVERAL ways here, and that is the point: Cloudflare takes one target per
+// Worker, and stops honouring one target at a time - for every Worker on it, for tens of
+// minutes - while another name for the same city goes on working. A server uses the first,
+// and is moved to the next, with one API call, when the one it is on is not being honoured.
+//
+// Each entry was SEEN to run in its country (the data center Cloudflare answered from, looked
+// up in colos.json), not assumed from the name: `aws:eu-west-1` is Ireland's and runs in
+// London, and both of the UAE's run in Mumbai, so neither is here. Sweden's three were not
+// being honoured when this was measured, so they are unproven: a deploy checks them like any other.
+export const PLACEMENTS: Record<string, string[]> = {
+	de: ["gcp:europe-west3", "azure:germanywestcentral", "aws:eu-central-1", "gcp:europe-west10", "azure:germanynorth"],
+	fr: ["aws:eu-west-3", "gcp:europe-west9", "azure:francesouth"],
+	gb: ["gcp:europe-west2", "azure:uksouth", "aws:eu-west-2", "azure:ukwest"],
+	ie: ["azure:northeurope"],
+	nl: ["gcp:europe-west4", "azure:westeurope"],
+	be: ["gcp:europe-west1", "azure:belgiumcentral"],
+	ch: ["aws:eu-central-2", "gcp:europe-west6", "azure:switzerlandnorth", "azure:switzerlandwest"],
+	it: ["aws:eu-south-1", "gcp:europe-west8", "azure:italynorth", "gcp:europe-west12"],
+	es: ["aws:eu-south-2", "gcp:europe-southwest1", "azure:spaincentral"],
+	pl: ["gcp:europe-central2", "azure:polandcentral"],
+	fi: ["gcp:europe-north1"],
+	se: ["aws:eu-north-1", "azure:swedencentral", "gcp:europe-north2"],
+	no: ["azure:norwayeast", "azure:norwaywest"],
+	us: ["aws:us-east-1", "azure:eastus", "gcp:us-east4", "aws:us-west-2", "gcp:us-central1"],
+	ca: ["gcp:northamerica-northeast1", "azure:canadacentral", "aws:ca-west-1"],
+	mx: ["aws:mx-central-1", "gcp:northamerica-south1", "azure:mexicocentral"],
+	br: ["aws:sa-east-1", "gcp:southamerica-east1", "azure:brazilsouth"],
+	cl: ["gcp:southamerica-west1", "azure:chilecentral"],
+	jp: ["aws:ap-northeast-1", "gcp:asia-northeast1", "azure:japaneast", "aws:ap-northeast-3", "gcp:asia-northeast2", "azure:japanwest"],
+	kr: ["aws:ap-northeast-2", "gcp:asia-northeast3", "azure:koreacentral"],
+	tw: ["aws:ap-east-2", "gcp:asia-east1"],
+	hk: ["aws:ap-east-1", "azure:eastasia", "gcp:asia-east2"],
+	sg: ["aws:ap-southeast-1"],
+	my: ["azure:malaysiawest"],
+	th: ["aws:ap-southeast-7"],
+	id: ["aws:ap-southeast-3", "gcp:asia-southeast2", "azure:indonesiacentral"],
+	in: ["aws:ap-south-1", "gcp:asia-south1", "azure:centralindia", "aws:ap-south-2"],
+	au: ["aws:ap-southeast-2", "azure:australiaeast", "gcp:australia-southeast1", "aws:ap-southeast-4", "gcp:australia-southeast2"],
+	nz: ["aws:ap-southeast-6", "azure:newzealandnorth"],
+	za: ["gcp:africa-south1", "azure:southafricanorth", "aws:af-south-1"],
+	il: ["azure:israelcentral"],
+	qa: ["azure:qatarcentral"],
 };
 /** The members of the European Union: whom `"serves": ["eu"]` is home to, and where the `eu` jurisdiction is. */
 export const EU_COUNTRIES = ["at", "be", "bg", "hr", "cy", "cz", "dk", "ee", "fi", "fr", "de", "gr", "hu", "ie", "it", "lv", "lt", "lu", "mt", "nl", "pl", "pt", "ro", "sk", "si", "es", "se"];
 
-/** The cloud region a server's Worker is placed beside, if it says where it runs. */
-export const placementOf = (server: Pick<Server, "country" | "placement">): string | undefined => server.placement ?? (server.country ? PLACEMENTS[server.country.toLowerCase()] : undefined);
+/** Every cloud region that names where a server runs: the one it gives, else each of its country's. */
+export const placementsOf = (server: Pick<Server, "country" | "placement">): string[] => (server.placement ? [server.placement] : server.country ? PLACEMENTS[server.country.toLowerCase()] ?? [] : []);
+/** The cloud region a server's Worker is placed beside first, if it says where it runs. */
+export const placementOf = (server: Pick<Server, "country" | "placement">): string | undefined => placementsOf(server)[0];
 /** The countries a server is home to: what it says it serves, else the one it is in. */
 export const servedBy = (server: Pick<Server, "country" | "serves">): string[] =>
 	[...new Set((server.serves ?? (server.country ? [server.country] : [])).flatMap((entry) => (entry.toLowerCase() === "eu" ? EU_COUNTRIES : [entry.toLowerCase()])))];

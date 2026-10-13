@@ -12,7 +12,7 @@ import { UsageError, parseCli } from "./args";
 import { dangling, holds, parseBackup, scrub, type BackupDocument } from "./backup";
 import { coloOf, countryOfColo, hasColo, loadColos, parseColoList } from "./colos";
 import { makeContext } from "./context";
-import { deploySteps, secretsFor } from "./deploy";
+import { deploySteps, place, secretsFor, type Placing } from "./deploy";
 import { loadDocuments, loadProject, loadProjects } from "./document";
 import { run } from "./driver";
 import { conform, reporter, rounds } from "./conform";
@@ -874,6 +874,7 @@ function fleet() {
 		writeConfig: (_template, deployment) => void (deployment.generated && events.push(`config:${deployment.config}`)),
 		vault: () => memoryVault(),
 		warmUp: async () => void events.push("warm-up"),
+		place: async () => ({ ok: true, said: null }),
 		deploy: async (server, _deployment, options) => {
 			events.push(`${options.dryRun ? "would-deploy" : "deploy"}:${server.name}`);
 			return options.dryRun ? null : { ...server, url: `https://${server.name}.example.workers.dev`, databaseId: "id-new" };
@@ -905,7 +906,7 @@ test("every project runs against its own server, in parallel, and one failure do
 
 test("a server is the template with its own name, database, bucket, queues and jurisdiction", () => {
 	const eu = deploymentFor(CONFIG, { name: "mailflare-eu", databaseId: "id-eu", jurisdiction: "eu" });
-	assert.deepEqual(eu, { config: "wrangler.mailflare-eu.json", generated: true, worker: "mailflare-eu", database: "mailflare-eu", databaseId: "id-eu", bucket: "mailflare-eu-raw", queues: ["mailflare-eu-inbound", "mailflare-eu-outbound"], jurisdiction: "eu", placement: undefined });
+	assert.deepEqual(eu, { config: "wrangler.mailflare-eu.json", generated: true, worker: "mailflare-eu", database: "mailflare-eu", databaseId: "id-eu", bucket: "mailflare-eu-raw", queues: ["mailflare-eu-inbound", "mailflare-eu-outbound"], jurisdiction: "eu", placement: undefined, placements: [] });
 	const config = serverConfig(CONFIG, eu);
 	assert.deepEqual([config.name, config.services?.[0].service], ["mailflare-eu", "mailflare-eu"], "the Worker calls itself, so it names itself");
 	assert.deepEqual(config.d1_databases?.[0], { binding: "DB", database_name: "mailflare-eu", database_id: "id-eu" });
@@ -918,12 +919,20 @@ test("a server is the template with its own name, database, bucket, queues and j
 	const home = deploymentFor(CONFIG, { name: "mailflare" });
 	assert.deepEqual([home.config, home.generated, home.databaseId], ["wrangler.jsonc", false, "id-default"], "wrangler.jsonc is the default server");
 	// The Vite plugin picks the config when it BUILDS; `wrangler deploy --env` does not apply.
-	assert.ok(deploySteps({ name: "mailflare-eu", jurisdiction: "eu" }, eu).includes("MAILFLARE_WRANGLER_CONFIG=wrangler.mailflare-eu.json npm run build"));
-	assert.match(deploySteps({ name: "mailflare-eu", jurisdiction: "eu" }, eu)[0], /create the database mailflare-eu in jurisdiction eu/);
-	assert.deepEqual(deploySteps({ name: "mailflare" }, home)[0], "npm run deploy");
+	// One build is every server's: a server is an upload, with a config written for it beside the build.
+	const steps = deploySteps({ name: "mailflare-eu", jurisdiction: "eu" }, eu);
+	assert.ok(steps.some((step) => step.startsWith("npm run build")) && steps.includes("npx wrangler deploy --config dist/server/wrangler.mailflare-eu.json"), steps.join("\n"));
+	assert.ok(!steps.join("\n").includes("MAILFLARE_WRANGLER_CONFIG"), "no server needs a build of its own");
+	assert.match(steps[0], /create the database mailflare-eu in jurisdiction eu/);
+	assert.deepEqual(deploySteps({ name: "mailflare" }, home).slice(0, 2), ["npm run build", "npx wrangler deploy --config dist/server/wrangler.json"]);
+	assert.match(deploySteps({ name: "mailflare-de", country: "de" }, deploymentFor(CONFIG, { name: "mailflare-de", country: "de" })).join("\n"), /wrangler\.mailflare-de\.json    placed beside gcp:europe-west3/);
 	// A server that names its country runs there: its Worker is placed beside a cloud region in it.
-	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-de", country: "de" })).placement, { region: "aws:eu-central-1" });
-	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-x", country: "de", placement: "gcp:europe-west3" })).placement, { region: "gcp:europe-west3" }, "an exact region wins");
+	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-de", country: "de" })).placement, { region: PLACEMENTS.de[0] });
+	assert.deepEqual(serverConfig(CONFIG, deploymentFor(CONFIG, { name: "mailflare-x", country: "de", placement: "aws:eu-central-1" })).placement, { region: "aws:eu-central-1" }, "an exact region wins");
+	// A country is named several ways, since Cloudflare stops honouring one at a time; an exact region is the only one.
+	assert.ok(deploymentFor(CONFIG, { name: "mailflare-de", country: "de" }).placements.length >= 3);
+	assert.deepEqual(deploymentFor(CONFIG, { name: "mailflare-x", country: "de", placement: "aws:eu-central-1" }).placements, ["aws:eu-central-1"]);
+	for (const [country, ways] of Object.entries(PLACEMENTS)) assert.ok(ways.length > 0 && new Set(ways).size === ways.length && ways.every((way) => /^(aws|gcp|azure):[a-z0-9-]+$/.test(way)), `${country}: ${ways}`);
 	assert.equal(serverConfig(CONFIG, eu).placement, undefined, "and one that does not say runs wherever a request arrives");
 	// A server that does not manage DNS is never given a Cloudflare token, so it can touch no zone.
 	assert.ok(secretsFor({ name: "x" }).includes("CF_TOKEN") && !secretsFor({ name: "x", managesDns: false }).includes("CF_TOKEN"));
@@ -953,12 +962,75 @@ test("a server with no recorded origin is deployed by apply, previewed by plan, 
 test("a server's own document is reconciled: a plan says it differs, an apply deploys it again", async () => {
 	const live = () => [project("mailflare-de", { url: "https://de.example", databaseId: "id-de", country: "de" }, "a.example")];
 	const moved = fleet();
-	moved.drift.push("it runs wherever a request arrives, not beside aws:eu-central-1");
+	moved.drift.push("it is told its jurisdiction is none, not eu");
 	assert.equal(await runFleet(live(), RUN({ status: true }), moved.deps), 1, "a server that differs is not reconciled");
-	assert.match(moved.out.join("\n"), /~ server mailflare-de: it runs wherever a request arrives, not beside aws:eu-central-1 — apply deploys it again/);
+	assert.match(moved.out.join("\n"), /~ server mailflare-de: it is told its jurisdiction is none, not eu — apply deploys it again/);
 	assert.deepEqual(moved.events.filter((event) => event.includes("deploy")), [], "a plan deploys nothing");
 	assert.equal(await runFleet(live(), RUN(), moved.deps), 0);
 	assert.ok(moved.events.includes("deploy:mailflare-de"));
+});
+
+test("a server is kept answering from its country: when Cloudflare stops honouring its placement, it is moved to another name for it", async () => {
+	const server = { name: "mailflare-de", country: "de" };
+	const deployment = deploymentFor(CONFIG, server);
+	const [first, second, third] = deployment.placements;
+	/** Cloudflare, with some placements it is not honouring just now. */
+	const cloudflare = (on: string | null, lapsed: string[] = []) => {
+		const state = { on, moves: [] as string[] };
+		const io: Placing = {
+			answers: async () => (state.on && !lapsed.includes(state.on) ? { colo: PLACEMENTS.de.includes(state.on) ? "FRA" : "LHR", country: PLACEMENTS.de.includes(state.on) ? "de" : "gb" } : { colo: null, country: null }),
+			current: async () => state.on,
+			move: async (_worker, region) => void ((state.on = region), state.moves.push(region)),
+		};
+		return { state, io };
+	};
+
+	// Home: nothing is said, nothing is touched - and it costs one request.
+	const home = cloudflare(first);
+	assert.deepEqual(await place(server, deployment, "https://de.example", { fix: true }, home.io), { ok: true, said: null });
+	assert.deepEqual(home.state.moves, []);
+
+	// Its placement is not being honoured: a plan says so and what apply would do; an apply does it.
+	const lapsed = cloudflare(first, [first]);
+	const planned = await place(server, deployment, "https://de.example", { fix: false }, lapsed.io);
+	assert.equal(planned.ok, false);
+	assert.match(planned.said ?? "", new RegExp(`it is not answering from DE: Cloudflare is not honouring ${first} — apply moves it beside ${second}`));
+	assert.deepEqual(lapsed.state.moves, [], "a plan moves nothing");
+	const fixed = await place(server, deployment, "https://de.example", { fix: true }, lapsed.io);
+	assert.equal(fixed.ok, true);
+	assert.match(fixed.said ?? "", new RegExp(`Moved beside ${second}, and it answers from DE \\(the data center FRA\\)`));
+	assert.deepEqual(lapsed.state.moves, [second]);
+
+	// The next one is not honoured either: it goes on to the one after. When none is, that is said, and it is a failure.
+	const two = cloudflare(first, [first, second]);
+	assert.equal((await place(server, deployment, "https://de.example", { fix: true }, two.io)).ok, true);
+	assert.deepEqual(two.state.moves, [second, third]);
+	const none = cloudflare(first, deployment.placements);
+	const stuck = await place(server, deployment, "https://de.example", { fix: true }, none.io);
+	assert.equal(stuck.ok, false);
+	assert.match(stuck.said ?? "", /nor is it honouring .*: it runs wherever a request arrives until one of them is/);
+
+	// Somewhere it should not be - another country's region, or nowhere - is put right the same way.
+	const abroad = cloudflare("gcp:europe-west2");
+	assert.match((await place(server, deployment, "https://de.example", { fix: false }, abroad.io)).said ?? "", /it runs beside gcp:europe-west2, which is not DE — apply moves it beside /);
+	assert.equal((await place(server, deployment, "https://de.example", { fix: true }, abroad.io)).ok, true);
+	assert.deepEqual(abroad.state.moves, [first]);
+	const nowhere = cloudflare(null);
+	assert.match((await place(server, deployment, "https://de.example", { fix: false }, nowhere.io)).said ?? "", /it runs wherever a request arrives, which is not DE/);
+
+	// One exact region has no other name to fall back on, and a server with no country is not asked at all.
+	const exact = deploymentFor(CONFIG, { name: "mailflare-x", country: "de", placement: "aws:eu-central-1" });
+	assert.match((await place({ name: "mailflare-x", country: "de" }, exact, "https://x.example", { fix: true }, cloudflare("aws:eu-central-1", ["aws:eu-central-1"]).io)).said ?? "", /its document names no other way to run in DE/);
+	assert.deepEqual(await place({ name: "plain" }, deploymentFor(CONFIG, { name: "plain" }), "https://p.example", { fix: true }, cloudflare(null).io), { ok: true, said: null });
+
+	// In a run: a plan that finds a server away from home is not reconciled, and an apply that brings it back is.
+	const away = fleet();
+	away.deps.place = async (_server, _deployment, _origin, { fix }) => (fix ? { ok: true, said: "it was not answering from DE. Moved beside gcp:europe-west3" } : { ok: false, said: "it is not answering from DE — apply moves it beside gcp:europe-west3" });
+	const live = () => [project("mailflare-de", { url: "https://de.example", databaseId: "id-de", country: "de" }, "a.example")];
+	assert.equal(await runFleet(live(), RUN({ status: true }), away.deps), 1);
+	assert.match(away.out.join("\n"), /~ server mailflare-de: it is not answering from DE — apply moves it beside gcp:europe-west3/);
+	assert.equal(await runFleet(live(), RUN(), away.deps), 0, away.out.join("\n"));
+	assert.ok(!away.events.some((event) => event.startsWith("deploy:")), "moving a server is a setting, not a deploy");
 });
 
 test("destroy takes the Worker last and only when confirmed; a local server is never deployed or removed", async () => {
@@ -1072,6 +1144,7 @@ test("the command line: a target and a verb, in either order, and nothing ambigu
 	assert.deepEqual([run("deploy").command, run("mailflare-eu", "deploy").command], [{ kind: "deploy", target: { kind: "all" } }, { kind: "deploy", target: { kind: "project", name: "mailflare-eu" } }]);
 	assert.deepEqual([run("logins").command, run("mailflare", "logins").command], [{ kind: "logins", project: undefined }, { kind: "logins", project: "mailflare" }]);
 	assert.deepEqual(run("colos").command, { kind: "colos" });
+	assert.deepEqual([run("place").command, run("mailflare-eu", "place").command], [{ kind: "place", target: { kind: "all" } }, { kind: "place", target: { kind: "project", name: "mailflare-eu" } }]);
 	assert.deepEqual([run("apply", "--rotate-passwords").flags.rotatePasswords, run("apply").flags.rotatePasswords, run("apply").credentials], [true, false, "scripts/state/credentials"]);
 
 	for (const bad of [["mailflare"], ["reset"], ["mailflare", "frobnicate"], ["a", "plan", "b"], [], ["x", "plan", "--bogus"], ["x", "plan", "--concurrency", "abc"], ["subject"], ["subject", "sam@example.com", "nuke"], ["subject", "sam@example.com", "destroy", "--confirm-destroy"], ["router"], ["router", "reset"], ["colos", "plan"]]) {

@@ -5,9 +5,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dangling, holds, parseBackup } from "./backup";
-import { COLOS_FILE, coloOf, countryOfColo } from "./colos";
+import { COLOS_FILE, answeredFrom } from "./colos";
 import { BOX, USER, type Report } from "./conform";
-import { workerSettings } from "./deploy";
+import { bucketIsThere, databasePlace, setPlacement, workerSettings } from "./deploy";
 import { resolveInstance, type FleetDeps } from "./fleet";
 import { backupKeys } from "./resources/erased";
 import { fleetMap, router, type FleetMap } from "./router";
@@ -15,12 +15,15 @@ import { digestOf, subjectTotal, tombstones } from "./subject-scope";
 import { cfApi, credential, sleep, workersDevUrl, wrangler } from "./wrangler";
 import type { Project } from "./document";
 import type { Flags } from "./flags";
+import { PLACEMENTS } from "./spec";
 
 export type Probes = {
 	/** Is the data where the server's document says, and does the server hold only what it should? */
 	where(project: Project, deps: FleetDeps, report: Report): Promise<void>;
 	/** Does the server answer from the country it declares - as a fact, whatever its settings say? */
 	placed(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Put a server in another country, as Cloudflare does when it stops honouring a placement. True when it was. */
+	displace(project: Project, deps: FleetDeps, report: Report): Promise<boolean>;
 	/** Every login on record signs in. */
 	logins(project: Project, deps: FleetDeps, report: Report): Promise<void>;
 	/** With one of everything added: the app shows it, the keys open it, mail reaches it. */
@@ -52,6 +55,12 @@ const RUN = { flags: FLAGS, concurrency: 1, explicit: { url: false, db: false } 
 // Tried twice: a long step may have let the server drop the idle connection.
 const twice = async <T>(send: () => Promise<T>): Promise<T | null> => (await send().catch(() => null)) ?? (await send().catch(() => null));
 const status = (url: string, init: RequestInit = {}) => fetch(url, { redirect: "manual", signal: AbortSignal.timeout(20_000), ...init }).then((response) => response.status, () => 0);
+/** Ask for a status and hold it to what is expected. No answer at all is asked once more: that is the network, not the server. */
+async function answers(report: Report, name: string, ask: () => Promise<number>, ...expected: number[]): Promise<boolean> {
+	let got = await ask();
+	if (got === 0) got = await ask();
+	return report.check(name, expected.includes(got), got === 0 ? "no answer" : `HTTP ${got}`);
+}
 
 /** Sign in, and return the session cookie - or null when the app refuses. */
 async function signIn(origin: string, email: string, password: string | null): Promise<string | null> {
@@ -70,24 +79,38 @@ const before = new Map<string, Before>();
 /** The mail delivered to the mailbox conformance later removes: what must be gone once it has. */
 const delivered = new Map<string, { subjects: string[]; keys: string[] }>();
 const failed = (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) });
-/** How long after a deploy an unplaced Worker is "not yet", rather than "not". */
-const PLACING_MINUTES = 30;
 /** How old a backup may be before it says the schedule has stopped, in days. */
 const STALE: Record<string, number> = { daily: 2, weekly: 8, monthly: 32 };
+
+/**
+ * Do something to a server while it is being used: requests keep arriving until it is done.
+ * A restore is many statements, and one that only works on an idle server is not a restore.
+ */
+async function whileUsed<T>(origin: string, work: () => Promise<T>): Promise<T> {
+	let busy = true;
+	const traffic = (async () => {
+		while (busy) {
+			await status(`${origin}/login`);
+			await sleep(150);
+		}
+	})();
+	try {
+		return await work();
+	} finally {
+		busy = false;
+		await traffic;
+	}
+}
 
 const tenantOf = (project: Project) => String(project.entries.find((entry) => entry.spec.domain)?.spec.domain ?? "").trim().toLowerCase();
 const adminOf = (project: Project) => project.entries.find((entry) => !entry.spec.domain)?.spec.fresh?.admin?.email?.trim().toLowerCase() ?? null;
 
-/**
- * Cloudflare names the data center that answered, by airport code: evidence of where the Worker
- * ran, whatever its settings say. Asked for up to a minute.
- */
-async function answeredFrom(url: string, home: string): Promise<{ colo: string | null; country: string | null }> {
-	let seen: { colo: string | null; country: string | null } = { colo: null, country: null };
-	for (let attempt = 0; attempt < 15 && seen.country !== home; attempt += 1) {
-		if (attempt > 0) await sleep(4000);
-		const colo = coloOf(await fetch(`${url}/login`, { redirect: "manual" }).then((response) => response.headers.get("cf-placement"), () => null));
-		seen = { colo, country: colo ? countryOfColo(colo) : null };
+/** Where a server answers from, asked for up to a minute until it is its home. */
+async function settlesIn(url: string, home: string): Promise<{ colo: string | null; country: string | null }> {
+	let seen = await answeredFrom(url);
+	for (let attempt = 1; attempt < 15 && seen.country !== home; attempt += 1) {
+		await sleep(4000);
+		seen = await answeredFrom(url);
 	}
 	return seen;
 }
@@ -109,19 +132,17 @@ export const liveProbes: Probes = {
 		const { instance, deployment } = resolveInstance(project, RUN, deps.template());
 		report.section(`where its data is (${project.name})`);
 		if (!server || !deployment || instance.local) return report.skip("jurisdiction", "a local server keeps its data on this machine");
-		const said = /jurisdiction\s*│\s*([a-z]+)/.exec((await wrangler(["d1", "info", deployment.database], { config: deployment.config })).stdout)?.[1];
-		// An unpinned database is reported as the word "null".
-		const pinned = said && said !== "null" ? said : null;
-		report.check(`the database is ${server.jurisdiction ? `in jurisdiction ${server.jurisdiction}` : "not pinned, as declared"}`, pinned === (server.jurisdiction ?? null), `Cloudflare says: ${pinned}`);
-		const buckets = (await wrangler(["r2", "bucket", "list", ...(server.jurisdiction ? ["--jurisdiction", server.jurisdiction] : [])], { config: deployment.config })).stdout;
-		report.check(`the bucket is ${server.jurisdiction ? `in jurisdiction ${server.jurisdiction}` : "there"}`, buckets.includes(deployment.bucket), `no ${deployment.bucket} listed`);
+		const database = await databasePlace(deployment).catch(failed);
+		report.check(`the database is ${server.jurisdiction ? `in jurisdiction ${server.jurisdiction}` : "not pinned, as declared"}`, !("error" in database) && database.jurisdiction === (server.jurisdiction ?? null), "error" in database ? database.error : `Cloudflare says: ${database.jurisdiction ?? "not pinned"}`);
+		const bucket = await bucketIsThere(deployment).catch(failed);
+		report.check(`the bucket is ${server.jurisdiction ? `in jurisdiction ${server.jurisdiction}` : "there"}`, bucket === true, typeof bucket === "object" ? bucket.error : `no ${deployment.bucket}${server.jurisdiction ? ` in jurisdiction ${server.jurisdiction}` : ""}`);
 
 		const settings = await workerSettings(deployment.worker);
 		if (!settings) return report.skip("what the Worker is told and holds", "needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID");
 		const { vars: said2, secrets } = settings;
 		// The default server is wrangler.jsonc as it stands; every other is told who and where it is.
 		if (deployment.generated) report.check("the Worker is told its own name and jurisdiction", said2.MAILFLARE_WORKER_NAME === deployment.worker && (said2.MAILFLARE_JURISDICTION ?? null) === (server.jurisdiction ?? null), JSON.stringify(said2));
-		if (deployment.placement) report.check(`the Worker is placed beside ${deployment.placement}`, settings.placement === deployment.placement, `Cloudflare says it is placed: ${settings.placement ?? "wherever a request arrives"}`);
+		if (deployment.placements.length > 0) report.check(`the Worker is placed beside ${settings.placement ?? "nothing"}${server.country ? `, one of the names for ${server.country.toUpperCase()}` : ""}`, !!settings.placement && deployment.placements.includes(settings.placement), `its document allows: ${deployment.placements.join(", ")}`);
 		if (server.managesDns === false) {
 			report.check("it holds no Cloudflare token, so it can touch no zone", !secrets.includes("CF_TOKEN"), secrets.join(", "));
 			const domains = await deps.openStore(instance, (store) => store.listDomains()).catch(() => []);
@@ -135,14 +156,28 @@ export const liveProbes: Probes = {
 		if (!server?.country || !deployment?.placement || !instance.url || instance.local) return;
 		const home = server.country.toLowerCase();
 		const name = `${project.name}: it answers from ${home.toUpperCase()}`;
-		const { colo, country } = await answeredFrom(instance.url, home);
+		const { colo, country } = await settlesIn(instance.url, home);
 		if (country === home) return void report.check(`${name} (the data center ${colo})`, true);
-		// A setting is not a fact. After a deploy Cloudflare runs a Worker wherever a request
-		// arrives until it has placed it, which takes minutes and is not the same for every region.
-		const deployedAt = (await workerSettings(deployment.worker))?.deployedAt;
-		const minutes = deployedAt ? Math.round((Date.now() - deployedAt) / 60_000) : null;
-		if (!colo && minutes !== null && minutes < PLACING_MINUTES) return report.skip(name, `Cloudflare has not placed it yet — it was deployed ${minutes} minute(s) ago, and until it is placed it runs wherever a request arrives`);
+		// A setting is not a fact: a placement is a hint, and this is what Cloudflare did with it.
 		report.check(name, false, !colo ? "the answer named no data center (no cf-placement header): Cloudflare is not placing this Worker, so it runs wherever a request arrives" : country ? `it answered from ${colo}, which is in ${country.toUpperCase()}` : `it answered from ${colo}, which ${COLOS_FILE} does not list — \`npm run state -- colos\` pulls the list again`);
+	},
+
+	async displace(project, deps, report) {
+		const server = project.server;
+		const { instance, deployment } = resolveInstance(project, RUN, deps.template());
+		if (!server?.country || !deployment || deployment.placements.length < 2 || !instance.url || instance.local) return false;
+		const home = server.country.toLowerCase();
+		// Somewhere that is certainly not home: another country's first name.
+		const abroad = Object.entries(PLACEMENTS).find(([country]) => country !== home && (home === "de" ? country === "gb" : country === "de"))?.[1][0];
+		if (!abroad) return false;
+		const moved = await setPlacement(deployment.worker, abroad).then(() => true, failed);
+		// It goes on answering from home for a few seconds; it is away once it stops.
+		let seen = await answeredFrom(instance.url);
+		for (let attempt = 0; moved === true && attempt < 30 && seen.country === home; attempt += 1) {
+			await sleep(1000);
+			seen = await answeredFrom(instance.url);
+		}
+		return report.check(`${project.name}: put beside ${abroad}, and it no longer answers from ${home.toUpperCase()}`, moved === true && seen.country !== home, typeof moved === "object" ? moved.error : `it still answers from ${seen.colo}`);
 	},
 
 	async logins(project, deps, report) {
@@ -182,7 +217,7 @@ export const liveProbes: Probes = {
 		await shows("templates", cookie, "/api/templates", ["ZZ"]);
 		await shows("contacts", cookie, `/api/contacts?mailboxId=${own}&address=${encodeURIComponent("zz@conform.example")}`, ['"v1"']);
 		await shows("booking pages, under the booking username", cookie, "/api/booking", ["zz-conform", "ZZ call"]);
-		report.check("the public booking page is served", (await status(`${origin}/book/zz-conform/zz-conform`)) === 200);
+		await answers(report, "the public booking page is served", () => status(`${origin}/book/zz-conform/zz-conform`), 200);
 		await shows("calendar events", cookie, "/api/calendar/events?start=2030-01-01T00:00:00Z&end=2030-01-31T00:00:00Z", ['"ZZ"']);
 		await shows("drive folders", cookie, "/api/drive/items", ['"ZZ"']);
 		await shows("API keys", cookie, "/api/api-keys", ["zz-conform"]);
@@ -193,11 +228,11 @@ export const liveProbes: Probes = {
 
 		report.section(`keys and realtime (${project.name})`);
 		const withKey = (path: string, key: string | null, init: RequestInit = {}) => status(`${origin}${path}`, { ...init, headers: { ...(init.headers as Record<string, string>), Authorization: `Bearer ${key}` } });
-		report.check("a personal API key reads mail", (await withKey("/api/v1/messages", vault.secret("apiKeys", `${email}/zz-conform`))) === 200);
-		report.check("a made-up key is refused", (await withKey("/api/v1/messages", "ep_not_a_key")) === 401);
+		await answers(report, "a personal API key reads mail", () => withKey("/api/v1/messages", vault.secret("apiKeys", `${email}/zz-conform`)), 200);
+		await answers(report, "a made-up key is refused", () => withKey("/api/v1/messages", "ep_not_a_key"), 401);
 		const initialize = { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "conformance", version: "1" } } }) };
-		report.check("an MCP key opens the MCP endpoint", (await withKey("/mcp", vault.secret("mcpKeys", "zz-conform"), initialize)) === 200);
-		report.check("the MCP endpoint refuses a made-up key", [401, 403].includes(await withKey("/mcp", "ep_not_a_key", initialize)));
+		await answers(report, "an MCP key opens the MCP endpoint", () => withKey("/mcp", vault.secret("mcpKeys", "zz-conform"), initialize), 200);
+		await answers(report, "the MCP endpoint refuses a made-up key", () => withKey("/mcp", "ep_not_a_key", initialize), 401, 403);
 		const opened = await new Promise<string>((done) => {
 			// Node's WebSocket takes headers as a second argument; the type it is given does not say so.
 			const socket = new (WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket)(`${origin.replace(/^http/, "ws")}/api/realtime`, { headers: { Cookie: cookie ?? "", Origin: origin } });
@@ -333,10 +368,10 @@ export const liveProbes: Probes = {
 		// A backup that was rewritten has to remain a backup: it is restored, over the live server.
 		const rewritten = found.contents.find((entry) => entry.key === was.backupKey)?.content;
 		const restored = rewritten ? await deps.openStore(instance, async (store) => {
-			await store.restoreBackup(rewritten);
+			await whileUsed(origin, () => store.restoreBackup(rewritten));
 			return { person: await store.subjectReport(email) };
 		}).catch(failed) : { error: "the backup taken before the takedown is not in the bucket" };
-		report.check("the backup that was rewritten restores", !("error" in restored), "error" in restored ? restored.error : "");
+		report.check("the backup that was rewritten restores, with the server in use throughout", !("error" in restored), "error" in restored ? restored.error : "");
 		if ("error" in restored) return;
 		report.check("and they are not in what it brings back", restored.person.userId === null, JSON.stringify(restored.person.counts));
 		if (admin) report.check("and the restored server signs its admin in", !!(await signIn(origin, admin, vault.password(admin))), `no session for ${admin}`);
@@ -349,8 +384,9 @@ export const liveProbes: Probes = {
 		if (!instance.url || !domain || !was?.copy) return;
 		const copy = was.copy;
 		report.section(`a copy from before the takedown, restored (${project.name})`);
+		const origin = instance.url;
 		const restored = await deps.openStore(instance, async (store) => {
-			await store.restoreBackup(copy);
+			await whileUsed(origin, () => store.restoreBackup(copy));
 			return { person: await store.subjectReport(`${USER}@${domain}`) };
 		}).catch(failed);
 		report.check("a copy this system never rewrote restores, and they are back", !("error" in restored) && !!restored.person.userId, "error" in restored ? restored.error : "they did not come back");
@@ -403,7 +439,7 @@ export const liveProbes: Probes = {
 			const home = await fetch(`${url}/.well-known/mailflare-home?domain=${domain}`).then((response) => response.json() as Promise<{ server?: string; url?: string; jurisdiction?: string | null }>, () => ({} as { server?: string; url?: string; jurisdiction?: string | null }));
 			report.check(`${domain} goes home to ${server}${map.servers[server].jurisdiction ? ` (${map.servers[server].jurisdiction})` : ""}`, home.server === server && home.url === map.servers[server].url && (home.jurisdiction ?? null) === (map.servers[server].jurisdiction ?? null), JSON.stringify(home));
 		}
-		report.check("a domain nobody hosts is refused", (await status(`${url}/.well-known/mailflare-home?domain=nobody.example`)) === 404);
+		await answers(report, "a domain nobody hosts is refused", () => status(`${url}/.well-known/mailflare-home?domain=nobody.example`), 404);
 		await homes(url, map, report);
 		report.check("router plan: reconciled", (await router(deployed, { ...FLAGS, status: true }, name, quiet)) === 0);
 		report.check("unconfirmed, a router destroy is a preview", (await router(deployed, { ...FLAGS, cleanup: true, status: true }, name, quiet)) === 1);
@@ -428,7 +464,7 @@ export const liveProbes: Probes = {
 			const home = await fetch(`${url}/.well-known/mailflare-home?domain=${domain}`).then((response) => response.json() as Promise<{ server?: string; jurisdiction?: string | null }>, () => ({} as { server?: string; jurisdiction?: string | null }));
 			report.check(`${domain} goes home to ${server}${map.servers[server].jurisdiction ? ` (${map.servers[server].jurisdiction})` : ""}`, home.server === server && (home.jurisdiction ?? null) === (map.servers[server].jurisdiction ?? null), JSON.stringify(home));
 		}
-		report.check("a domain nobody hosts is refused", (await status(`${url}/.well-known/mailflare-home?domain=nobody.example`)) === 404);
+		await answers(report, "a domain nobody hosts is refused", () => status(`${url}/.well-known/mailflare-home?domain=nobody.example`), 404);
 		await homes(url, map, report);
 	},
 

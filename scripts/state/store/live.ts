@@ -104,7 +104,14 @@ export function makeLiveStore(instance: Instance): Store {
 	// A list that fails is not an empty list: reading "nothing exists" from a 401 would plan
 	// to create everything, or report a teardown as done.
 	const list = async <T>(path: string, field: string): Promise<T[]> => {
-		const res = await call(path);
+		let res = await call(path);
+		// A Worker that was deployed a moment ago can answer one request with an error while it
+		// settles. Reading again is harmless, and saves a whole document from failing on it.
+		for (const delay of [1500, 4000, 9000]) {
+			if (res.status < 500) break;
+			await sleep(delay);
+			res = await call(path);
+		}
 		if (res.status !== 200) throw new Error(`GET ${path} failed: ${apiError(res)}`);
 		return (res.json?.[field] ?? []) as T[];
 	};

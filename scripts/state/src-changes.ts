@@ -27,16 +27,16 @@ export const SOURCE_CHANGES_MADE: SourceChange[] = [
 		anchors: [{ file: "src/lib/realtime/utils.ts", says: "MAILFLARE_JURISDICTION" }, { file: "worker.ts", says: "realtimeNamespace(env)" }],
 	},
 	{
-		need: "each server is built from its own config",
-		where: "vite.config.ts (cloudflare configPath)",
-		why: "the Vite plugin fixes a Worker's bindings at build time and reads one config. It now takes MAILFLARE_WRANGLER_CONFIG, so every server is the same code with its own database, bucket and queues.",
-		anchors: [{ file: "vite.config.ts", says: "MAILFLARE_WRANGLER_CONFIG" }],
-	},
-	{
 		need: "a backup can be made at all",
 		where: "src/lib/backups/export.ts (BACKUP_TABLES), table-groups.ts, types.d.ts",
 		why: "a backup aborts when the database has a table the list does not name, and four had been added since (drive_items, drive_shares, drive_upload_parts, push_subscriptions): every backup failed. They are listed now, so backups run, and restore them.",
 		anchors: [{ file: "src/lib/backups/export.ts", says: '"drive_items", "drive_shares", "drive_upload_parts", "push_subscriptions"' }, { file: "src/lib/backups/table-groups.ts", says: '"push_subscriptions"' }],
+	},
+	{
+		need: "a backup can be restored on a server that is being used",
+		where: "src/lib/backups/export.ts (createInsertStatement)",
+		why: "a restore empties every table and then inserts, in many separate statements. Any request in between re-creates the default licence row, the restore's INSERT then failed on it, and the database was left half restored. It inserts OR REPLACE now, so a row made in the meantime is overwritten rather than fatal.",
+		anchors: [{ file: "src/lib/backups/export.ts", says: "INSERT OR REPLACE INTO" }],
 	},
 	{
 		need: "mail that is stored for nobody leaves nothing behind",

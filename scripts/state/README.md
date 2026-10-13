@@ -18,8 +18,8 @@ npx wrangler login
 npm run state:check                 # types + lint + unit tests, conformance on the in-memory store included
 
 # 1b. Before trusting a change with the fleet: the same conformance, on real Cloudflare.
-npm run state -- conform            # two disposable servers: built, edited, a person erased, destroyed, rebuilt (~20 min)
-npm run state -- conform --quick    # the same without the destroy and rebuild (~15 min)
+npm run state -- conform            # two disposable servers: built, edited, a person erased, destroyed, rebuilt (~13 min)
+npm run state -- conform --quick    # the same without the destroy and rebuild (~11 min)
 
 # 2. See what the fleet needs. Writes nothing.
 npm run state -- plan               # mailflare, mailflare-eu, and the router
@@ -41,7 +41,11 @@ npm run state -- verify
 ls scripts/state/credentials/       # one file per server, and one per person; never committed
 npm run state -- logins             # every person's login as JSON, ready to send each of them
 
-# 6. When someone must be erased (a takedown). Taking them out of the JSON only disables them.
+# 6. On a schedule, every few minutes: keep each server running in its country. Cloudflare stops
+#    honouring a placement for a while now and then; this notices in one request and moves it.
+npm run state -- place              # ✓ mailflare-eu: answers from DE        (about two seconds)
+
+# 7. When someone must be erased (a takedown). Taking them out of the JSON only disables them.
 npm run state -- subject sam@acme.de        # where they are, on every server, and what to write
 #    …write them under "erased" in a document of that server, then steps 2 and 4, and between them:
 npm run state -- apply --confirm-destroy    # their account, mail and files — and out of every backup
@@ -49,7 +53,8 @@ npm run state -- apply --confirm-destroy    # their account, mail and files — 
 
 Run it again any time: every step is idempotent, and one that stopped half way is finished
 by running it again. When the app's code or `wrangler.jsonc` changes, `npm run state -- deploy`
-rolls it out to every server before step 2. Add `--concurrency 8` to steps 2-4 to drive servers
+rolls it out to every server before step 2: one build, then the servers four at a time, each
+about twenty seconds. Add `--concurrency 8` to steps 2-4 to drive servers
 in parallel. `npm run state -- apply --rotate-passwords` gives every declared account a new
 password and every declared key a new secret, for when the folder must hold all of them.
 
@@ -80,8 +85,8 @@ is not met says so.
 | 2 | Editing the JSON does what Terraform would: add, change, **and remove** | every run reads the servers and compares; what a written section no longer holds is a `-` | conformance: one of every kind of thing is added, changed and removed, and each plan must say exactly that |
 | 3 | Works on every spec | every project loads and validates in the unit tests | `state:check`; `verify` on the live fleet |
 | 4 | A fleet: many servers at once | each project runs against its own server through its own store and key, with one shared `--concurrency` limit ([fleet.ts](fleet.ts)) | conformance runs two real servers at once; the live fleet at `--concurrency 4` |
-| 5 | Hundreds of servers, easily | a server is a folder; its Worker, database, bucket and queues are named after it and created by `apply` ([deploy.ts](deploy.ts)) | conformance: built from their folders, destroyed, and built again |
-| 6 | GDPR: data stays in its jurisdiction, and a server runs in a chosen country | `server.json` declares `jurisdiction` (database, bucket, Durable Objects: a guarantee) and `country` (the Worker is placed there: a hint Cloudflare applies some minutes after a deploy) | conformance and `verify` ask Cloudflare: database and bucket in `eu`, the placement set as declared — and, as a fact, that the data center which answered is in that country ([colos.json](colos.json)). Limits under Outstanding |
+| 5 | Hundreds of servers, easily | a server is a folder; its Worker, database, bucket and queues are named after it and created by `apply` ([deploy.ts](deploy.ts)). One build is every server's, so a rollout is uploads, several at a time | conformance: built from their folders, destroyed, and built again; both rolled out at once from one build |
+| 6 | GDPR: data stays in its jurisdiction, and a server runs in a chosen country | `server.json` declares `jurisdiction` (database, bucket, Durable Objects: a guarantee) and `country` (the Worker is placed there, and kept there: a placement is a hint Cloudflare stops honouring now and then, so each country is named several ways and a server is moved to the next) | conformance and `verify` ask Cloudflare: database and bucket in `eu`, the placement set as declared — and, as a fact, that the data center which answered is in that country ([colos.json](colos.json)). Conformance puts each server in another country and requires `apply` to bring it home. Limits under Outstanding |
 | 6a | A tenant lives on a server that is home to its country | a tenant's `country` must be one its server `serves`; someone new is suggested the server for their country | unit: a tenant on the wrong server is refused at load. Conformance and `verify`: the router's suggestion per country |
 | 7 | A person is always sent to their home server, wherever they are | routing is by identity, never geography: a domain's mail is delivered to its own server's Worker, and the router sends a sign-in to the server holding the domain ([router.ts](router.ts)) | conformance: a router across two servers sends each domain home; `verify` asks the fleet's own |
 | 8 | Every aspect is controlled: administration, mail, calendar, drive, integrations | licence, settings, backups; signatures, auto-replies, aliases, folders, inbox rules, the assistant; preferences, templates, contacts, booking pages, events, drive folders, API keys, webhooks | conformance: each is added, then read back from the deployed app signed in as the person |
@@ -110,6 +115,7 @@ npm run state -- <path>/<file>.json apply     # one document, on its project's s
 npm run state -- verify                       # the live fleet, read-only: logins, jurisdictions, the front door
 npm run state -- conform [--quick]            # does it all still work? on real, disposable servers
 npm run state -- deploy                       # roll the current code out to every server
+npm run state -- place                        # keep every server answering from its country (for a schedule)
 npm run state -- router plan|apply|destroy    # the front door alone
 npm run state -- logins                       # every login on record, as JSON (or: <project> logins)
 npm run state -- subject <email>              # where one person's data is, on every server, and how to erase them
@@ -392,17 +398,37 @@ npm run state -- router apply       # tell the front door (or run the fleet-wide
 ```
 
 `apply` creates the database `acme-eu`, the bucket `acme-eu-raw` and the queues
-`acme-eu-inbound|outbound|agent`, builds the Worker from `wrangler.jsonc` with those bound
-(the generated `wrangler.acme-eu.json`, not committed), deploys it, puts its secrets, applies
+`acme-eu-inbound|outbound|agent`, uploads the Worker with those bound, puts its secrets, applies
 the migrations, records `databaseId` and `url` in `server.json`, and gives the empty instance
 the admin `instance.json` names. `wrangler.jsonc` itself is the default server, `mailflare`,
-and the template for all the others. `apply` builds a server only when it does not exist yet.
-To roll new code, or a changed binding, out to the ones that do:
+and the template for all the others (each gets a generated `wrangler.acme-eu.json`, not
+committed). `apply` creates a server only when it does not exist yet. To roll new code, or a
+changed binding, out to the ones that do:
 
 ```bash
-npm run state -- deploy             # every server, one at a time, with its migrations
+npm run state -- deploy             # every server: one build, uploads four at a time, then its migrations
 npm run state -- acme-eu deploy     # one
 ```
+
+### How long a deploy takes, and where the time goes
+
+| | Measured | Whose time it is |
+|---|---|---|
+| the build | 8 s, **once per run** however many servers | ours |
+| a server that exists | 15–30 s | Cloudflare's: taking the Worker (5 MB) and its triggers, queues and schedules |
+| a server that does not exist yet | about 50 s | the same, plus its database, bucket, queues and secrets |
+| in its country | about 5 s after the upload | Cloudflare's; the deploy waits for it and prints it |
+
+**One build is every server's.** Nothing a build writes names a server except the config
+wrangler deploys with (`dist/server/wrangler.json`), so that file is rewritten beside itself
+for each server and the same build is uploaded to all of them. A fleet costs its uploads, not
+a build each, and they run side by side. Keep it so: what differs between servers belongs in
+a binding or a variable, never in the bundle.
+
+`STATE_TRACE=1 npm run state -- <anything>` prints every command and request this tool makes
+with how long it took, and the totals by kind at the end. Database statements go straight to
+Cloudflare's API when `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` are on record (a third
+of a second each); without them each one starts a `wrangler` (about a second).
 
 Secrets a new server is given, when they are in the environment or keychain: `CF_TOKEN`
 (required; falls back to `CLOUDFLARE_API_TOKEN`), `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`,
@@ -415,7 +441,7 @@ are, never by where they happen to be. Three things say where "there" is:
 
 | In `server.json` | Decides | How | Strength |
 |---|---|---|---|
-| `country` | where the Worker **runs** | a placement hint: Cloudflare runs it in the data center nearest a cloud region in that country (`de` → `aws:eu-central-1`, Frankfurt) | a hint, and checked as a fact: every response of a placed Worker carries `cf-placement`, naming the data center that answered. `verify` fails when that is in another country, or when a server deployed more than half an hour ago is not placed at all |
+| `country` | where the Worker **runs** | a placement hint: Cloudflare runs it in the data center nearest a cloud region in that country (`de` → `gcp:europe-west3`, Frankfurt) | a hint, kept true by checking the fact: every response of a placed Worker carries `cf-placement`, naming the data center that answered. `plan` and `verify` fail when that is not in the country; `apply` and `place` move the server until it is |
 | `jurisdiction` | where the data is **kept** | the database and bucket are created in it; the Durable Objects are pinned to it | a guarantee, for `eu` and `fedramp` |
 | `serves` | whose tenants are **at home** here | a tenant's `country` must be one the server serves, or the documents are refused before anything runs | checked at load |
 
@@ -426,11 +452,48 @@ refuses a `country` Cloudflare has no data center in before anything runs. Cloud
 data centers; when one answers that the list has not heard of, the check says so, and
 `npm run state -- colos` pulls the list again and prints what changed.
 
-**Placement is not immediate.** After every deploy Cloudflare runs the Worker wherever a
-request arrives until it has placed it: seen here, under four minutes for two servers placed
-in Frankfurt, and between four and ten for one placed in London. `verify` says which is true right now —
-`– it answers from GB (not checked: Cloudflare has not placed it yet — it was deployed 6
-minute(s) ago…)` — so run it again before relying on it.
+### Keeping a server in its country
+
+A placement takes effect about five seconds after a deploy — measured for new servers and
+redeployed ones, in London and Frankfurt, and the deploy waits for it and says so. What does
+not hold is that it *stays*:
+
+- **Cloudflare stops honouring one placement target at a time**, for every Worker on it, old
+  or new, for tens of minutes. Seen here in one evening: `aws:eu-west-2` (London) for about
+  half an hour, then `aws:eu-central-1` (Frankfurt) for longer, then `aws:eu-west-2` again.
+  While it lasts, those Workers run wherever a request arrives.
+- **Another name for the same city goes on working.** During the Frankfurt lapse a Worker
+  beside `gcp:europe-west3` or `azure:germanywestcentral` ran in Frankfurt throughout.
+- **A Worker takes one target only** (Cloudflare refuses two), so it cannot carry its own
+  fallback. But the target can be changed with one API call, in a second or two, with no upload.
+
+So a country is named several ways ([spec.ts](spec.ts), `PLACEMENTS`), and a server is moved to
+the next when the one it is on is not being honoured:
+
+```
+$ npm run state -- plan
+~ server mailflare-eu: it is not answering from DE: Cloudflare is not honouring aws:eu-central-1 — apply moves it beside gcp:europe-west3
+$ npm run state -- apply          # or, for this alone:  npm run state -- place
+~ server mailflare-eu: it is not answering from DE: Cloudflare is not honouring aws:eu-central-1. Moved beside gcp:europe-west3, and it answers from DE (the data center FRA)
+```
+
+`npm run state -- place` does only this, for every server, in about two seconds when all is
+well: put it on a schedule. Between a lapse and the next run, requests are processed where
+they arrive; the data stays in its jurisdiction.
+
+```cron
+# every five minutes; it needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in its environment
+*/5 * * * *  cd /path/to/mailflare && npm run --silent state -- place >> place.log 2>&1
+```
+
+It exits 1 when a server could not be brought home (every name for its country is being
+ignored at once), which is the thing to alert on.
+
+Every name in `PLACEMENTS` was *seen* to run in its country — 107 cloud regions were tried
+and the answering data center looked up — not assumed from the region's name. `aws:eu-west-1`
+is Ireland's and runs in London; both regions in the UAE run in Mumbai; so neither is in the
+table. A `"placement"` in `server.json` names one exact region instead, and then there is no
+other to move to.
 
 So a server can run in a chosen country, on any plan, with nothing Enterprise. Changing
 `country` or `placement` on a server that exists is a plan line of its own —
@@ -523,9 +586,9 @@ wrangler.ts         wrangler, the Cloudflare API, the app's HTTP API
 - **A failure is never an empty answer.** A list that cannot be read stops the document;
   it is not "nothing exists".
 - **`src/` is the product.** It is driven from outside, through its API and its database.
-  The places it needed a change there — three for the fleet, and two faults that had to be
-  fixed (backups that aborted, mail for nobody kept forever) — are listed by
-  `--source-changes`, and a test fails if one is reverted.
+  The places it needed a change there — two for the fleet, and three faults that had to be
+  fixed (backups that aborted, a restore that failed on a server in use, mail for nobody kept
+  forever) — are listed by `--source-changes`, and a test fails if one is reverted.
 - **The order in `registry.ts` is load-bearing.** Read its comment before moving anything.
 
 ## Verifying, and changing this tool
@@ -549,16 +612,18 @@ The same code runs in three places:
 | | `npm run state:check` | `npm run state -- _sandbox conform` | `npm run state -- conform` |
 |---|---|---|---|
 | Runs the properties on | the in-memory store | the real app, on `npm run dev` | two real Cloudflare servers, at once |
-| Takes | under a minute | ~10 minutes | ~20 minutes; ~15 with `--quick` (no destroy and rebuild) |
+| Takes | under a minute | ~10 minutes | ~13 minutes; ~11 with `--quick` (no destroy and rebuild) |
 | Run it | after every change | to try a change against the app with no Cloudflare | before trusting a change with the fleet |
 | Also | types, lint, the safety rules, and the tests that hold this system to `src/` | the probes that need no Cloudflare | all the probes, below |
 
 On real servers the **probes** ([probes.ts](probes.ts)) ask what a plan cannot know:
 
 - Cloudflare itself: the database and bucket are in the jurisdiction declared; the Worker is
-  told its name and jurisdiction, its placement is set as declared, and it holds no
-  Cloudflare token. Asked last, because a redeployed Worker is not placed at once: each
-  server answers from a data center in its country.
+  told its name and jurisdiction, its placement names its country, and it holds no
+  Cloudflare token.
+- Where it runs: each server is put beside another country's region on purpose. The plan must
+  say so, an `apply` must bring it home without deploying it, and it must then answer from a
+  data center in its country.
 - The deployed app, signed in as the people: every generated login works; signatures, folders,
   inbox rules, templates, contacts, booking pages (and the public page), calendar, drive, API
   keys, the assistant and webhooks are all shown as written.
@@ -569,7 +634,8 @@ On real servers the **probes** ([probes.ts](probes.ts)) ask what a plan cannot k
   admin's webhook is called.
 - Mail that is stored for nobody: it leaves nothing behind in the bucket.
 - Backups: one is taken as the server is built, and another on request; each completes, is
-  read back from the bucket, and holds what the database holds.
+  read back from the bucket, and holds what the database holds. Restores are made with the
+  server in use throughout, since that is when a restore is needed.
 - A takedown: before it, the person is merely disabled and a backup holds them. After it,
   nothing of theirs is in the database, their mail is gone from the bucket, no backup holds
   them, every backup is still whole, they cannot sign in and everyone else can. The rewritten
@@ -603,8 +669,10 @@ Conformance resets what it runs on, so it only runs on servers whose `server.jso
 
 Limits of the platform or the app. None is hidden by a green run.
 
-- **Placement is where a Worker's web requests run, not a legal boundary, and not at once.**
-  For some minutes after each deploy it has not been applied yet. Once applied, it covers the
+- **Placement is where a Worker's web requests run, not a legal boundary, and not a promise.**
+  Cloudflare stops honouring a placement for tens of minutes at a time; this system notices
+  and moves the server, but only when `place`, `plan` or `apply` runs, so between a lapse and
+  the next run requests are processed wherever they arrive. When it holds, it covers the
   requests people and clients make; the handlers for incoming mail, queues and schedules run
   where Cloudflare starts them, static files are served from the nearest edge, and Queues have
   no jurisdiction (their messages carry references and envelope addresses, not bodies).
@@ -619,7 +687,9 @@ Limits of the platform or the app. None is hidden by a green run.
   The full list is under [What a takedown does not reach](#what-a-takedown-does-not-reach).
 - **A backup is the database only.** Raw mail, attachments and drive files live in the bucket
   and nothing backs them up. A backup is unencrypted, and holds password hashes, TOTP secrets
-  and provider keys. It is restored by wiping every table and inserting, which is not atomic.
+  and provider keys. It is restored by wiping every table and inserting, which is not one transaction: a restore
+  on a server in use now completes (it used to fail and leave the database half restored), but
+  what people do during it can be lost or mixed in, and one that fails leaves it part-restored.
 - A restore replaces the app's record of its own backups, so backups made since are in the
   bucket with no record: the app never lists or expires them. This system finds them by
   listing the bucket; deleting them is by hand. See `--source-changes`.

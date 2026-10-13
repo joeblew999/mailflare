@@ -10,6 +10,7 @@ import { deployServer } from "./deploy";
 import { liveDeps, resolveInstance, runFleet, subjectInstances } from "./fleet";
 import { backupKeys } from "./resources/erased";
 import { pushRunbook } from "./resources/push";
+import { limiter } from "./runner";
 import { router } from "./router";
 import { AI_USAGE_UNATTRIBUTABLE, printSourceChanges, sourceChangeNeeded } from "./src-changes";
 import { digestOf, subjectLines, subjectTotal, subjectUnknown, tombstones } from "./subject-scope";
@@ -89,20 +90,43 @@ async function subject(cli: Cli, email: string): Promise<number> {
 }
 
 // `apply` builds a server that does not exist. This rolls the CODE - and whatever wrangler.jsonc
-// now binds - out to the ones that do: one at a time, since builds share an output folder.
+// now binds - out to the ones that do. It is built once, and the servers are uploaded to
+// several at a time: what a fleet costs is the uploads, not a build each.
 async function deploy(cli: Cli, projects: Project[]): Promise<number> {
-	const template = liveDeps().template();
-	const results: Array<[string, boolean]> = [];
-	for (const project of projects) {
-		const server = project.server;
-		if (!server || server.local || server.template) continue;
+	const deps = liveDeps();
+	const template = deps.template();
+	const targets = projects.filter((project) => project.server && !project.server.local && !project.server.template);
+	const limit = limiter(Math.max(cli.concurrency, 4));
+	const began = Date.now();
+	if (targets.length > 1) await deps.warmUp();
+	const results: Array<[string, boolean]> = await Promise.all(targets.map((project) => limit(async (): Promise<[string, boolean]> => {
+		const server = project.server!;
 		const { deployment } = resolveInstance(project, cli, template);
-		results.push([server.name, !!deployment && !!(await deployServer(server, deployment, { base: project.dir, dryRun: false, print: console.log, template }))]);
-	}
+		return [server.name, !!deployment && !!(await deployServer(server, deployment, { base: project.dir, dryRun: false, print: console.log, template }))];
+	})));
 	console.log("\n──────── summary");
 	for (const [name, ok] of results) console.log(`  ${ok ? "✓" : "✗"} ${name}`);
-	console.log(`\n${results.filter(([, ok]) => ok).length}/${results.length} server(s) deployed`);
+	console.log(`\n${results.filter(([, ok]) => ok).length}/${results.length} server(s) deployed in ${Math.round((Date.now() - began) / 1000)}s`);
 	return results.every(([, ok]) => ok) ? 0 : 1;
+}
+
+// Cloudflare stops honouring a placement for a while now and then, and until it is moved the
+// server runs wherever a request arrives. This asks every server where it answers from - one
+// request each - and moves any that is not home. It is seconds, so it is what to put on a schedule.
+async function keepPlaced(cli: Cli, projects: Project[]): Promise<number> {
+	const deps = liveDeps();
+	const template = deps.template();
+	const limit = limiter(Math.max(cli.concurrency, 8));
+	const targets = projects.filter((project) => project.server?.country && project.server.url && !project.server.local);
+	const results = await Promise.all(targets.map((project) => limit(async () => {
+		const server = project.server!;
+		const { deployment } = resolveInstance(project, cli, template);
+		const placed = deployment ? await deps.place(server, deployment, server.url!, { fix: true }).catch((error) => ({ ok: false, said: message(error) })) : { ok: false, said: "it has no deployment" };
+		console.log(`  ${placed.ok ? (placed.said ? "~" : "✓") : "✗"} ${server.name}: ${placed.said ?? `answers from ${server.country!.toUpperCase()}`}`);
+		return placed.ok;
+	})));
+	if (targets.length === 0) console.log("No deployed server declares a country.");
+	return results.every(Boolean) ? 0 : 1;
 }
 
 async function main(): Promise<number> {
@@ -125,6 +149,7 @@ async function main(): Promise<number> {
 		if (command.kind === "subject") return await subject(cli, command.email);
 		if (command.kind === "router") return await router(loadProjects(cli.dir), cli.flags, cli.router);
 		if (command.kind === "deploy") return await deploy(cli, projectsFor(command.target, cli.dir));
+		if (command.kind === "place") return await keepPlaced(cli, projectsFor(command.target, cli.dir));
 		if (command.kind === "verify") return await verify(projectsFor(command.target, cli.dir), cli.concurrency, liveDeps(cli.credentials), liveProbes);
 		if (command.kind === "conform") {
 			// With no target, the servers kept for this: read again at each step, since a deploy

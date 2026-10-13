@@ -247,11 +247,10 @@ export async function conform(options: ConformOptions, deps: FleetDeps, report: 
 	// not change that. Conformance is of THIS code, so it goes out first.
 	const standing = projects.filter((project) => project.server?.url && !project.server.local);
 	transcript.length = 0;
-	let rolled = 0;
-	for (const project of standing) {
+	const rolled = (await Promise.all(standing.map(async (project) => {
 		const { deployment } = resolveInstance(project, { flags: BASE, concurrency: 1, explicit: { url: false, db: false } }, deps.template());
-		if (deployment && (await deps.deploy(project.server!, deployment, { base: project.dir, dryRun: false, print: quiet.print, template: deps.template() }).catch(() => null))) rolled += 1;
-	}
+		return !!deployment && !!(await deps.deploy(project.server!, deployment, { base: project.dir, dryRun: false, print: quiet.print, template: deps.template() }).catch(() => null));
+	}))).filter(Boolean).length;
 	if (standing.length > 0 && !report.check(`the current code is rolled out to the servers already standing (${standing.length})`, rolled === standing.length, said())) return finish();
 	if (!report.check("apply: every server exists, with its documents applied", allOk(await go({})), said())) return finish();
 	projects = options.load();
@@ -309,8 +308,16 @@ export async function conform(options: ConformOptions, deps: FleetDeps, report: 
 		exactly("after which there is nothing to do", await go({ status: true }, again.target), []);
 		for (const project of projects) await options.probes.logins(project, deps, report);
 		await options.probes.fleet(projects, deps, report);
-		// Asked last: a server that was just redeployed is not placed in its country at once.
-		report.section("where each server answers from");
+		// Cloudflare stops honouring a placement now and then, and the server then runs wherever
+		// a request arrives. That cannot be made to happen, so each server is put in another
+		// country instead: the plan must say so, and an apply must bring it home with no deploy.
+		report.section("where each server runs (put in another country on purpose, and brought home)");
+		const displaced: string[] = [];
+		for (const project of projects) if (await options.probes.displace(project, deps, report)) displaced.push(project.name);
+		const away = await go({ status: true });
+		report.check("the plan says each is not in its country", displaced.length > 0 && displaced.every((name) => away.find((result) => result.name === name)?.server?.includes("which is not")), said());
+		const back = await go({});
+		report.check("apply moves each one back, without deploying it", allOk(back) && !said().includes("Deploying the server"), said());
 		for (const project of projects) await options.probes.placed(project, deps, report);
 	}
 

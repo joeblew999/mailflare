@@ -19,6 +19,12 @@ export const loadColos = (path = COLOS_FILE): Colos => (JSON.parse(readFileSync(
 /** The country a data center is in, as documents write one, or null when the list has not heard of it. */
 export const countryOfColo = (colo: string, colos: Colos = loadColos()): string | null => colos[colo]?.toLowerCase() ?? null;
 
+/** Where a request to a server was answered from: the data center Cloudflare names, and its country. */
+export async function answeredFrom(origin: string): Promise<{ colo: string | null; country: string | null }> {
+	const colo = coloOf(await fetch(`${origin.replace(/\/+$/, "")}/login`, { redirect: "manual", signal: AbortSignal.timeout(15_000) }).then((response) => response.headers.get("cf-placement"), () => null));
+	return { colo, country: colo ? countryOfColo(colo) : null };
+}
+
 /** Does Cloudflare have a data center in this country at all? Without one, nothing can run there. */
 export const hasColo = (country: string, colos: Colos = loadColos()): boolean => Object.values(colos).includes(country.toUpperCase());
 
