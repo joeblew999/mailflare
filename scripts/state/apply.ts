@@ -37,6 +37,11 @@ if (flags.steps) {
 // --all/--spec load many documents; the global convenience flags run a single target.
 const specMode = Boolean(values.all) || Boolean(values.spec);
 const useSpecs = specMode && !flags.licenseStatus;
+// The instance document is loaded up front so a run consisting only of it (a reset, a
+// licence change) still counts as work to do.
+const instanceSpec = values.instance ? loadSpec(String(values.instance)) : null;
+const hasInstanceWork = Boolean(instanceSpec?.fresh || instanceSpec?.license || instanceSpec?.push);
+
 let entries: SpecEntry[];
 let singleRoles: Role[] = [];
 
@@ -53,7 +58,7 @@ try {
 		// The convenience flags are just shorthand for document sections.
 		if (flags.plan !== undefined && !target.license) target.license = { plan: flags.plan };
 		if (flags.push && !target.push) target.push = {};
-		const global = Boolean(target.fresh) || Boolean(target.license) || Boolean(target.push);
+		const global = Boolean(target.fresh) || Boolean(target.license) || Boolean(target.push) || hasInstanceWork;
 		singleRoles = rolesFor(values, target, flags);
 		if (!domainValue && !global) {
 			console.error("Nothing to do. Pass a document (--spec <path>), --all, --domain <hostname>, --plan <team|pro|community>, or --push.\n");
@@ -66,6 +71,14 @@ try {
 			process.exit(1);
 		}
 		entries = [{ name: domainValue, spec: target }];
+	}
+	// The instance layer: an instance document carries what belongs to the server rather
+	// than a tenant (the licence, web push). It runs FIRST, in the same process and under
+	// the same admin key, which is what stops every tenant document having to declare a
+	// licence the server already has - and stops a tenant silently depending on one it
+	// never declared.
+	if (instanceSpec) {
+		entries.unshift({ name: `instance:${values.instance}`, spec: instanceSpec });
 	}
 } catch (error) {
 	console.error(message(error));

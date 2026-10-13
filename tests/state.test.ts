@@ -551,3 +551,19 @@ test("a reset-only document is accepted without a domain", async () => {
 	assert.equal(code, 0);
 	assert.ok(calls.includes("wipeData"), "the reset ran");
 });
+
+test("an instance document is applied before the tenant documents", async () => {
+	// The instance layer exists so a tenant does not have to declare server-wide facts
+	// (the licence) - and so it cannot silently depend on one it never declared. That
+	// only works if the instance document runs FIRST.
+	const { store, calls } = fakeStore({
+		domains: [{ id: "d1", hostname: "dev.example" }],
+		users: [],
+	});
+	const instance = { name: "instance", spec: { license: { plan: "team" } } };
+	const tenant = { name: "dev.example", spec: projectFor("dev.example", { mailboxes: [{ role: "support", shared: true }] }) };
+	assert.equal(await quiet(() => runSpecs(store, flags(), { roles: "" }, [instance, tenant])), 0);
+	assert.ok(calls.includes("setLicense:team"), "licence applied");
+	assert.ok(calls.includes("createMailbox:support"), "tenant provisioned");
+	assert.ok(calls.indexOf("setLicense:team") < calls.indexOf("createMailbox:support"), "instance layer ran first");
+});

@@ -1,14 +1,37 @@
 {
   "domain": "ubuntudesign.com",
   "mailboxes": [
-    { "role": "office", "displayName": "Office" },
-    { "role": "admin", "displayName": "Admin" },
+    {
+      "role": "office",
+      "displayName": "Office"
+    },
+    {
+      "role": "admin",
+      "displayName": "Admin"
+    },
     {
       "role": "support",
       "displayName": "Support",
       "shared": true,
-      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
+      "access": [
+        {
+          "email": "gerard@ubuntudesign.com",
+          "permission": "full_access"
+        }
+      ]
     },
-    { "role": "events", "displayName": "Events", "shared": true }
+    {
+      "role": "events",
+      "displayName": "Events",
+      "shared": true
+    }
+  ],
+  "accounts": [
+    {
+      "username": "gerard",
+      "name": "Gerard",
+      "role": "admin",
+      "passwordEnv": "MAILFLARE_PROV_PASSWORD"
+    }
   ]
 }

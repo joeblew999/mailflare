@@ -6,6 +6,7 @@ export function parseCli() {
 		options: {
 			domain: { type: "string" },
 			spec: { type: "string" },
+			instance: { type: "string" },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts/state/specs" },
 			roles: { type: "string", default: "" },
@@ -74,6 +75,7 @@ mailboxes, accounts, routing rules, MCP keys, the license, and web push. The sam
 sections drive --status and --cleanup, so nothing has its own command.
 
   npm run state -- --spec scripts/state/specs/example.json
+  npm run state -- --instance scripts/state/specs/instances/mailflare.json --spec scripts/state/specs/<domain>.json
   npm run state -- --domain <hostname> --roles a,b,c [--onboard]
   npm run state -- --all --dry-run
   npm run state -- --plan team               # license only, no domain
@@ -83,6 +85,9 @@ sections drive --status and --cleanup, so nothing has its own command.
 
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
   domain that already has MX records unless you pass --confirm-mx.
+
+Instance documents (specs/instances/) carry things that belong to the server rather than
+a tenant - the licence, web push - and are applied before every tenant document.
 
 Desired-state document (JSON) — any subset of these sections:
   { "domain": "...",
@@ -99,6 +104,7 @@ Desired-state document (JSON) — any subset of these sections:
 
 Flags:
   --spec <path>         one document, or many via { "specs": [...] }
+  --instance <path>     an instance document, applied BEFORE the tenant ones
   --all                 apply every project in --dir (skips example.json, _*.json)
   --dir <path>          specs folder for --all (default: scripts/state/specs)
   --domain <hostname>   apply a domain without a document

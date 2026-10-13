@@ -10,30 +10,20 @@ there is no per-capability command.
 
 ---
 
-## Read this first — the live instance is currently broken
+## Read this first — current state
 
-The live D1 was **deliberately wiped** during a `--fresh` test and is only partly restored.
+The live instance was wiped by a `--fresh` test and has now been **restored from its
+documents** using the new instance layer.
 
 | | |
 |---|---|
-| Live D1 now | 1 user, 1 domain, 2 mailboxes |
-| `amplifycms.com` | **half-provisioned** — mailboxes `admin@`/`hello@` exist; the account and both shared inboxes failed; routing failed |
-| `amplifycms.net` | **gone** (wiped, not re-applied) |
-| `ubuntudesign.com` | **gone** (wiped, not re-applied) |
+| Live instance | https://mailflare.gedw99.workers.dev |
 | Root admin | `root@amplifycms.com` / `fresh-admin-2026` |
-| Cloudflare side | MX, Email Routing rules and DNS for those domains **still exist** — `fresh` does not touch Cloudflare (see below) |
+| Restored | `amplifycms.com`, `amplifycms.net`, `ubuntudesign.com` — domains, mailboxes, accounts, routing rules, MCP keys |
+| Cloudflare side | untouched throughout — `--fresh` only resets the database |
 
-**To restore**: add a `license` section to the tenant specs (see *Known bugs* #1), then
-
-```bash
-npm run state -- --spec scripts/state/specs/amplifycms.com.json --onboard --confirm-mx
-npm run state -- --spec scripts/state/specs/amplifycms.net.json --onboard --confirm-mx
-npm run state -- --spec scripts/state/specs/ubuntudesign.com.json --onboard
-```
-
-`--confirm-mx` is required because the records are already Mailflare's own.
-
----
+Accounts created during the restore printed one-time passwords; put them in
+`passwordEnv` (e.g. `MAILFLARE_PROV_PASSWORD`) to supply them instead.
 
 ## Prerequisites
 
@@ -123,15 +113,16 @@ admin but also demands Turnstile and a domain, so it is unusable as a bootstrap.
 #    database_id, and the Worker `name`, CF_EMAIL_WORKER_NAME and the WORKER_SELF_REFERENCE
 #    service must all agree.
 
-# 2. Reset it and give it a primary admin. One document, applied against the new database:
-cat > /tmp/fresh.json <<'JSON'
-{ "fresh": { "admin": { "email": "root@example.com", "password": "…" } } }
-JSON
-npm run state -- --fresh --spec /tmp/fresh.json --admin-email root@example.com --admin-password '…'
+# 2. Reset it and give it a primary admin. The instance document is applied FIRST, so
+#    server-wide facts (the licence) stop being repeated in every tenant document:
+#    specs/instances/<server>.json — copy instances/example.json
+npm run state -- --fresh --instance scripts/state/specs/instances/mailflare.json \
+  --admin-email root@example.com --admin-password '…'
 #    (this runs `wrangler d1 migrations apply DB --remote` first)
 
 # 3. Apply each tenant document, then confirm
-npm run state -- --spec scripts/state/specs/<domain>.json --onboard
+npm run state -- --instance scripts/state/specs/instances/mailflare.json \
+  --spec scripts/state/specs/<domain>.json --onboard
 npm run state -- --spec scripts/state/specs/<domain>.json --status
 ```
 
@@ -141,6 +132,8 @@ The app now shows its normal login, and `root@example.com` is the primary admin.
 
 - **Add a tenant** — drop `specs/<domain>.json` in and `npm run state -- --spec …`. If the
   domain is not onboarded, add `--onboard` (publishes MX).
+- **Server-wide change** (licence, web push) — edit `specs/instances/<server>.json` and pass
+  it as `--instance`; it is applied before the tenant documents, in the same run and key.
 - **Change one** — edit the document and apply again. Every resource is idempotent and
   reconciles drift, so this is safe and is the only supported way to change things.
 - **Remove one** — `--cleanup` (add `--disable-accounts`, `--remove-domain` as needed).
@@ -280,6 +273,9 @@ wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly th
   schema (an omitted `password` becomes `null`, which the server rejects but our local
   parse accepts). Validate for drift, **send the input**.
 - **`??` does not catch an empty string** — accounts created via the API have `name: ""`.
+- **A mailbox `access` grant must name a LOCAL user**, not an external address. Grants are
+  written to `mailbox_access`, which needs a user id; an outside address silently fails the
+  run. Three checked-in documents had stale grants of exactly this kind.
 - **`wrangler.jsonc`**: `migrations_dir` must be repo-relative (`drizzle/migrations`, *not*
   `../../drizzle/migrations` — that is what the Vite plugin writes into
   `dist/server/wrangler.json`), and `--remote` needs a concrete `database_id`.
