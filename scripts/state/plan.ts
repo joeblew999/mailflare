@@ -6,7 +6,7 @@
 //
 // Resources classify their own changes; this only renders them, so the diff cannot disagree
 // with what apply would do - both come from the same walk over the same resources.
-export type ChangeAction = "create" | "update" | "delete" | "unchanged";
+export type ChangeAction = "create" | "update" | "delete" | "unchanged" | "problem";
 
 export type Change = {
 	/** Terraform-style address: what it is, and which one. */
@@ -16,7 +16,7 @@ export type Change = {
 	detail?: string;
 };
 
-const SYMBOL: Record<ChangeAction, string> = { create: "+", update: "~", delete: "-", unchanged: "·" };
+const SYMBOL: Record<ChangeAction, string> = { create: "+", update: "~", delete: "-", unchanged: "·", problem: "!" };
 
 /** Anything not `unchanged` is work to do. */
 export const hasWork = (changes: Change[]): boolean => changes.some((change) => change.action !== "unchanged");

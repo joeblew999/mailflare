@@ -139,7 +139,7 @@ async function planRoutingRules(ctx: Context, entries: RoutingEntry[], mailboxId
 	return entries.map((entry) => {
 		const pattern = String(entry.pattern ?? "*").trim();
 		const planned = planRouting(ctx, entry, mailboxIdsByRole);
-		if (!planned.ok) return { address: `routing.${pattern}`, action: "update" as const, detail: `invalid: ${planned.error}` };
+		if (!planned.ok) return { address: `routing.${pattern}`, action: "problem" as const, detail: `invalid: ${planned.error}` };
 		if (!planned.existing) return { address: `routing.${pattern}`, action: "create" as const, detail: planned.label };
 		if (!matches(planned.existing, planned.patch)) return { address: `routing.${pattern}`, action: "update" as const, detail: "drifted" };
 		return { address: `routing.${pattern}`, action: "unchanged" as const };

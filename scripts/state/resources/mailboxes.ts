@@ -133,7 +133,14 @@ async function planMailboxes(ctx: Context, roles: Role[], state: RunState): Prom
 			const permission = String(grant.permission ?? "full_access");
 			const userId = ctx.store.userIdByEmail(email);
 			const actual = box && userId ? ctx.store.accessPermission(box.id, userId) : null;
-			changes.push({ address: `mailbox_access.${role}.${email}`, action: actual === permission ? "unchanged" : actual ? "update" : "create", detail: actual && actual !== permission ? `${actual} -> ${permission}` : permission });
+			// A grant names a LOCAL user. One that names an outside address can never resolve,
+			// so it is reported as a problem rather than a create that will fail on apply.
+			const action = !userId ? "problem" : actual === permission ? "unchanged" : actual ? "update" : "create";
+			changes.push({
+				address: `mailbox_access.${role}.${email}`,
+				action,
+				detail: !userId ? "no local user with that address - the grant cannot resolve" : actual && actual !== permission ? `${actual} -> ${permission}` : permission,
+			});
 		}
 	}
 	return changes;

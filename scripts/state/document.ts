@@ -1,18 +1,21 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { assertValidSpec } from "./validate";
 import { join } from "node:path";
 import { validateBody } from "./app";
 import type { Flags } from "./flags";
 import type { Role, Spec } from "./spec";
 
 export function loadSpec(path: string): Spec {
+	let parsed: unknown;
 	try {
-		const spec = JSON.parse(readFileSync(path, "utf8"));
-		if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("must be a JSON object");
-		return spec as Spec;
+		parsed = JSON.parse(readFileSync(path, "utf8"));
 	} catch (error) {
 		throw new Error(`Could not read spec file ${path}: ${error instanceof Error ? error.message : String(error)}`);
 	}
+	// Validated before anything reads it, so a typo fails here with the field path rather than
+	// silently doing nothing.
+	return assertValidSpec(parsed, path);
 }
 
 /** The mailboxes a document declares, normalised. Roles come from the document: there is no
@@ -22,7 +25,7 @@ export function rolesFor(spec: Spec | null): Role[] {
 		.map((entry: any) => {
 			const role = String(entry.role ?? entry.localPart ?? "").trim().toLowerCase();
 			if (!role) return null;
-			const share = typeof entry.share === "boolean" ? entry.share : Boolean(entry.shared);
+			const share = Boolean(entry.shared);
 			const access = Array.isArray(entry.access) ? entry.access : [];
 			return { role, displayName: entry.displayName?.trim() || role, share, access } as Role;
 		})

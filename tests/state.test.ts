@@ -6,6 +6,7 @@ import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
 import { loadProject } from "../scripts/state/document";
+import { validateSpec } from "../scripts/state/validate";
 import { SOURCE_CHANGES } from "../scripts/state/src-changes";
 import { envBlockFor, stripJsonc } from "../scripts/state/deploy";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
@@ -650,4 +651,33 @@ test("a project is the instance document, then its tenants", () => {
 	assert.ok(entries.slice(1).every((entry) => entry.name.startsWith("mailflare/")), "then its tenants");
 	assert.ok(!entries.some((entry) => entry.name.includes("example")), "templates are skipped");
 	assert.throws(() => loadProject("nope"), /no project/);
+});
+
+test("a document is validated before anything reads it", () => {
+	// The alignment that matters: the JSON and the code cannot drift, because the JSON is
+	// checked against the model. A typo fails at plan with the field path, not silently.
+	assert.deepEqual(validateSpec({ domain: "a.test", mailboxes: [{ role: "office" }] }), [], "a good document passes");
+
+	const problems = validateSpec({
+		domain: "a.test",
+		mailboxs: [],
+		mailboxes: [{ role: "office", shared: "yes", access: [{ email: "outside@elsewhere.test", permission: "fullaccess" }] }],
+	});
+	assert.ok(problems.some((p) => p.includes("mailboxs: unknown section")), "a typo'd section is caught");
+	assert.ok(problems.some((p) => p.includes("shared")), "a wrong type is caught");
+	assert.ok(problems.some((p) => p.includes("permission")), "a bad enum is caught");
+
+	assert.deepEqual(validateSpec({ specs: [{ domain: "a.test" }] }), [], "a multi-document file validates each entry");
+});
+
+test("an unresolvable grant is reported as a problem, not a create", async () => {
+	// This is the ubuntusoftware.net bug: a grant naming an outside address. It used to look
+	// like work to do and then fail on apply; now the plan says so.
+	const { store } = fakeStore({
+		domains: [{ id: "d1", hostname: "dev.example" }],
+		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "support", hostname: "dev.example", type: "shared" }],
+	});
+	const grant = { email: "outside@elsewhere.test", permission: "full_access" as const };
+	const project = projectFor("dev.example", { mailboxes: [{ role: "support", shared: true, access: [grant] }] });
+	assert.equal(await runOn(store, flags({ status: true }), project, roles({ role: "support", access: [grant] })), 1, "the plan reports work to do");
 });

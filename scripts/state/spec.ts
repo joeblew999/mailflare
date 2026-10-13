@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
 // The DOCUMENT MODEL: what a desired-state document may contain, and the shapes the
 // app hands back. Response shapes come from the app's own builders, so field access is
 // checked against what the endpoint actually returns (no guessing):
@@ -20,7 +19,28 @@ export type ApiMailbox = Pick<
 	"id" | "userId" | "domainId" | "localPart" | "displayName" | "type" | "disabled" | "createdAt"
 > & { hostname: InferSelectModel<typeof domainsTable>["hostname"] };
 
-export type AccessGrant = { email?: string; permission?: string };
+export type Permission = "read_only" | "send_as" | "send_on_behalf" | "full_access";
+export type Provider = "none" | "cloudflare" | "resend" | "ses";
+
+export type AccessGrant = { email: string; permission?: Permission };
+/** A mailbox the document declares. `shared` is the JSON's word; Role.share is the code's. */
+export type MailboxEntry = {
+	role?: string;
+	localPart?: string;
+	displayName?: string;
+	shared?: boolean;
+	access?: AccessGrant[];
+};
+export type OnboardEntry = {
+	enableRouting?: boolean;
+	enableSending?: boolean;
+	replaceMxRecords?: boolean;
+	sendingProvider?: Provider;
+	receivingProvider?: Provider;
+};
+export type TeardownEntry = { accounts?: "disable" | "keep"; domain?: "remove" | "keep" };
+export type FreshEntry = { admin?: { email?: string; password?: string } };
+export type ServerEntry = { db?: string; url?: string; jurisdiction?: string; region?: string };
 export type Role = { role: string; displayName: string; share: boolean; access: AccessGrant[] };
 export type AccountEntry = { username?: string; name?: string; role?: string; password?: string; passwordEnv?: string };
 export type RoutingEntry = {
@@ -44,17 +64,17 @@ export type PushEntry = { to?: string; from?: string; subject?: string; timeout?
 /** One desired-state document: any subset of these sections. */
 export type Spec = {
 	domain?: string;
-	onboard?: Record<string, any>;
-	mailboxes?: any[];
+	onboard?: OnboardEntry;
+	mailboxes?: MailboxEntry[];
 	accounts?: AccountEntry[];
 	routing?: RoutingEntry[];
 	mcpKeys?: McpKeyEntry[];
 	license?: LicenseEntry;
 	push?: PushEntry;
 	/** What destroy does to the pieces it cannot simply delete. Declared, not flagged. */
-	teardown?: { accounts?: "disable" | "keep"; domain?: "remove" | "keep" };
+	teardown?: TeardownEntry;
 	/** Reset the instance to empty and create its primary admin. */
-	fresh?: { admin?: { email?: string; password?: string } };
+	fresh?: FreshEntry;
 };
 
 /** A file that declares many documents at once, for a mass run. */

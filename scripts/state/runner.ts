@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { makeContext } from "./context";
 import { run } from "./driver";
 import { loadProject, rolesFor, type SpecEntry } from "./document";
+import { assertValidSpec } from "./validate";
 import type { Flags } from "./flags";
 import type { Spec } from "./spec";
 import type { Store } from "./store/types";
@@ -27,6 +28,7 @@ export function loadSpecs({ spec, dir }: { spec?: string; dir: string }): SpecEn
 		} catch (error) {
 			throw new Error(`Could not read spec file ${spec}: ${message(error)}`);
 		}
+		assertValidSpec(parsed, spec);
 		const list: Spec[] = Array.isArray(parsed?.specs) ? parsed.specs : [parsed];
 		if (list.length === 0) throw new Error(`${spec} lists no specs`);
 		return list.map((document, index) => ({ name: String(document?.domain ?? `${spec}#${index + 1}`), spec: document }));

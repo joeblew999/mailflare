@@ -113,6 +113,24 @@ Plan for ubuntusoftware.net: 5 to create, 0 to update, 0 to destroy
   + mailbox_access.support.gerard.webb@ubuntudesign.com   full_access
 ```
 
+**The documents are validated.** Every section is typed in `spec.ts` and checked in
+`validate.ts` before anything reads it, so a typo'd key, a wrong type or a bad enum fails at
+`plan` with the path to the field — rather than silently doing nothing. One run reports every
+problem at once.
+
+And the plan reports **problems** — `!` — for things that cannot work, instead of promising a
+create that would fail on apply:
+
+```
+Plan for ubuntusoftware.net: 4 to create, 0 to update, 0 to destroy, 1 PROBLEM(S)
+
+  + mailbox.support@ubuntusoftware.net                   shared
+  ! mailbox_access.support.gerard.webb@ubuntudesign.com  no local user with that address
+```
+
+That is the alignment that matters: the JSON and the code cannot drift, because the JSON is
+checked against the model and the model is what the resources read.
+
 `plan` is a method on the Resource contract, called over the **same ordered registry** apply
 uses, publishing the same mailbox ids into `RunState` so routing rules and MCP keys can
 resolve themselves. So **the plan and apply are the same walk** — a plan built from a parallel
