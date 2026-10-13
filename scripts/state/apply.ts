@@ -16,6 +16,7 @@
 import { parseCli, usage } from "./args";
 import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
 import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
+import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -28,6 +29,10 @@ const { values, flags } = parseCli();
 
 if (values.help) {
 	usage();
+	process.exit(0);
+}
+if (values["source-changes"]) {
+	printSourceChanges();
 	process.exit(0);
 }
 if (flags.steps) {
@@ -71,7 +76,7 @@ if (values["data-subject"]) {
 			for (const line of subjectLines({ ...before, counts: result.deleted })) console.log(line);
 			console.log(`\n  ${result.objectsDeleted}/${result.objectKeys.length} R2 object(s) deleted`);
 			for (const skip of result.skipped) console.log(`  not removed: ${skip.table} (${skip.reason})`);
-console.log("  not removed: backup history in R2 (a backup holds every subject, so it cannot be selectively erased — crypto-shredding is the fix)");
+sourceChangeNeeded(SOURCE_CHANGES[0]);
 			// A fresh report is the only honest confirmation that it worked.
 			const after = await store.subjectReport(email);
 			const left = subjectTotal(after);
@@ -90,6 +95,7 @@ console.log("  not removed: backup history in R2 (a backup holds every subject, 
 		console.log(`\n  ${total} row(s) in ${report.counts.filter((count) => count.rows > 0).length} table(s)`);
 		const unknown = subjectUnknown(report);
 		if (unknown.length > 0) console.log(`  cannot be attributed to anyone (no user/owner column): ${unknown.join(", ")}`);
+		if (unknown.length > 0) sourceChangeNeeded(SOURCE_CHANGES[1]);
 		return total === 0 ? 0 : 1;
 	}).catch((error) => {
 		console.error(message(error));

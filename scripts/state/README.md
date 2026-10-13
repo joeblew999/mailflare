@@ -10,6 +10,28 @@ there is no per-capability command.
 
 ---
 
+## Hard constraint: do NOT modify `src/`
+
+This system must **never** change the application. It drives `src/` through the app's HTTP
+API and its database; those endpoints are the contract, and the app is the product.
+
+Everything the reconciler does is implemented here, in `scripts/state/`. Where a capability
+genuinely cannot be completed from the scripts, the command **says so and names the file** -
+it never fails silently and never implies completeness it does not have:
+
+```bash
+npm run state -- --source-changes
+```
+
+That catalogue is `src-changes.ts`, and a test asserts every entry points at something under
+`src/` (or `worker.ts`) with a usable reason - so the code and this file cannot drift.
+
+| Cannot be done from here | Where the change goes | Why it cannot be worked around |
+|---|---|---|
+| Erase a subject from **backup history** | `src/lib/backups/` + restore | A backup holds every subject; rewriting one would destroy other people's data. Crypto-shredding — a per-subject key whose destruction *is* the erasure — is the fix. |
+| Attribute **`ai_usage`** rows to a person | `src/db/schema/index.ts:755` (`aiUsage`) | No user/owner column, so erasure cannot find them. |
+| Pin the **realtime Durable Object** to a jurisdiction | `worker.ts:44`, `src/lib/realtime/utils.ts:61` | `getByName()` takes a jurisdiction; without it residency is not guaranteed. |
+
 ## Read this first — current state
 
 The live instance was wiped by a `--fresh` test and has now been **restored from its
@@ -360,10 +382,9 @@ with `--cleanup --remove-domain` — and **`ai_usage`** cannot be attributed to 
 erasure deletes rows with no `status` filter at all, so trash, spam and retention windows
 cannot hold data back. (Retention governs the app's *scheduled* purge, not this.)
 
-Still open: **backup history**. A backup document holds every subject, so it cannot be
-selectively erased; crypto-shredding — a per-subject key whose destruction *is* the
-erasure — is the fix, and it is an application change, not a script. The `--erase` output
-says this out loud rather than implying a clean bill of health.
+Still open: **backup history** — which cannot be closed from here. `--erase` prints a
+`SOURCE CHANGE NEEDED` block naming `src/lib/backups/` and why, rather than implying a clean
+bill of health. See *Hard constraint* above and `npm run state -- --source-changes`.
 
 ### Erasure is per *subject*, not per tenant
 

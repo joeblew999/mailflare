@@ -6,6 +6,7 @@ import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
 import { loadFleet, resolveInstance } from "../scripts/state/document";
+import { SOURCE_CHANGES } from "../scripts/state/src-changes";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
@@ -630,4 +631,16 @@ test("the erasure scope is internally consistent", () => {
 	for (const table of indirect) assert.ok(!direct.has(table), `${table} is both direct and indirect`);
 	for (const link of INDIRECT_SCOPE) assert.ok(direct.has(link.parent) || indirect.has(link.parent), `${link.table} names an unknown parent ${link.parent}`);
 	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(isSubjectScoped(ref.table) || ref.table === "users", `${ref.table} holds objects but is not in scope`);
+});
+
+test("every source change names a location inside src/, since we may not touch it", () => {
+	// The constraint is that this system never modifies the application. So each entry has
+	// to point at the file that would need changing, with a reason - otherwise "a source
+	// change is needed" is just a shrug.
+	assert.ok(SOURCE_CHANGES.length > 0);
+	for (const change of SOURCE_CHANGES) {
+		assert.ok(change.need.length > 0, "says what cannot be done");
+		assert.ok(change.where.startsWith("src/") || change.where.startsWith("worker.ts"), `${change.where} must name the application`);
+		assert.ok(change.why.length > 20, `${change.need}: the reason must be usable, not a placeholder`);
+	}
 });

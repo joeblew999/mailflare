@@ -9,6 +9,7 @@ export function parseCli() {
 			instance: { type: "string" },
 			"data-subject": { type: "string" },
 			erase: { type: "boolean", default: false },
+			"source-changes": { type: "boolean", default: false },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts/state/specs" },
 			roles: { type: "string", default: "" },
@@ -109,6 +110,7 @@ Flags:
   --spec <path>         one document, or many via { "specs": [...] }
   --instance <name|path>  a fleet server (or a document path), applied BEFORE the tenants
   --data-subject <email>  report where one person's data lives (read-only)
+  --source-changes        list what cannot be done without modifying src/, and where
   --erase                 with --data-subject: DESTROY those rows and their R2 objects
                           (add --dry-run to see exactly what would go first)
   --all                 apply every project in --dir (skips example.json, _*.json)
