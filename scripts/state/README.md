@@ -80,37 +80,72 @@ Accounts created during the restore printed one-time passwords; put them in
 Always `--dry-run` or `--status` first. `--fresh` touches the database only: Cloudflare MX,
 Email Routing and DNS survive, so on a live instance it **orphans infrastructure**.
 
-## Commands
+## The order you actually do things
+
+**1. Deploy a server** (once per server). This shells the repo's own deploy path and records
+the server in the fleet — it creates no cloud resources:
 
 ```bash
-npm run state -- --spec scripts/state/specs/example.json    # one document
-npm run state -- --all --dry-run                            # every document in specs/
-npm run state -- --all --concurrency 4                      # a few in flight, for thousands
-npm run state -- --instance mailflare --spec <doc>         # a server from specs/fleet.json
-npm run state -- --deploy <name>                          # deploy a server's env, register it
-                                                           # (its url and db come from there)
-npm run state -- --spec <file> --status                     # drift report, writes nothing
-npm run state -- --spec <file> --cleanup                    # tear the document down
-npm run state -- --fresh --spec <file>                      # reset the DB, then apply
-npm run state -- --domain <host> --roles a,b,c              # ad hoc, no document
-npm run state -- --plan team            # licence only (no domain needed)
-npm run state -- --license-status
-npm run state -- --push                 # web push round trip
-npm run state -- --steps                # VAPID rotation runbook
-npm run state -- --data-subject <email>  # where one person's data lives (read-only)
-npm run state -- --data-subject <email> --erase --dry-run   # what would be destroyed
-npm run state -- --data-subject <email> --erase             # DESTROY it
+# add an env.<name> block to wrangler.jsonc first (its own name, d1 database_id, bucket, queues)
+npm run state -- --deploy eu1 --dry-run     # the two commands it will run, and what it records
+npm run state -- --deploy eu1               # build, deploy, register in specs/fleet.json
+```
 
-npm run state:test       # 28 tests, in-memory fake — no D1, no network, no bindings
+**2. Reset it and give it a primary admin.** Nothing else in the app can do this.
+
+```bash
+npm run state -- --fresh --project eu1 --admin-email root@example.com --admin-password '…'
+```
+
+**3. Run a project.** A project is one folder: its `instance.json` (the server's facts), then
+every tenant in it, in one process under one admin key.
+
+```bash
+npm run state -- --project mailflare            # instance.json, then every tenant
+npm run state -- --project mailflare --status   # drift report, writes nothing
+npm run state -- --project mailflare --dry-run  # what would change
+```
+
+**4. Change things over time.** Edit a document and run it again — every resource is
+idempotent and reconciles drift, so this is the only supported way to change things.
+
+```bash
+npm run state -- --project mailflare
+```
+
+**5. Tear down.** Reverse order, and safe to re-run.
+
+```bash
+npm run state -- --spec <path> --cleanup --disable-accounts --remove-domain
+```
+
+**Everything, and the checks:**
+
+```bash
+npm run state -- --all --dry-run                # every project in specs/projects/
+npm run state -- --all --concurrency 4          # a few in flight, for thousands
+npm run state:test                              # 37 tests, no D1/network/bindings
 npm run state:typecheck
 ```
 
-**`--remote` is not a flag** — the default target *is* remote. Use `--local` for the dev
-database. Both are read at the moment of use, so a run that only touches global data
-(licence, push) needs neither Cloudflare credentials nor an instance URL.
+**One-off and global** (these need no domain and no project):
 
-Other flags: `--onboard --confirm-mx --replace-mx --share --disable-accounts
---remove-domain --dir <path> --url <base> --db <name>`.
+```bash
+npm run state -- --domain <host> --roles a,b,c  # ad hoc, no document
+npm run state -- --plan team                    # licence
+npm run state -- --license-status
+npm run state -- --push                         # web push round trip
+npm run state -- --steps                        # VAPID rotation runbook
+npm run state -- --source-changes               # what needs a src/ change, and where
+```
+
+**Data subjects** — the index, and the erasure:
+
+```bash
+npm run state -- --data-subject <email>              # where one person's data lives (read-only)
+npm run state -- --data-subject <email> --erase --dry-run   # what would be destroyed
+npm run state -- --data-subject <email> --erase             # DESTROY it
+```
 
 ### Document shape
 
@@ -160,8 +195,8 @@ npm run state -- --deploy eu1             # npm run build + npm run deploy:worke
 npm run state -- --fresh --instance mailflare --admin-email root@example.com --admin-password '…'
 #    (this runs `wrangler d1 migrations apply DB --remote` first)
 
-# 3. Apply each tenant document, then confirm
-npm run state -- --instance mailflare --spec scripts/state/specs/<domain>.json --onboard
+# 3. Run the project (its instance document, then every tenant), then confirm
+npm run state -- --project mailflare
 npm run state -- --spec scripts/state/specs/<domain>.json --status
 ```
 
@@ -169,8 +204,8 @@ The app now shows its normal login, and `root@example.com` is the primary admin.
 
 ## Everyday workflow
 
-- **Add a tenant** — drop `specs/<domain>.json` in and `npm run state -- --spec …`. If the
-  domain is not onboarded, add `--onboard` (publishes MX).
+- **Add a tenant** — drop `<domain>.json` into the project folder and `npm run state --
+  --project <name>`. If the domain is not onboarded, add `--onboard` (publishes MX).
 - **Server-wide change** (licence, web push) — edit `specs/instances/<server>.json` and pass
   it as `--instance`; it is applied before the tenant documents, in the same run and key.
 - **Change one** — edit the document and apply again. Every resource is idempotent and
@@ -203,9 +238,14 @@ scripts/state/
 │   └── fresh domain license accounts mailboxes routing mcp-keys push .ts
 ├── subject-scope.ts      where a data subject's data lives — the erasure index
 ├── specs/
-│   ├── fleet.json        which servers exist, and where (name -> url + db)
-│   ├── instances/        per-server documents: the licence, web push
-│   └── <domain>.json     the documents (source of truth)
+│   ├── fleet.json          which servers exist, and where (name -> url + db)
+│   └── projects/           ONE FOLDER PER PROJECT — the thing a user runs
+│       └── mailflare/
+│           ├── instance.json      the server: licence, web push
+│           ├── amplifycms.com.json  the tenants
+│           └── ...
+│       ├── example/        the template (skipped by --all)
+│       └── _sandbox/       a runnable dev fixture (skipped by --all)
 └── roles.example.txt
 ```
 

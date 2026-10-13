@@ -7,13 +7,14 @@ export function parseCli() {
 			domain: { type: "string" },
 			spec: { type: "string" },
 			instance: { type: "string" },
+			project: { type: "string" },
 			"data-subject": { type: "string" },
 			erase: { type: "boolean", default: false },
 			"source-changes": { type: "boolean", default: false },
 			concurrency: { type: "string", default: "1" },
 			deploy: { type: "string" },
 			all: { type: "boolean", default: false },
-			dir: { type: "string", default: "scripts/state/specs" },
+			dir: { type: "string", default: "scripts/state/specs/projects" },
 			roles: { type: "string", default: "" },
 			"roles-file": { type: "string" },
 			onboard: { type: "boolean", default: false },
@@ -110,7 +111,8 @@ Desired-state document (JSON) — any subset of these sections:
 
 Flags:
   --spec <path>         one document, or many via { "specs": [...] }
-  --instance <name|path>  a fleet server (or a document path), applied BEFORE the tenants
+  --project <name>        run a whole project: its instance.json, then every tenant
+  --instance <name|path>  just a server's instance document (or a path)
   --data-subject <email>  report where one person's data lives (read-only)
   --deploy <name>         deploy the server's env block and register it in the fleet
   --concurrency <n>       mass runs: how many documents in flight (default 1)

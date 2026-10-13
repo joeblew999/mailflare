@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
-import { loadFleet, resolveInstance } from "../scripts/state/document";
+import { loadFleet, loadProject, resolveInstance } from "../scripts/state/document";
 import { SOURCE_CHANGES } from "../scripts/state/src-changes";
 import { envBlockFor, stripJsonc, upsertInstance } from "../scripts/state/deploy";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
@@ -423,10 +423,10 @@ test("a multi-document file loads every document", () => {
 });
 
 test("scanning the specs folder skips the placeholder and drafts", () => {
-	const entries = loadSpecs({ dir: "scripts/state/specs" });
+	const entries = loadSpecs({ dir: "scripts/state/specs/projects" });
 	assert.ok(entries.length > 0, "found documents");
-	assert.ok(!entries.some((e) => /example\.json$/.test(e.name)), "example.json is skipped");
-	assert.ok(!entries.some((e) => /\/_/.test(e.name)), "_*.json drafts are skipped");
+	assert.ok(!entries.some((e) => /^example\//.test(e.name)), "the example project is skipped");
+	assert.ok(!entries.some((e) => /^_/.test(e.name)), "_* projects are skipped");
 });
 
 // --- the global capabilities, which need no domain -----------------------------
@@ -591,12 +591,12 @@ test("an instance document is applied before the tenant documents", async () => 
 test("--instance resolves a fleet name, and a path stays a path", () => {
 	const fleet = [{ name: "mailflare", url: "https://x.workers.dev", db: "mailflare" }];
 	assert.deepEqual(resolveInstance("mailflare", fleet), {
-		name: "mailflare", docPath: "scripts/state/specs/instances/mailflare.json",
+		name: "mailflare", docPath: "scripts/state/specs/projects/mailflare/instance.json",
 		url: "https://x.workers.dev", db: "mailflare",
 	});
-	assert.deepEqual(resolveInstance("scripts/state/specs/instances/example.json", fleet), {
-		name: "scripts/state/specs/instances/example.json",
-		docPath: "scripts/state/specs/instances/example.json",
+	assert.deepEqual(resolveInstance("scripts/state/specs/projects/example/instance.json", fleet), {
+		name: "scripts/state/specs/projects/example/instance.json",
+		docPath: "scripts/state/specs/projects/example/instance.json",
 	});
 	assert.throws(() => resolveInstance("nope", fleet), /unknown instance/);
 });
@@ -663,4 +663,15 @@ test("registering a server in the fleet is idempotent and sorted", () => {
 	const fleet = upsertInstance([{ name: "b" }], { name: "a" });
 	assert.deepEqual(fleet.map((instance) => instance.name), ["a", "b"]);
 	assert.deepEqual(upsertInstance(fleet, { name: "a", url: "https://x" }), [{ name: "a", url: "https://x" }, { name: "b" }], "re-deploy updates rather than duplicates");
+});
+
+test("a project is the instance document, then its tenants", () => {
+	// The unit a user runs: --project <name> applies the server's facts first, then every
+	// tenant in the folder, under one key.
+	const entries = loadProject("mailflare");
+	assert.ok(entries.length >= 3, "instance + tenants");
+	assert.equal(entries[0].name, "instance:mailflare", "the instance document comes first");
+	assert.ok(entries.slice(1).every((entry) => entry.name.startsWith("mailflare/")), "then its tenants");
+	assert.ok(!entries.some((entry) => entry.name.includes("example")), "templates are skipped");
+	assert.throws(() => loadProject("nope"), /no project/);
 });

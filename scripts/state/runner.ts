@@ -4,16 +4,16 @@
 // per document would re-resolve the instance and re-mint a key each time - fine for
 // five domains, thousands of processes for thousands of domains.) A document that
 // throws is recorded and the run continues.
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { makeContext } from "./context";
 import { run } from "./driver";
-import { loadSpec, rolesFor } from "./document";
+import { loadProject, rolesFor, type SpecEntry } from "./document";
 import type { Flags } from "./flags";
 import type { Spec } from "./spec";
 import type { Store } from "./store/types";
 
-export type SpecEntry = { name: string; spec: Spec };
+export type { SpecEntry };
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -32,11 +32,11 @@ export function loadSpecs({ spec, dir }: { spec?: string; dir: string }): SpecEn
 		return list.map((document, index) => ({ name: String(document?.domain ?? `${spec}#${index + 1}`), spec: document }));
 	}
 
-	const files = readdirSync(dir)
-		.filter((name) => name.endsWith(".json") && !name.startsWith("_") && name !== "example.json")
+	const projects = readdirSync(dir)
+		.filter((name) => !name.startsWith("_") && name !== "example" && statSync(join(dir, name)).isDirectory())
 		.sort();
-	if (files.length === 0) throw new Error(`No documents in ${dir} (expected *.json; example.json and _*.json are skipped).`);
-	return files.map((name) => ({ name: join(dir, name), spec: loadSpec(join(dir, name)) }));
+	if (projects.length === 0) throw new Error(`No projects in ${dir} (each project is a folder; example and _* are skipped).`);
+	return projects.flatMap((name) => loadProject(name, dir));
 }
 
 export async function runSpecs(store: Store, flags: Flags, values: any, entries: SpecEntry[]): Promise<number> {

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { validateBody } from "./app";
 import type { Flags } from "./flags";
 import type { Role, Spec } from "./spec";
@@ -74,6 +75,36 @@ export type InstanceDecl = {
 export type Fleet = { instances?: InstanceDecl[] };
 
 export const FLEET_PATH = "scripts/state/specs/fleet.json";
+/** Every project lives in its own folder: an instance document, then its tenants. */
+export const PROJECTS_DIR = "scripts/state/specs/projects";
+
+/** One document queued for a run. */
+export type SpecEntry = { name: string; spec: Spec };
+
+export const projectDir = (name: string, base = PROJECTS_DIR) => `${base}/${name}`;
+export const instanceDocPath = (name: string, base = PROJECTS_DIR) => `${projectDir(name, base)}/instance.json`;
+
+/**
+ * A PROJECT is the unit a user runs: the server's own document, then every tenant in the
+ * folder, in one process and under one admin key. Templates (`example`) and drafts (`_*`)
+ * are skipped, so `--project <name>` cannot accidentally apply one.
+ */
+export function loadProject(name: string, base = PROJECTS_DIR): SpecEntry[] {
+	const dir = projectDir(name, base);
+	let files: string[];
+	try {
+		files = readdirSync(dir)
+			.filter((file) => file.endsWith(".json") && file !== "instance.json" && !file.startsWith("_") && file !== "example.json")
+			.sort();
+	} catch {
+		throw new Error(`no project "${name}" — expected a folder at ${dir}/`);
+	}
+	const entries: SpecEntry[] = [];
+	if (existsSync(instanceDocPath(name, base))) entries.push({ name: `instance:${name}`, spec: loadSpec(instanceDocPath(name, base)) });
+	for (const file of files) entries.push({ name: `${name}/${file}`, spec: loadSpec(join(dir, file)) });
+	if (entries.length === 0) throw new Error(`${dir} holds no documents`);
+	return entries;
+}
 
 /** The fleet document, or [] when there is none (then --instance must be a path). */
 export function loadFleet(path = FLEET_PATH): InstanceDecl[] {
@@ -96,5 +127,5 @@ export function resolveInstance(value: string, fleet: InstanceDecl[]): ResolvedI
 	if (value.endsWith(".json")) return { name: value, docPath: value };
 	const decl = fleet.find((entry) => entry.name === value);
 	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${FLEET_PATH}`);
-	return { ...decl, docPath: `scripts/state/specs/instances/${decl.name}.json` };
+	return { ...decl, docPath: instanceDocPath(decl.name) };
 }

@@ -14,7 +14,7 @@
 //   On a domain that already receives mail (a live company domain) that redirects its
 //   real mail, so the script refuses unless you pass --confirm-mx.
 import { parseCli, usage } from "./args";
-import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
+import { loadFleet, loadProject, loadSpec, resolveInstance, rolesFor } from "./document";
 import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
 import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
 import { deployServer } from "./deploy";
@@ -121,6 +121,8 @@ try {
 	if (flags.licenseStatus) {
 		flags.status = true;
 		entries = [{ name: "", spec: { license: {} } }];
+	} else if (values.project) {
+		entries = loadProject(String(values.project));
 	} else if (useSpecs) {
 		entries = loadSpecs({ spec: values.spec ? String(values.spec) : undefined, dir: String(values.dir) });
 	} else {
