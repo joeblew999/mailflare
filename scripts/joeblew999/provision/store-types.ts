@@ -85,6 +85,14 @@ export type Store = {
 	updateRoutingRule(ruleId: string, patch: RoutingRulePatch): void;
 	deleteRoutingRule(domainId: string, pattern: string, action: string): void;
 
+	// fresh instance lifecycle: only the reset capability uses these
+	/** Bring the target database up to the current schema. */
+	applyMigrations(): void;
+	schemaPresent(): boolean;
+	/** Delete every row from every base table (d1_migrations and internal tables stay). */
+	wipeData(): void;
+	insertAdmin(user: { id: string; email: string; name: string; passwordHash: string }): void;
+
 	// license (SQL): the plan the entitlement gate reads
 	licenseRow(): LicenseRow | null;
 	/** Activate a plan, or revert to community when null. */

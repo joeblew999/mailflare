@@ -35,6 +35,9 @@ export type Flags = {
 	db: string;
 	local: boolean;
 	/** Global capabilities: they do not need a domain. */
+	fresh: boolean;
+	adminEmail?: string;
+	adminPassword?: string;
 	plan?: string;
 	licenseStatus: boolean;
 	push: boolean;
@@ -75,6 +78,8 @@ export type ProjectManifest = {
 	mcpKeys?: McpKeyEntry[];
 	license?: LicenseEntry;
 	push?: PushEntry;
+	/** Reset the instance to empty and create its primary admin. */
+	fresh?: { admin?: { email?: string; password?: string } };
 };
 
 /** A file that names many projects at once, for mass runs. */

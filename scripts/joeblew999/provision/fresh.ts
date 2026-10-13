@@ -1,0 +1,48 @@
+import { hashPassword } from "@/lib/auth/password";
+import { newId } from "@/lib/ids";
+import type { Resource } from "./resource";
+
+// Reset the instance to nothing and give it a primary admin, so a brand-new server
+// needs no manual clicking before this system can drive it. It targets whatever
+// --db/--local/--remote points at: the same command readies a local dev database and
+// a deployed Cloudflare D1.
+//
+// The first admin normally comes from POST /api/auth/register, which also wants
+// Turnstile and a domain - unusable as a bootstrap. This writes the row directly.
+export const freshResource: Resource = {
+	section: "fresh",
+	needsDomain: false,
+	wanted: (ctx) => ctx.flags.fresh || Boolean(ctx.project?.fresh),
+	async status(ctx) {
+		const present = ctx.store.schemaPresent();
+		const admin = present ? ctx.store.firstAdminEmail() : null;
+		console.log(`  schema ${present ? "present" : "MISSING"}   primary admin ${admin ?? "none"}`);
+		return present && admin ? 0 : 1;
+	},
+	async apply(ctx) {
+		const entry = typeof ctx.project?.fresh === "object" ? ctx.project.fresh : {};
+		const email = (ctx.flags.adminEmail ?? entry.admin?.email ?? "admin@localhost").trim().toLowerCase();
+		const password = ctx.flags.adminPassword ?? entry.admin?.password ?? newId();
+		const generated = !ctx.flags.adminPassword && !entry.admin?.password;
+
+		if (ctx.flags.dryRun) {
+			console.log(`  → would wipe ${ctx.flags.local ? "the local" : "the remote"} database to empty and create admin ${email}`);
+			return 0;
+		}
+
+		ctx.store.applyMigrations();
+		if (!ctx.store.schemaPresent()) {
+			console.log("  ✗ the schema is still missing after applying migrations");
+			return 1;
+		}
+		ctx.store.wipeData();
+		ctx.store.insertAdmin({ id: newId("usr"), email, name: email.split("@")[0], passwordHash: hashPassword(password) });
+		console.log(`  ✓ fresh instance — every table emptied, primary admin ${email} created`);
+		console.log(`     password: ${generated ? `${password}  (generated — shown once)` : "as given"}`);
+		return 0;
+	},
+	async remove() {
+		console.log("  · fresh — nothing to undo; a wiped instance cannot be un-reset");
+		return 0;
+	},
+};

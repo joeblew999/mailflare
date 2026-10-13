@@ -28,6 +28,14 @@ export function d1(sql: string, { db = "mailflare", local = false }: { db?: stri
 	return first?.results ?? [];
 }
 
+// Bring a database up to the current schema. It targets whatever wrangler is pointed
+// at, so the same call readies the local dev database and a deployed D1 (the latter
+// needs database_id + migrations_dir in wrangler.jsonc, which the repo sets).
+export function applyMigrations({ db = "mailflare", local = false }: { db?: string; local?: boolean } = {}) {
+	const result = run("npx", ["wrangler", "d1", "migrations", "apply", db, local ? "--local" : "--remote"]);
+	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 migrations apply failed");
+}
+
 // Secret names only — Cloudflare never returns secret values.
 export function workerSecretNames() {
 	const result = run("npx", ["wrangler", "secret", "list"]);

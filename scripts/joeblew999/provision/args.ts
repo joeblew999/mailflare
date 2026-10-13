@@ -20,6 +20,9 @@ export function parseCli() {
 			cleanup: { type: "boolean", default: false },
 			"disable-accounts": { type: "boolean", default: false },
 			"remove-domain": { type: "boolean", default: false },
+			fresh: { type: "boolean", default: false },
+			"admin-email": { type: "string" },
+			"admin-password": { type: "string" },
 			plan: { type: "string" },
 			"license-status": { type: "boolean", default: false },
 			push: { type: "boolean", default: false },
@@ -45,6 +48,9 @@ export function parseCli() {
 		share: Boolean(values.share),
 		disableAccounts: Boolean(values["disable-accounts"]),
 		removeDomain: Boolean(values["remove-domain"]),
+		fresh: Boolean(values.fresh),
+		adminEmail: values["admin-email"],
+		adminPassword: values["admin-password"],
 		plan: values.plan,
 		licenseStatus: Boolean(values["license-status"]),
 		push: Boolean(values.push),
@@ -73,6 +79,8 @@ sections drive --status and --cleanup, so nothing has its own command.
   npm run joeblew999 -- --all --dry-run
   npm run joeblew999 -- --plan team               # license only, no domain
   npm run joeblew999 -- --push                    # web push round trip
+  npm run joeblew999 -- --fresh --file <project>   # reset an empty/new server, then provision
+  npm run joeblew999 -- --fresh --remote          # same, against a deployed Cloudflare D1
 
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
   domain that already has MX records unless you pass --confirm-mx.

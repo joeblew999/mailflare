@@ -23,7 +23,7 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 				console.log(`  → would re-enable account ${email}`);
 			} else {
 				const res = await ctx.store.updateAccount(existing.id, updateBody(existing, username, false));
-				console.log(`  ${res.status === 200 ? "✓ re-enabled" : `✗ re-enable failed (HTTP ${res.status})`} account ${email}`);
+				console.log(`${res.status === 200 ? "✓ re-enabled" : `✗ re-enable failed (HTTP ${res.status}) — ${JSON.stringify(res.json?.error ?? "")}`} account ${email}`);
 				if (res.status !== 200) return 1;
 			}
 		} else {
@@ -59,13 +59,20 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 
 // updateManagedAccountSchema requires the whole object, so every update carries the
 // account's current name/role/permissions rather than a partial patch.
+//
+// It returns the INPUT, not validateBody's result: that schema transforms an omitted
+// password/forwardingEmail into null, and sending those back fails the app's own
+// parse (null is not allowed where undefined is) with a 400. Validating first still
+// catches drift before the request is made.
 function updateBody(account: ApiAccount, username: string, disabled: boolean) {
-	return validateBody("accountUpdate", {
-		name: account.name ?? username,
+	const body = {
+		name: account.name?.trim() || username,
 		role: account.role ?? "user",
 		disabled,
 		canManageMailboxes: Boolean(account.canManageMailboxes),
-	});
+	};
+	validateBody("accountUpdate", body);
+	return body;
 }
 
 // An account's own mailbox is cascaded away when its domain is removed, and the
@@ -114,7 +121,7 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 		return 0;
 	}
 	const res = await ctx.store.updateAccount(account.id, updateBody(account, username, true));
-	console.log(`  ${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status})`} account ${email}`);
+	console.log(`${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status}) — ${JSON.stringify(res.json?.error ?? "")}`} account ${email}`);
 	return res.status === 200 ? 0 : 1;
 }
 

@@ -22,6 +22,7 @@ type Seed = {
 	license?: { plan: string; state: string } | null;
 	workerSecrets?: string[] | null;
 	pushSubscriptions?: number;
+	schema?: boolean;
 };
 
 function fakeStore(seed: Seed = {}) {
@@ -37,6 +38,8 @@ function fakeStore(seed: Seed = {}) {
 		workerSecrets: seed.workerSecrets ?? ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"],
 		pushSubscriptions: seed.pushSubscriptions ?? 0,
 		sent: [] as string[],
+		schema: seed.schema ?? true,
+		lastAccountUpdate: {} as Record<string, unknown>,
 	};
 	const calls: string[] = [];
 	let seq = 0;
@@ -98,6 +101,7 @@ function fakeStore(seed: Seed = {}) {
 		},
 		async updateAccount(id, body) {
 			const b = body as { disabled: boolean };
+			state.lastAccountUpdate = body as Record<string, unknown>;
 			calls.push(`updateAccount:${id}:disabled=${b.disabled}`);
 			const account = state.accounts.find((a) => a.id === id);
 			if (account) account.disabled = b.disabled;
@@ -159,6 +163,28 @@ function fakeStore(seed: Seed = {}) {
 		async messageStatusBySubject(subject) {
 			return state.sent.includes(subject) ? { status: "received" } : null;
 		},
+		applyMigrations() {
+			calls.push("applyMigrations");
+		},
+		schemaPresent() {
+			return state.schema;
+		},
+		wipeData() {
+			calls.push("wipeData");
+			state.domains = [];
+			state.mailboxes = [];
+			state.accounts = [];
+			state.users = [];
+			state.access = [];
+			state.routing = [];
+			state.mcpKeys = [];
+			state.license = null;
+			state.schema = true;
+		},
+		insertAdmin({ email }) {
+			calls.push(`insertAdmin:${email}`);
+			state.users.push({ id: "u_root", email });
+		},
 		dispose() {},
 		clearPushSubscriptions() {
 			calls.push("clearPushSubscriptions");
@@ -185,7 +211,7 @@ function fakeStore(seed: Seed = {}) {
 const flags = (over: Partial<Flags> = {}): Flags => ({
 	dryRun: false, status: false, cleanup: false, onboard: false, confirmMx: false, replaceMx: false,
 	share: false, disableAccounts: false, removeDomain: false, licenseStatus: false, push: false,
-	steps: false, timeout: "40", db: "test", local: false, ...over,
+	steps: false, fresh: false, timeout: "40", db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
@@ -451,4 +477,67 @@ test("status resolves mailbox roles for routing rules", async () => {
 	});
 	const project = projectFor("dev.example", { mailboxes: [{ role: "support" }], routing: [{ pattern: "*", action: "store", mailbox: "support" }] });
 	assert.equal(await runOn(store, flags({ status: true }), project, roles({ role: "support" })), 0);
+});
+
+// --- fresh: take a brand-new server from nothing ---------------------------------
+
+test("fresh wipes the instance and creates the primary admin", async () => {
+	const { store, state, calls } = fakeStore({
+		domains: [{ id: "d1", hostname: "old.example" }],
+		accounts: [{ id: "u_old", email: "old@old.example" }],
+	});
+	const code = await runOn(store, flags({ fresh: true, adminEmail: "root@new.example" }), { fresh: {} }, []);
+	assert.equal(code, 0);
+	assert.ok(calls.includes("wipeData"), "data wiped");
+	assert.ok(calls.includes("insertAdmin:root@new.example"), "admin created");
+	assert.deepEqual(state.domains, [], "previous domains gone");
+	assert.deepEqual(state.accounts, [], "previous accounts gone");
+});
+
+test("fresh in a dry run writes nothing", async () => {
+	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "old.example" }] });
+	assert.equal(await runOn(store, flags({ fresh: true, dryRun: true }), { fresh: {} }, []), 0);
+	assert.ok(!calls.includes("wipeData") && !calls.includes("insertAdmin:admin@localhost"), "no writes");
+});
+
+test("fresh runs before the domain work, so a new server bootstraps in one go", async () => {
+	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
+	const project = projectFor("dev.example", { onboard: { receivingProvider: "none" }, mailboxes: [{ role: "office" }], fresh: {} });
+	assert.equal(await runOn(store, flags({ fresh: true, onboard: true }), project, roles({ role: "office" })), 0);
+	assert.ok(calls.indexOf("wipeData") < calls.indexOf("listDomains"), "reset precedes domain resolution");
+	assert.ok(calls.includes("createMailbox:office"), "provisioned after the reset");
+});
+
+test("fresh reports a missing schema as a failure in status", async () => {
+	const { store } = fakeStore({ schema: false });
+	assert.equal(await runOn(store, flags({ fresh: true, status: true }), { fresh: {} }, []), 1);
+});
+
+test("teardown reverts the license last, so account management still works", async () => {
+	// Regression: reverting the license first 403s the account disable (it needs a
+	// Pro/Team plan), which silently left accounts enabled after a teardown.
+	const { store, calls } = fakeStore({
+		domains: [{ id: "d1", hostname: "dev.example" }],
+		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "sam", role: "user", disabled: false, canManageMailboxes: false }],
+		license: { plan: "team", state: "active" },
+	});
+	const project = projectFor("dev.example", { accounts: [{ username: "sam" }], license: { plan: "team" } });
+	await runOn(store, flags({ cleanup: true, disableAccounts: true }), project, roles({ role: "office" }));
+	assert.ok(calls.includes("updateAccount:u_sam:disabled=true"), "account disabled during teardown");
+	assert.ok(calls.indexOf("updateAccount:u_sam:disabled=true") < calls.indexOf("setLicense:community"), "license reverted after the accounts");
+});
+
+test("account updates never send back the schema's null transforms", async () => {
+	// Regression: updateManagedAccountSchema turns an omitted password into null, and
+	// posting that back fails the app's own parse with a 400.
+	const { store, state } = fakeStore({
+		domains: [{ id: "d1", hostname: "dev.example" }],
+		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "", role: "user", disabled: false, canManageMailboxes: false }],
+	});
+	await runOn(store, flags({ cleanup: true, disableAccounts: true }), projectFor("dev.example", { accounts: [{ username: "sam" }] }), roles({ role: "office" }));
+	const body = state.lastAccountUpdate as Record<string, unknown>;
+	assert.equal(body.disabled, true);
+	assert.ok(!("password" in body), "no password key");
+	assert.ok(!("forwardingEmail" in body), "no forwardingEmail key");
+	assert.equal(body.name, "sam", "an empty stored name falls back to the username");
 });

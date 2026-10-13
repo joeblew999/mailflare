@@ -1,0 +1,12 @@
+{
+  "domain": "sandbox.test",
+  "onboard": { "receivingProvider": "none", "sendingProvider": "none" },
+  "mailboxes": [
+    { "role": "office", "displayName": "Office" },
+    { "role": "support", "shared": true, "access": [{ "email": "sam@sandbox.test", "permission": "read_only" }] }
+  ],
+  "accounts": [{ "username": "sam", "role": "user", "password": "sandbox-password-123" }],
+  "routing": [{ "pattern": "*", "action": "forward", "forwardTo": "ops@example.com" }],
+  "mcpKeys": [{ "name": "agent", "mailboxes": ["office"] }],
+  "license": { "plan": "team" }
+}

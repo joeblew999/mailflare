@@ -8,7 +8,7 @@
 import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
-import { cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../lib";
+import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../lib";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "./types";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store } from "./store-types";
 
@@ -171,6 +171,24 @@ export function makeLiveStore({
 		},
 		deleteMcpKey(userId, mcpName) {
 			sql(`DELETE FROM api_keys WHERE user_id='${sqlEscape(userId)}' AND kind='mcp' AND name='${sqlEscape(mcpName)}';`);
+		},
+
+		applyMigrations() {
+			runMigrations({ db, local });
+		},
+		schemaPresent() {
+			return sql("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%';").length > 0;
+		},
+		wipeData() {
+			// FTS shadow tables are excluded: deleting from the base tables fires the
+			// triggers that keep the index in step. d1_migrations stays so the schema is
+			// not re-applied, and _cf_* is wrangler's own bookkeeping.
+			const tables = sql("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations' AND name NOT LIKE '%_fts%';");
+			for (const row of tables) sql(`DELETE FROM "${String(row.name)}";`);
+		},
+		insertAdmin({ id, email, name, passwordHash }) {
+			sql(`INSERT INTO users (id, email, password_hash, name, role, is_primary_admin, can_manage_mailboxes, can_manage_domains, can_manage_users, created_at)
+			    VALUES ('${sqlEscape(id)}', '${sqlEscape(email)}', '${sqlEscape(passwordHash)}', '${sqlEscape(name)}', 'admin', 1, 1, 1, 1, strftime('%s','now'));`);
 		},
 
 		licenseRow() {

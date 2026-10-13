@@ -3,15 +3,24 @@ import { wantedResources } from "./resources";
 import type { RunState } from "./resource";
 import type { Context, Role } from "./types";
 
-// One run, one loop: resolve/onboard the domain if any requested resource needs it,
-// then apply - or, under --cleanup, remove - everything the manifest asks for. There
-// is no per-capability command path: license, web push and the domain-scoped
-// resources all go through here.
+// One run, one loop: reset the instance if asked, resolve/onboard the domain if any
+// requested resource needs it, then apply - or, under --cleanup, remove - everything
+// the manifest asks for. There is no per-capability command path: fresh, license, web
+// push and the domain-scoped resources all go through here.
 export async function run(ctx: Context, roles: Role[]): Promise<number> {
 	const active = wantedResources(ctx, roles);
 	if (active.length === 0) return 0;
 
-	if (active.some((resource) => resource.needsDomain)) {
+	// A reset destroys the domain and admin everything else depends on, so it runs
+	// first and the normal flow then resolves both from scratch.
+	const reset = active.find((resource) => resource.section === "fresh");
+	if (reset && !ctx.flags.status) {
+		const failures = await reset.apply(ctx, roles, { mailboxIdsByRole: new Map() });
+		if (failures > 0) return 1;
+	}
+	const rest = active.filter((resource) => resource !== reset);
+
+	if (rest.some((resource) => resource.needsDomain)) {
 		const early = await ensureDomain(ctx, roles);
 		if (early !== null) return early;
 	}
@@ -31,10 +40,13 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 	console.log(`${ctx.flags.cleanup ? "Removing" : "Provisioning"} ${ctx.domainName || "instance"}:\n`);
 	let failures = 0;
 	if (ctx.flags.cleanup) {
-		for (const resource of active) failures += await resource.remove(ctx, roles, state);
+		// Reverse of the apply order, so the license (which GATES account management)
+		// is the last thing to go. Reverting it first 403s the account disable and
+		// silently leaves accounts enabled.
+		for (const resource of [...rest].reverse()) failures += await resource.remove(ctx, roles, state);
 		if (ctx.flags.removeDomain && ctx.domain) failures += await removeDomain(ctx);
 	} else {
-		for (const resource of active) failures += await resource.apply(ctx, roles, state);
+		for (const resource of rest) failures += await resource.apply(ctx, roles, state);
 	}
 
 	if (ctx.domain && !ctx.flags.dryRun) console.log(`\nMailboxes: ${ctx.store.base}/mailboxes`);
