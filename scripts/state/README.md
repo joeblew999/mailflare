@@ -184,7 +184,8 @@ npm run state -- mailflare destroy --confirm-destroy   # and do it
 ```bash
 npm run state -- plan                       # every project in specs/projects/
 npm run state -- apply --concurrency 4      # a few in flight, for thousands
-npm run state:test                          # 34 tests, no D1/network/bindings
+npm run state:check                         # THE gate: types + lint + tests + sandbox
+npm run state:test                          # 36 tests, no D1/network/bindings
 npm run state:typecheck
 ```
 
@@ -384,6 +385,38 @@ no bindings. See `tests/state.test.ts`: build the fake with `fakeStore({...seed}
 `runOn(store, flags({...}), spec, roles)`, then assert on the recorded `calls` array and the
 mutated `state`. Add a seed field for anything new the resource touches. Any test that needs
 wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly that once.
+
+## How you know it works
+
+One command, and it is the definition of done:
+
+```bash
+npm run state:check
+```
+
+| Layer | Proves | What only it can catch |
+|---|---|---|
+| `tsc` | the shapes agree | a contract change missed somewhere |
+| `eslint` | nothing dead is left behind | |
+| unit tests (`scripts/state/state.test.ts`) | ordering, the diff, the contract — against an in-memory fake | logic, in under a second |
+| **sandbox** (`scripts/state/sandbox.mjs`) | the **real** app, the **real** local database, the whole lifecycle | everything the fake cannot |
+
+**A green unit suite is not evidence that it works.** The fake store is written by us, so it
+encodes our assumptions — it once reported success while a mailbox created mid-run was
+invisible to the routing that followed. Only the sandbox exercises the actual app.
+
+The sandbox runs a disposable `.test` document against a local dev server, then the refusals:
+
+```
+  ✓ reset / apply / plan clean / apply again / destroy / plan again
+  ✓ a grant to an address with no local account is a PROBLEM
+  ✓ a bad permission is rejected at load, with the field path
+  ✓ an unknown section is rejected at load
+  ✓ a mailbox with no role is rejected at load
+```
+
+It asserts exit codes **and messages**, because "did nothing" and "said why" are different
+results. `npm run dev` must be running; `--local` means nothing real is touched.
 
 ## Known bugs and outstanding work
 
