@@ -36,8 +36,8 @@ if (values.help) {
 // it in the fleet. No cloud resources are created - the env block is the source of truth.
 // Destroying a server is the inverse of deploying one, and needs --confirm-destroy: it
 // removes the Worker. The database, bucket and queues are left alone on purpose.
-if (values.destroy) {
-	const code = await destroyServer({ name: String(values.destroy), dryRun: flags.dryRun, confirmed: flags.confirmDestroy }).catch((error) => {
+if (values.undeploy) {
+	const code = await destroyServer({ name: String(values.undeploy), dryRun: flags.dryRun, confirmed: flags.confirmDestroy }).catch((error) => {
 		console.error(message(error));
 		return 1;
 	});
