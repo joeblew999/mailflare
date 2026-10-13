@@ -103,9 +103,21 @@ reality disagree. Here, existence is *queried* every run (D1, the Cloudflare API
 `server.json`), so drift between a state file and the world cannot exist. The documents are
 the desired state; the world is the actual state; there is nothing in between to rot.
 
-**Not yet Terraform-shaped:** the plan reports per resource but not as one unified diff
-(`+ create`, `~ update`, `- destroy`, `· unchanged`) with addresses like `mailbox.office`. It
-counts missing items instead. That is the next step.
+**The plan is a real diff.** One line per resource, an action, and a reason:
+
+```
+Plan for ubuntusoftware.net: 5 to create, 0 to update, 0 to destroy
+
+  + domain.ubuntusoftware.net                             onboard (publishes MX)
+  + mailbox.office@ubuntusoftware.net                     personal
+  + mailbox_access.support.gerard.webb@ubuntudesign.com   full_access
+```
+
+`plan` is a method on the Resource contract, called over the **same ordered registry** apply
+uses, publishing the same mailbox ids into `RunState` so routing rules and MCP keys can
+resolve themselves. So **the plan and apply are the same walk** — a plan built from a parallel
+implementation could promise something apply would not do, and this one cannot. That is what
+makes it safe to read before a destroy.
 
 ## The order you actually do things
 

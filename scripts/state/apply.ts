@@ -60,7 +60,8 @@ if (flags.steps) {
 }
 
 // --all/--spec load many documents; the global convenience flags run a single target.
-const specMode = Boolean(values.all) || Boolean(values.spec);
+// A project is many documents, so it runs through the multi-document path like --all/--spec.
+const specMode = Boolean(values.all) || Boolean(values.spec) || Boolean(values.project);
 const useSpecs = specMode && !flags.licenseStatus;
 // The instance layer. `--instance` is a NAME from the fleet - which also supplies the
 // server's origin and database, so no --url/--db is needed - or a path for a one-off.
