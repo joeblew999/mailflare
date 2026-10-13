@@ -52,19 +52,40 @@ export const SUBJECT_SCOPE: SubjectScope[] = [
 	{ table: "jmap_mailbox_revisions", mailboxColumn: "mailbox_id" },
 ];
 
-// Reachable only through a parent row, so a direct predicate cannot see them yet. The
-// audit reports these as NOT COVERED rather than quietly implying a clean result.
-export const SUBJECT_SCOPE_INDIRECT = [
-	"message_attachments",   // -> message_id -> messages
-	"shared_attachment_links",
-	"webhook_deliveries",    // -> webhook_id -> webhooks
-	"agent_chat_messages",   // -> conversation_id -> agent_conversations
-	"ai_usage",
+// Reachable only through a parent row. Each entry names the column pointing at the parent,
+// and the parent is itself resolved (a direct table, or another indirect one) - so
+// shared_attachment_links -> message_attachments -> messages resolves in two hops.
+export type IndirectScope = { table: string; column: string; parent: string };
+
+export const INDIRECT_SCOPE: IndirectScope[] = [
+	{ table: "message_attachments", column: "message_id", parent: "messages" },
+	{ table: "agent_chat_messages", column: "conversation_id", parent: "agent_conversations" },
+	{ table: "webhook_deliveries", column: "webhook_id", parent: "webhooks" },
+	{ table: "shared_attachment_links", column: "attachment_id", parent: "message_attachments" },
+];
+
+// No user, owner or mailbox column exists on these at all, so there is no way to
+// attribute a row to a subject. Listed so a clean report is never mistaken for a
+// complete one.
+export const SUBJECT_SCOPE_UNATTRIBUTABLE = ["ai_usage"];
+
+// The object-store keys that hold a subject's bytes. Deleting the rows without deleting
+// these would leave the mail itself behind.
+export type ObjectKeyRef = { table: string; column: string; where: string };
+export const SUBJECT_OBJECT_KEYS: ObjectKeyRef[] = [
+	{ table: "messages", column: "raw_r2_key", where: "mailbox_id" },
+	{ table: "message_attachments", column: "r2_key", where: "message_id" },
+	{ table: "drive_items", column: "r2_key", where: "owner_id" },
+	{ table: "users", column: "avatar_key", where: "id" },
 ];
 
 /** Rows that still exist for the subject — the number an erasure would have to reach 0. */
 export const subjectTotal = (report: SubjectReport): number =>
-	report.counts.reduce((sum, count) => sum + count.rows, 0);
+	report.counts.reduce((sum, count) => sum + Math.max(0, count.rows), 0);
+
+/** Tables that cannot be attributed to a subject at all — reported, never counted. */
+export const subjectUnknown = (report: SubjectReport): string[] =>
+	report.counts.filter((count) => count.rows < 0).map((count) => count.table);
 
 /** The non-empty tables, biggest first, for the report. */
 export const subjectLines = (report: SubjectReport): string[] =>
@@ -72,3 +93,14 @@ export const subjectLines = (report: SubjectReport): string[] =>
 		.filter((count) => count.rows > 0)
 		.sort((a, b) => b.rows - a.rows)
 		.map((count) => `  ${String(count.rows).padStart(6)}  ${count.table}`);
+
+/**
+ * True when `table` can be attributed to the subject at all - directly, or through a
+ * parent chain. Used by the audit to decide whether a table is in scope.
+ */
+export const isSubjectScoped = (table: string): boolean =>
+	SUBJECT_SCOPE.some((scope) => scope.table === table) || INDIRECT_SCOPE.some((entry) => entry.table === table);
+
+/** The parent the entry hangs off, or undefined when the table is linked directly. */
+export const parentOf = (table: string): string | undefined =>
+	INDIRECT_SCOPE.find((entry) => entry.table === table)?.parent;

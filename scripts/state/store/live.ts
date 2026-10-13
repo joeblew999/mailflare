@@ -10,7 +10,7 @@ import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
-import { SUBJECT_SCOPE } from "../subject-scope";
+import { INDIRECT_SCOPE, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE } from "../subject-scope";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store, SubjectCount } from "./types";
 
 // A SQL literal: NULL, or an escaped quoted string.
@@ -179,14 +179,31 @@ export function makeLiveStore({
 			if (!userId) return { email, userId: null, mailboxIds: [], counts: [] };
 			const mailboxIds = sql(`SELECT id FROM mailboxes WHERE user_id='${sqlEscape(userId)}';`).map((row) => String(row.id));
 			const quotedMailboxes = mailboxIds.map((id) => `'${sqlEscape(id)}'`).join(", ");
+			// A table is in scope directly, or through the chain of parents that own it.
+			const predicate = (table: string, seen: Set<string> = new Set()): string | null => {
+				if (seen.has(table)) return null;
+				seen.add(table);
+				const scope = SUBJECT_SCOPE.find((entry) => entry.table === table);
+				if (scope) {
+					const parts = (scope.userColumns ?? []).map((column) => `${column}='${sqlEscape(userId)}'`);
+					if (scope.mailboxColumn && quotedMailboxes) parts.push(`${scope.mailboxColumn} IN (${quotedMailboxes})`);
+					return parts.length > 0 ? parts.join(" OR ") : null;
+				}
+				const link = INDIRECT_SCOPE.find((entry) => entry.table === table);
+				if (!link) return null;
+				const inner = predicate(link.parent, seen);
+				return inner ? `${link.column} IN (SELECT id FROM "${link.parent}" WHERE ${inner})` : null;
+			};
+
 			const counts: SubjectCount[] = [];
-			for (const scope of SUBJECT_SCOPE) {
-				const parts = (scope.userColumns ?? []).map((column) => `${column}='${sqlEscape(userId)}'`);
-				if (scope.mailboxColumn && quotedMailboxes) parts.push(`${scope.mailboxColumn} IN (${quotedMailboxes})`);
-				if (parts.length === 0) continue;
-				const [row] = sql(`SELECT count(*) AS n FROM "${scope.table}" WHERE ${parts.join(" OR ")};`);
-				counts.push({ table: scope.table, rows: Number(row?.n ?? 0) });
+			for (const table of [...SUBJECT_SCOPE.map((scope) => scope.table), ...INDIRECT_SCOPE.map((link) => link.table)]) {
+				const where = predicate(table);
+				if (!where) continue;
+				const [row] = sql(`SELECT count(*) AS n FROM "${table}" WHERE ${where};`);
+				counts.push({ table, rows: Number(row?.n ?? 0) });
 			}
+			// Surfaces the tables that cannot be attributed at all, so the caller can say so.
+			for (const table of SUBJECT_SCOPE_UNATTRIBUTABLE) counts.push({ table, rows: -1 });
 			return { email, userId, mailboxIds, counts };
 		},
 		applyMigrations() {

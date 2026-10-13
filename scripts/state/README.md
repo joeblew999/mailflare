@@ -325,16 +325,28 @@ from the schema file, so it describes what an erasure would actually run against
 data, not SQL: `store/live.ts` builds the predicate, and a table that links both ways
 (`messages` names a user *and* a mailbox) is ORed.
 
-**What it cannot see is printed, not implied**: `SUBJECT_SCOPE_INDIRECT` lists the tables
-reachable only through a parent row (`message_attachments` -> messages,
-`agent_chat_messages` -> agent_conversations, `webhook_deliveries` -> webhooks,
-`shared_attachment_links`, `ai_usage`). A clean report is not yet a clean bill of health.
+Indirectly-owned tables are resolved through their parent chain (`INDIRECT_SCOPE`):
+`message_attachments` -> messages, `agent_chat_messages` -> agent_conversations,
+`webhook_deliveries` -> webhooks, and `shared_attachment_links` -> message_attachments ->
+messages in two hops. The predicate builder lives in `store/live.ts`; the links are data.
 
-**Still to do for real erasure:** follow those indirect links; destroy rather than count
-(idempotently, with an auditable report); delete the R2 objects (raw MIME, attachments,
-drive); reach **backups**, for which the scalable answer is crypto-shredding — a
-per-subject key whose destruction *is* the erasure; and bypass trash retention, which is
-currently a feature that keeps data around on purpose.
+`ai_usage` has **no user, owner or mailbox column at all**, so a row cannot be attributed
+to anyone. It is reported as unattributable rather than counted as clean - a distinction
+the report keeps, because "we found nothing" and "we cannot look" are different answers.
+
+**Erasure is not implemented yet, and deliberately so** — the index is the prerequisite, and
+an index that misses data is the one failure erasure must never have. Everything the
+destruction needs is now known:
+
+- the rows: every table in `SUBJECT_SCOPE` plus the `INDIRECT_SCOPE` chain
+- the bytes: `SUBJECT_OBJECT_KEYS` — `messages.raw_r2_key`, `message_attachments.r2_key`,
+  `drive_items.r2_key`, `users.avatar_key`. **Deleting rows without these leaves the mail
+  itself behind**, which is the whole trap
+- the order: children before parents, and the `users` row last
+
+Still open beyond that: reaching **backups** (the scalable answer is crypto-shredding — a
+per-subject key whose destruction *is* the erasure), and bypassing trash retention, which
+exists on purpose to keep data around.
 
 ### Erasure is per *subject*, not per tenant
 

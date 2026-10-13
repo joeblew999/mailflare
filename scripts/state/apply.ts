@@ -15,7 +15,7 @@
 //   real mail, so the script refuses unless you pass --confirm-mx.
 import { parseCli, usage } from "./args";
 import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
-import { SUBJECT_SCOPE_INDIRECT, subjectLines, subjectTotal } from "./subject-scope";
+import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -62,7 +62,8 @@ if (values["data-subject"]) {
 		for (const line of subjectLines(report)) console.log(line);
 		const total = subjectTotal(report);
 		console.log(`\n  ${total} row(s) in ${report.counts.filter((count) => count.rows > 0).length} table(s)`);
-		console.log(`  NOT covered yet (reachable only through a parent row): ${SUBJECT_SCOPE_INDIRECT.join(", ")}`);
+		const unknown = subjectUnknown(report);
+		if (unknown.length > 0) console.log(`  cannot be attributed to anyone (no user/owner column): ${unknown.join(", ")}`);
 		return total === 0 ? 0 : 1;
 	}).catch((error) => {
 		console.error(message(error));
