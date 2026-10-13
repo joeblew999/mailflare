@@ -28,6 +28,16 @@ import type { Role, Spec } from "./spec";
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const { values, flags } = parseCli();
 
+// A positional TARGET becomes whichever of --project/--spec/--all it looks like, so there is
+// one way to point this at something rather than four.
+if (values.target) {
+	const target = String(values.target);
+	if (target.endsWith(".json")) values.spec = target;
+	else if (target.includes("/")) {
+		values.dir = target;
+		values.all = true;
+	} else values.project = target;
+}
 if (values.help) {
 	usage();
 	process.exit(0);

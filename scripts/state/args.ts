@@ -9,6 +9,8 @@ export function parseCli() {
 			spec: { type: "string" },
 			instance: { type: "string" },
 			project: { type: "string" },
+			// Set from the positional target, not typed by the user.
+			target: { type: "string" },
 			"data-subject": { type: "string" },
 			erase: { type: "boolean", default: false },
 			"source-changes": { type: "boolean", default: false },
@@ -75,15 +77,35 @@ export function parseCli() {
 		local: Boolean(values.local),
 	};
 
-	// Terraform's three verbs, because that is the model: plan, apply, destroy. They are
-	// aliases for the flags, so nothing is lost by using either.
-	const verb = positionals[0];
-	if (verb === "plan") flags.status = true;
-	else if (verb === "destroy") flags.cleanup = true;
-	else if (verb && verb !== "apply") {
-		console.error(`Unknown verb "${verb}". Use plan, apply or destroy.`);
+	// Terraform's shape: a TARGET and a VERB, both positional. The target absorbs --project,
+	// --spec and --all - a bare name is a project, a .json is one document, a path is a
+	// projects folder, and no target at all means every project.
+	const VERBS = ["plan", "apply", "destroy", "reset", "subject"];
+	const [first, second] = positionals;
+	let target: string | undefined;
+	let verb: string | undefined;
+	if (first && VERBS.includes(first)) verb = first;
+	else {
+		target = first;
+		if (second && VERBS.includes(second)) verb = second;
+	}
+	if (second && !verb) {
+		console.error(`Unknown verb "${second}". Use ${VERBS.join(", ")}.`);
 		process.exit(1);
 	}
+
+	if (verb === "plan") flags.status = true;
+	else if (verb === "destroy") flags.cleanup = true;
+	else if (verb === "reset") flags.fresh = true;
+	else if (verb === "subject") {
+		if (!target) {
+			console.error("The subject verb needs an address: state subject <email> plan|destroy");
+			process.exit(1);
+		}
+		values["data-subject"] = target;
+		target = undefined;
+	}
+	values.target = target;
 
 	return { values, flags };
 }
