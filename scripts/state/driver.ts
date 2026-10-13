@@ -1,6 +1,6 @@
 import { ensureDomain, removeDomain } from "./domain";
-import { wantedResources } from "./resources";
-import type { RunState } from "./resource";
+import { declaredResources } from "./resources/registry";
+import type { RunState } from "./resources/resource";
 import type { Context, Role } from "./types";
 
 // One run, one loop: reset the instance if asked, resolve/onboard the domain if any
@@ -8,7 +8,7 @@ import type { Context, Role } from "./types";
 // the manifest asks for. There is no per-capability command path: fresh, license, web
 // push and the domain-scoped resources all go through here.
 export async function run(ctx: Context, roles: Role[]): Promise<number> {
-	const active = wantedResources(ctx, roles);
+	const active = declaredResources(ctx, roles);
 	if (active.length === 0) return 0;
 
 	// A reset destroys the domain and admin everything else depends on, so it runs

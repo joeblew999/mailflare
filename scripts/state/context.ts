@@ -1,7 +1,7 @@
-import type { ApiDomain, Context, Flags, ProjectManifest } from "./types";
-import type { Store } from "./store-types";
+import type { ApiDomain, Context, Flags, Spec } from "./types";
+import type { Store } from "./store/types";
 
-export function makeContext(store: Store, flags: Flags, project: ProjectManifest | null, domainName: string): Context {
+export function makeContext(store: Store, flags: Flags, project: Spec | null, domainName: string): Context {
 	return { store, flags, project, domainName, domain: null };
 }
 

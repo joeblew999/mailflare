@@ -1,4 +1,4 @@
-import type { Context, McpKeyEntry } from "./types";
+import type { Context, McpKeyEntry } from "../types";
 import type { Resource } from "./resource";
 
 // MCP tool scopes (mirrors MCP_SCOPES in src/lib/mcp/auth.ts).
@@ -68,7 +68,7 @@ async function statusMcpKeys(ctx: Context): Promise<number> {
 export const mcpKeysResource: Resource = {
 	section: "mcpKeys",
 	needsDomain: true,
-	wanted: (ctx) => (ctx.project?.mcpKeys?.length ?? 0) > 0,
+	declared: (ctx) => (ctx.project?.mcpKeys?.length ?? 0) > 0,
 	status: (ctx) => statusMcpKeys(ctx),
 	async apply(ctx, _roles, state) {
 		let failures = 0;

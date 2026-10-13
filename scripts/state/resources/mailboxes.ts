@@ -1,7 +1,7 @@
 import { mailboxAccessSchema } from "@/lib/validators";
-import { validateBody } from "../lib-app";
-import { requireDomain } from "./context";
-import type { AccessGrant, ApiMailbox, Context, Role } from "./types";
+import { validateBody } from "../app";
+import { requireDomain } from "../context";
+import type { AccessGrant, ApiMailbox, Context, Role } from "../types";
 import type { Resource, RunState } from "./resource";
 
 // The domain's mailboxes, keyed by lower-cased local part. One helper so the
@@ -114,7 +114,7 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 	return { failures, mailboxIdsByRole };
 }
 
-// Read-only report: which wanted mailboxes and access grants are missing. It also
+// Read-only report: which declared mailboxes and access grants are missing. It also
 // publishes the ids it found, because routing rules and MCP keys name mailboxes by
 // role and cannot resolve their destination without them.
 async function statusMailboxes(ctx: Context, roles: Role[], state: RunState): Promise<number> {
@@ -141,7 +141,7 @@ async function statusMailboxes(ctx: Context, roles: Role[], state: RunState): Pr
 export const mailboxesResource: Resource = {
 	section: "mailboxes",
 	needsDomain: true,
-	wanted: (_ctx, roles) => roles.length > 0,
+	declared: (_ctx, roles) => roles.length > 0,
 	status: (ctx, roles, state) => statusMailboxes(ctx, roles, state),
 	async apply(ctx, roles, state) {
 		const { failures, mailboxIdsByRole } = await syncMailboxes(ctx, roles);

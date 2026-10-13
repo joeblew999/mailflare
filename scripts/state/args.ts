@@ -5,10 +5,9 @@ export function parseCli() {
 	const { values } = parseArgs({
 		options: {
 			domain: { type: "string" },
-			project: { type: "string" },
-			file: { type: "string" },
+			spec: { type: "string" },
 			all: { type: "boolean", default: false },
-			dir: { type: "string", default: "scripts/joeblew999/projects" },
+			dir: { type: "string", default: "scripts/state/specs" },
 			roles: { type: "string", default: "" },
 			"roles-file": { type: "string" },
 			onboard: { type: "boolean", default: false },
@@ -68,24 +67,24 @@ export function parseCli() {
 }
 
 export function usage() {
-	console.log(`joeblew999 — one provisioning system for a Mailflare instance.
+	console.log(`state — reconcile a Mailflare instance with its JSON desired state.
 
 Everything is declared in JSON and applied by one run loop: domain onboarding,
 mailboxes, accounts, routing rules, MCP keys, the license, and web push. The same
 sections drive --status and --cleanup, so nothing has its own command.
 
-  npm run joeblew999 -- --file scripts/joeblew999/projects/example.json
-  npm run joeblew999 -- --domain <hostname> --roles a,b,c [--onboard]
-  npm run joeblew999 -- --all --dry-run
-  npm run joeblew999 -- --plan team               # license only, no domain
-  npm run joeblew999 -- --push                    # web push round trip
-  npm run joeblew999 -- --fresh --file <project>   # reset an empty/new server, then provision
-  npm run joeblew999 -- --fresh --remote          # same, against a deployed Cloudflare D1
+  npm run state -- --file scripts/state/specs/example.json
+  npm run state -- --domain <hostname> --roles a,b,c [--onboard]
+  npm run state -- --all --dry-run
+  npm run state -- --plan team               # license only, no domain
+  npm run state -- --push                    # web push round trip
+  npm run state -- --fresh --file <project>   # reset an empty/new server, then provision
+  npm run state -- --fresh --remote          # same, against a deployed Cloudflare D1
 
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
   domain that already has MX records unless you pass --confirm-mx.
 
-Project file (JSON) — any subset of these sections:
+Desired-state document (JSON) — any subset of these sections:
   { "domain": "...",
     "onboard":   { "replaceMxRecords": false },
     "mailboxes": [ { "role": "office" }, { "role": "support", "shared": true,
@@ -96,13 +95,12 @@ Project file (JSON) — any subset of these sections:
     "license":   { "plan": "team" },
     "push":      { "to": "you@example.com" } }
 
-  A mass input is one file: { "projects": [ <project>, <project>, ... ] }, loaded once,
-  with ONE admin key for the whole run.
+  Many at once is one file: { "projects": [ <project>, <project>, ... ] }, loaded once, with ONE admin key for the whole run.
 
 Flags:
-  --project/--file <p>  apply one project, or many via { "projects": [...] }
+  --spec <path>         one document, or many via { "specs": [...] }
   --all                 apply every project in --dir (skips example.json, _*.json)
-  --dir <path>          projects folder for --all (default: scripts/joeblew999/projects)
+  --dir <path>          specs folder for --all (default: scripts/state/specs)
   --domain <hostname>   provision a domain without a manifest
   --roles <a,b,c>       ad-hoc role names (with --domain)
   --roles-file <path>   read role names from a file (JSON array or one per line)

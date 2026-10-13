@@ -1,7 +1,7 @@
-import { onboardBody } from "./manifest";
+import { onboardBody } from "./document";
 import { requireDomain } from "./context";
-import { removeMcpKey } from "./mcp-keys";
-import { disableAccount } from "./accounts";
+import { removeMcpKey } from "./resources/mcp-keys";
+import { disableAccount } from "./resources/accounts";
 import type { ApiDomain, Context, Role } from "./types";
 
 export const findDomain = (list: ApiDomain[], name: string) =>

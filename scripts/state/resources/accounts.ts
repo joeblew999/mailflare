@@ -1,8 +1,8 @@
 import { newId } from "@/lib/ids";
-import { validateBody } from "../lib-app";
-import { requireDomain } from "./context";
+import { validateBody } from "../app";
+import { requireDomain } from "../context";
 import { mailboxesForDomain } from "./mailboxes";
-import type { AccountEntry, ApiAccount, Context } from "./types";
+import type { AccountEntry, ApiAccount, Context } from "../types";
 import type { Resource } from "./resource";
 
 // Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
@@ -125,7 +125,7 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 	return res.status === 200 ? 0 : 1;
 }
 
-// Read-only report: each wanted account exists, is enabled, and owns its mailbox.
+// Read-only report: each declared account exists, is enabled, and owns its mailbox.
 async function statusAccounts(ctx: Context): Promise<number> {
 	const accounts = await ctx.store.listAccounts();
 	const boxes = await mailboxesForDomain(ctx);
@@ -144,7 +144,7 @@ async function statusAccounts(ctx: Context): Promise<number> {
 export const accountsResource: Resource = {
 	section: "accounts",
 	needsDomain: true,
-	wanted: (ctx) => (ctx.project?.accounts?.length ?? 0) > 0,
+	declared: (ctx) => (ctx.project?.accounts?.length ?? 0) > 0,
 	status: (ctx) => statusAccounts(ctx),
 	async apply(ctx) {
 		let failures = 0;

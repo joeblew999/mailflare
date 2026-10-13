@@ -1,26 +1,26 @@
 #!/usr/bin/env node
 // The one entry point. Everything this system does - onboarding, mailboxes, accounts,
 // routing rules, MCP keys, the license, web push - is a Resource (see
-// ./provision/resources.ts) applied by one loop, and every capability can be declared
+// ./resources/registry.ts) applied by one loop, and every capability can be declared
 // in JSON. There is no per-capability command.
 //
-//   npm run joeblew999 -- --file scripts/joeblew999/projects/example.json
-//   npm run joeblew999 -- --domain example.com --roles office,admin
-//   npm run joeblew999 -- --all --dry-run
-//   npm run joeblew999 -- --plan team        # global capabilities need no domain
-//   npm run joeblew999 -- --push
+//   npm run state -- --file scripts/state/specs/example.json
+//   npm run state -- --domain example.com --roles office,admin
+//   npm run state -- --all --dry-run
+//   npm run state -- --plan team        # global capabilities need no domain
+//   npm run state -- --push
 //
 // ⚠ MX WARNING — `--onboard` publishes Mailflare's Email Routing MX for the domain.
 //   On a domain that already receives mail (a live company domain) that redirects its
 //   real mail, so the script refuses unless you pass --confirm-mx.
-import { parseCli, usage } from "./provision/args";
-import { loadProject, loadRoles } from "./provision/manifest";
-import { loadProjects, runBatch, type ProjectEntry } from "./provision/batch";
-import { makeContext } from "./provision/context";
-import { run } from "./provision/commands";
-import { pushRunbook } from "./provision/push";
-import { withProvisionStore } from "./lib-app";
-import type { ProjectManifest, Role } from "./provision/types";
+import { parseCli, usage } from "./args";
+import { loadSpec, rolesFor } from "./document";
+import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
+import { makeContext } from "./context";
+import { run } from "./driver";
+import { pushRunbook } from "./resources/push";
+import { withStore } from "./app";
+import type { Spec, Role } from "./types";
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const { values, flags } = parseCli();
@@ -35,26 +35,26 @@ if (flags.steps) {
 }
 
 // --all/--file load many projects; the global convenience flags run a single target.
-const fileMode = Boolean(values.all) || Boolean(values.file);
-const useBatch = fileMode && !flags.licenseStatus;
-let entries: ProjectEntry[];
+const specMode = Boolean(values.all) || Boolean(values.spec);
+const useSpecs = specMode && !flags.licenseStatus;
+let entries: SpecEntry[];
 let singleRoles: Role[] = [];
 
 try {
 	if (flags.licenseStatus) {
 		flags.status = true;
-		entries = [{ name: "", project: { license: {} } }];
-	} else if (useBatch) {
-		entries = loadProjects({ file: values.file ? String(values.file) : undefined, dir: String(values.dir) });
+		entries = [{ name: "", spec: { license: {} } }];
+	} else if (useSpecs) {
+		entries = loadSpecs({ spec: values.spec ? String(values.spec) : undefined, dir: String(values.dir) });
 	} else {
-		const project: ProjectManifest | null = values.project ? loadProject(String(values.project)) : null;
+		const project: Spec | null = values.spec ? loadSpec(String(values.spec)) : null;
 		const domainValue = String(values.domain ?? project?.domain ?? "").trim();
-		const target: ProjectManifest = project ?? { domain: domainValue };
+		const target: Spec = project ?? { domain: domainValue };
 		// The convenience flags are just shorthand for manifest sections.
 		if (flags.plan !== undefined && !target.license) target.license = { plan: flags.plan };
 		if (flags.push && !target.push) target.push = {};
 		const global = Boolean(target.license) || Boolean(target.push);
-		singleRoles = loadRoles(values, target, flags);
+		singleRoles = rolesFor(values, target, flags);
 		if (!domainValue && !global) {
 			console.error("Nothing to do. Pass --project/--file, --all, --domain <hostname>, --plan <team|pro|community>, or --push.\n");
 			usage();
@@ -65,7 +65,7 @@ try {
 			usage();
 			process.exit(1);
 		}
-		entries = [{ name: domainValue, project: target }];
+		entries = [{ name: domainValue, spec: target }];
 	}
 } catch (error) {
 	console.error(message(error));
@@ -74,10 +74,10 @@ try {
 
 let exitCode = 1;
 try {
-	exitCode = await withProvisionStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
-		if (useBatch) return await runBatch(store, flags, values, entries);
+	exitCode = await withStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
+		if (useSpecs) return await runSpecs(store, flags, values, entries);
 		const [entry] = entries;
-		return await run(makeContext(store, flags, entry.project, entry.name.toLowerCase()), singleRoles);
+		return await run(makeContext(store, flags, entry.spec, entry.name.toLowerCase()), singleRoles);
 	});
 } catch (error) {
 	console.error(message(error));

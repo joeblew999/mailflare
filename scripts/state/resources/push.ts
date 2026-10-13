@@ -1,5 +1,5 @@
 import type { Resource } from "./resource";
-import type { Context } from "./types";
+import type { Context } from "../types";
 
 // The secrets the Worker needs to encrypt a push payload.
 const VAPID = ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"];
@@ -31,7 +31,7 @@ To rotate and keep a copy in fnox:
   5. In the app: Settings → Inbox → toggle "Browser push notifications" OFF, then ON.
 
   6. Verify
-       npm run joeblew999:push`);
+       npm run state:push`);
 }
 
 function reportSecrets(ctx: Context) {
@@ -49,7 +49,7 @@ function reportSecrets(ctx: Context) {
 export const pushResource: Resource = {
 	section: "push",
 	needsDomain: false,
-	wanted: (ctx) => ctx.flags.push || Boolean(ctx.project?.push),
+	declared: (ctx) => ctx.flags.push || Boolean(ctx.project?.push),
 	async status(ctx) {
 		reportSecrets(ctx);
 		const subscriptions = ctx.store.pushSubscriptionCount();

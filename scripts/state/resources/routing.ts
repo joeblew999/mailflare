@@ -1,8 +1,8 @@
 import { domainRoutingRuleSchema } from "@/lib/validators";
-import { requireDomain } from "./context";
-import type { Context, RoutingEntry } from "./types";
+import { requireDomain } from "../context";
+import type { Context, RoutingEntry } from "../types";
 import type { Resource } from "./resource";
-import type { RoutingRulePatch, RoutingRuleRow } from "./store-types";
+import type { RoutingRulePatch, RoutingRuleRow } from "../store/types";
 
 type RoutingPlan =
 	| { ok: false; error: string }
@@ -149,7 +149,7 @@ async function statusRouting(ctx: Context, entries: RoutingEntry[], mailboxIdsBy
 export const routingResource: Resource = {
 	section: "routing",
 	needsDomain: true,
-	wanted: (ctx) => (ctx.project?.routing?.length ?? 0) > 0,
+	declared: (ctx) => (ctx.project?.routing?.length ?? 0) > 0,
 	status: (ctx, _roles, state) => statusRouting(ctx, ctx.project?.routing ?? [], state.mailboxIdsByRole),
 	async apply(ctx, _roles, state) {
 		let failures = 0;

@@ -3,7 +3,7 @@ import type { InferSelectModel } from "drizzle-orm";
 import type { accountListItemFromUser } from "@/app/api/accounts/utils";
 import type { listUserDomains } from "@/lib/domains/service";
 import type { domains as domainsTable, mailboxes as mailboxesTable } from "@/db/schema";
-import type { Store } from "./store-types";
+import type { Store } from "./store/types";
 
 // Response shapes taken from the app's own builders, so field access is checked
 // against what the endpoint actually returns (no guessing).
@@ -69,7 +69,7 @@ export type McpKeyEntry = { name?: string; mailboxes?: string[]; scopes?: string
 export type LicenseEntry = { plan?: string } | string;
 export type PushEntry = { to?: string; from?: string; subject?: string };
 
-export type ProjectManifest = {
+export type Spec = {
 	domain?: string;
 	onboard?: Record<string, any>;
 	mailboxes?: any[];
@@ -83,14 +83,14 @@ export type ProjectManifest = {
 };
 
 /** A file that names many projects at once, for mass runs. */
-export type ProjectFile = { projects?: ProjectManifest[] };
+export type SpecFile = { projects?: Spec[] };
 
 // Everything a resource helper needs. The store is the only way out of the logic,
 // so a test can hand it a fake and drive a whole run with no D1 and no network.
 export type Context = {
 	store: Store;
 	flags: Flags;
-	project: ProjectManifest | null;
+	project: Spec | null;
 	domainName: string;
 	domain: ApiDomain | null;
 };

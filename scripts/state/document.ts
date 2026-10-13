@@ -1,15 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- manifest shape is user-authored JSON. */
 import { readFileSync } from "node:fs";
-import { validateBody } from "../lib-app";
-import type { Flags, ProjectManifest, Role } from "./types";
+import { validateBody } from "./app";
+import type { Flags, Spec, Role } from "./types";
 
-export function loadProject(path: string): ProjectManifest {
+export function loadSpec(path: string): Spec {
 	try {
-		const project = JSON.parse(readFileSync(path, "utf8"));
-		if (!project || typeof project !== "object" || Array.isArray(project)) throw new Error("must be a JSON object");
-		return project as ProjectManifest;
+		const spec = JSON.parse(readFileSync(path, "utf8"));
+		if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("must be a JSON object");
+		return spec as Spec;
 	} catch (error) {
-		throw new Error(`Could not read project file ${path}: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`Could not read spec file ${path}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 
@@ -28,10 +28,10 @@ export function readRolesFile(path: string): any[] {
 		.map((role) => ({ role }));
 }
 
-// Precedence: project manifest → roles file → ad-hoc --roles.
-export function loadRoles(values: any, project: ProjectManifest | null, flags: Flags): Role[] {
-	const entries = project?.mailboxes?.length
-		? project.mailboxes
+// Precedence: the document → roles file → ad-hoc --roles.
+export function rolesFor(values: any, spec: Spec | null, flags: Flags): Role[] {
+	const entries = spec?.mailboxes?.length
+		? spec.mailboxes
 		: values["roles-file"]
 			? readRolesFile(values["roles-file"])
 			: String(values.roles).split(",").filter(Boolean).map((role: string) => ({ role }));
@@ -48,8 +48,8 @@ export function loadRoles(values: any, project: ProjectManifest | null, flags: F
 }
 
 // Onboard body: manifest options with the flag value winning for MX replacement.
-export function onboardBody(project: ProjectManifest | null, flags: Flags, hostname: string) {
-	const o = project?.onboard ?? {};
+export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
+	const o = spec?.onboard ?? {};
 	const replaceMx = flags.replaceMx || Boolean(o.replaceMxRecords);
 	const body: any = { hostname, enableRouting: o.enableRouting ?? true, replaceMxRecords: replaceMx };
 	if (typeof o.enableSending === "boolean") body.enableSending = o.enableSending;

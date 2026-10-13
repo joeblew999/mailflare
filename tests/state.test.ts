@@ -1,12 +1,12 @@
 // Drives the whole provisioner through the Store seam, so a full run is exercised
-// with no D1, no Workers binding and no network. Run with `npm run joeblew999:test`.
+// with no D1, no Workers binding and no network. Run with `npm run state:test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeContext } from "../scripts/joeblew999/provision/context";
-import { run } from "../scripts/joeblew999/provision/commands";
-import { loadProjects, runBatch } from "../scripts/joeblew999/provision/batch";
-import type { Flags, ProjectManifest, Role } from "../scripts/joeblew999/provision/types";
-import type { Store } from "../scripts/joeblew999/provision/store-types";
+import { makeContext } from "../scripts/state/context";
+import { run } from "../scripts/state/driver";
+import { loadSpecs, runSpecs } from "../scripts/state/runner";
+import type { Flags, Spec, Role } from "../scripts/state/types";
+import type { Store } from "../scripts/state/store/types";
 
 const ok = (json: unknown = {}) => ({ status: 200, text: "", json });
 const created = (json: unknown = {}) => ({ status: 201, text: "", json });
@@ -217,7 +217,7 @@ const flags = (over: Partial<Flags> = {}): Flags => ({
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
 	entries.map((entry) => ({ displayName: entry.role, share: false, access: [], ...entry }));
 
-const projectFor = (domain: string, over: Partial<ProjectManifest> = {}): ProjectManifest => ({ domain, ...over });
+const projectFor = (domain: string, over: Partial<Spec> = {}): Spec => ({ domain, ...over });
 
 // The logic prints as it goes; keep the test output clean.
 async function quiet<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -232,7 +232,7 @@ async function quiet<T>(fn: () => Promise<T> | T): Promise<T> {
 	}
 }
 
-const runOn = (store: Store, f: Flags, project: ProjectManifest, r: Role[]) =>
+const runOn = (store: Store, f: Flags, project: Spec, r: Role[]) =>
 	quiet(() => run(makeContext(store, f, project, String(project.domain)), r));
 
 test("creates missing mailboxes and grants access to other users", async () => {
@@ -378,10 +378,10 @@ test("cleanup never disables the primary admin", async () => {
 test("mass mode processes every project through one store", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "a.example" }, { id: "d2", hostname: "b.example" }] });
 	const entries = [
-		{ name: "a.example", project: projectFor("a.example", { mailboxes: [{ role: "office" }] }) },
-		{ name: "b.example", project: projectFor("b.example", { mailboxes: [{ role: "hello" }] }) },
+		{ name: "a.example", spec: projectFor("a.example", { mailboxes: [{ role: "office" }] }) },
+		{ name: "b.example", spec: projectFor("b.example", { mailboxes: [{ role: "hello" }] }) },
 	];
-	const code = await quiet(() => runBatch(store, flags(), { roles: "" }, entries));
+	const code = await quiet(() => runSpecs(store, flags(), { roles: "" }, entries));
 	assert.equal(code, 0);
 	assert.ok(calls.includes("createMailbox:office") && calls.includes("createMailbox:hello"), "both projects provisioned");
 });
@@ -389,20 +389,20 @@ test("mass mode processes every project through one store", async () => {
 test("mass mode keeps going and reports failure per project", async () => {
 	const { store } = fakeStore({ domains: [{ id: "d1", hostname: "ok.example" }] });
 	const entries = [
-		{ name: "ok.example", project: projectFor("ok.example", { mailboxes: [{ role: "office" }] }) },
-		{ name: "broken", project: { mailboxes: [{ role: "x" }] } },
+		{ name: "ok.example", spec: projectFor("ok.example", { mailboxes: [{ role: "office" }] }) },
+		{ name: "broken", spec: { mailboxes: [{ role: "x" }] } },
 	];
-	const code = await quiet(() => runBatch(store, flags(), { roles: "" }, entries));
+	const code = await quiet(() => runSpecs(store, flags(), { roles: "" }, entries));
 	assert.equal(code, 1, "one bad project fails the run");
 });
 
-test("a multi-project file loads every project", () => {
-	const entries = loadProjects({ file: "tests/fixtures/provision-small.json", dir: "" });
+test("a multi-document file loads every document", () => {
+	const entries = loadSpecs({ spec: "tests/fixtures/state-small.json", dir: "" });
 	assert.deepEqual(entries.map((e) => e.name), ["dev-one.example", "dev-two.example"]);
 });
 
-test("scanning the projects folder skips the placeholder and drafts", () => {
-	const entries = loadProjects({ dir: "scripts/joeblew999/projects" });
+test("scanning the specs folder skips the placeholder and drafts", () => {
+	const entries = loadSpecs({ dir: "scripts/state/specs" });
 	assert.ok(entries.length > 0, "found project manifests");
 	assert.ok(!entries.some((e) => /example\.json$/.test(e.name)), "example.json is skipped");
 	assert.ok(!entries.some((e) => /\/_/.test(e.name)), "_*.json drafts are skipped");
@@ -411,7 +411,7 @@ test("scanning the projects folder skips the placeholder and drafts", () => {
 // --- the global capabilities, which need no domain -----------------------------
 
 test("license: applied only when asked, and reverted by --cleanup", async () => {
-	const ctxFor = (f: Flags, project: ProjectManifest) => [f, project] as const;
+	const ctxFor = (f: Flags, project: Spec) => [f, project] as const;
 
 	const fresh = fakeStore();
 	const [f1, p1] = ctxFor(flags({ plan: "team" }), {});

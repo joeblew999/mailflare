@@ -3,8 +3,8 @@
 // the route accepts: it throws before the request is made, instead of 400-ing
 // halfway through a run.
 import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
-import { makeLiveStore } from "./provision/store-live";
-import type { Store } from "./provision/store-types";
+import { makeLiveStore } from "./store/live";
+import type { Store } from "./store/types";
 
 // The app's own request schemas, keyed by what we send.
 const REQUEST_SCHEMAS = {
@@ -31,7 +31,7 @@ export function validateBody(kind: string, body: unknown) {
  * credentials nor an instance URL. ONE key covers the whole run, which is what lets
  * a mass run touch thousands of domains without thousands of key round-trips.
  */
-export async function withProvisionStore(
+export async function withStore(
 	{ db, local, url, name = "provision" }: { db?: string; local?: boolean; url?: string; name?: string },
 	fn: (store: Store) => Promise<number>,
 ): Promise<number> {

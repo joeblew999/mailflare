@@ -12,7 +12,7 @@ import type { Resource } from "./resource";
 export const freshResource: Resource = {
 	section: "fresh",
 	needsDomain: false,
-	wanted: (ctx) => ctx.flags.fresh || Boolean(ctx.project?.fresh),
+	declared: (ctx) => ctx.flags.fresh || Boolean(ctx.project?.fresh),
 	async status(ctx) {
 		const present = ctx.store.schemaPresent();
 		const admin = present ? ctx.store.firstAdminEmail() : null;
