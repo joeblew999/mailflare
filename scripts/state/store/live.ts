@@ -8,9 +8,9 @@
 import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
-import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
+import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, r2DeleteObjects, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
-import { INDIRECT_SCOPE, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE } from "../subject-scope";
+import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE } from "../subject-scope";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store, SubjectCount } from "./types";
 
 // A SQL literal: NULL, or an escaped quoted string.
@@ -41,6 +41,30 @@ export function makeLiveStore({
 	let keyId: string | null = null;
 
 	const sql = (statement: string) => d1(statement, { db, local });
+
+	// A table is in scope directly, or through the chain of parents that own it. Shared by
+	// the report and the erasure, so they can never disagree about what is the subject's.
+	const subjectPredicate = (userId: string, quotedMailboxes: string) => {
+		const predicate = (table: string, seen: Set<string> = new Set()): string | null => {
+			if (seen.has(table)) return null;
+			seen.add(table);
+			const scope = SUBJECT_SCOPE.find((entry) => entry.table === table);
+			if (scope) {
+				const parts = (scope.userColumns ?? []).map((column) => `${column}='${sqlEscape(userId)}'`);
+				if (scope.mailboxColumn && quotedMailboxes) parts.push(`${scope.mailboxColumn} IN (${quotedMailboxes})`);
+				return parts.length > 0 ? parts.join(" OR ") : null;
+			}
+			const link = INDIRECT_SCOPE.find((entry) => entry.table === table);
+			if (!link) return null;
+			const inner = predicate(link.parent, seen);
+			return inner ? `${link.column} IN (SELECT id FROM "${link.parent}" WHERE ${inner})` : null;
+		};
+		return predicate;
+	};
+
+	// Domains are infrastructure, not just rows: deleting one orphans its Cloudflare DNS and
+	// Email Routing. Reported, never silently done.
+	const ERASE_SKIPPED = [{ table: "domains", reason: "infrastructure — remove with --cleanup --remove-domain" }];
 
 	// The admin is only needed by the SQL paths that record a user id.
 	const admin = () => {
@@ -179,22 +203,7 @@ export function makeLiveStore({
 			if (!userId) return { email, userId: null, mailboxIds: [], counts: [] };
 			const mailboxIds = sql(`SELECT id FROM mailboxes WHERE user_id='${sqlEscape(userId)}';`).map((row) => String(row.id));
 			const quotedMailboxes = mailboxIds.map((id) => `'${sqlEscape(id)}'`).join(", ");
-			// A table is in scope directly, or through the chain of parents that own it.
-			const predicate = (table: string, seen: Set<string> = new Set()): string | null => {
-				if (seen.has(table)) return null;
-				seen.add(table);
-				const scope = SUBJECT_SCOPE.find((entry) => entry.table === table);
-				if (scope) {
-					const parts = (scope.userColumns ?? []).map((column) => `${column}='${sqlEscape(userId)}'`);
-					if (scope.mailboxColumn && quotedMailboxes) parts.push(`${scope.mailboxColumn} IN (${quotedMailboxes})`);
-					return parts.length > 0 ? parts.join(" OR ") : null;
-				}
-				const link = INDIRECT_SCOPE.find((entry) => entry.table === table);
-				if (!link) return null;
-				const inner = predicate(link.parent, seen);
-				return inner ? `${link.column} IN (SELECT id FROM "${link.parent}" WHERE ${inner})` : null;
-			};
-
+			const predicate = subjectPredicate(userId, quotedMailboxes);
 			const counts: SubjectCount[] = [];
 			for (const table of [...SUBJECT_SCOPE.map((scope) => scope.table), ...INDIRECT_SCOPE.map((link) => link.table)]) {
 				const where = predicate(table);
@@ -205,6 +214,50 @@ export function makeLiveStore({
 			// Surfaces the tables that cannot be attributed at all, so the caller can say so.
 			for (const table of SUBJECT_SCOPE_UNATTRIBUTABLE) counts.push({ table, rows: -1 });
 			return { email, userId, mailboxIds, counts };
+		},
+		async eraseSubject(email) {
+			const trimmed = email.trim().toLowerCase();
+			const userId = sql(`SELECT id FROM users WHERE lower(email)='${sqlEscape(trimmed)}' LIMIT 1;`)[0]?.id ?? null;
+			if (!userId) return { email: trimmed, userId: null, deleted: [], objectKeys: [], objectsDeleted: 0, skipped: [] };
+
+			const mailboxIds = sql(`SELECT id FROM mailboxes WHERE user_id='${sqlEscape(userId)}';`).map((row) => String(row.id));
+			const quotedMailboxes = mailboxIds.map((id) => `'${sqlEscape(id)}'`).join(", ");
+			const predicate = subjectPredicate(userId, quotedMailboxes);
+
+			// The bytes first: once the rows are gone there is no way to find the objects.
+			const objectKeys: string[] = [];
+			for (const ref of SUBJECT_OBJECT_KEYS) {
+				const where = ref.table === "users" ? `id='${sqlEscape(userId)}'` : predicate(ref.table);
+				if (!where) continue;
+				for (const row of sql(`SELECT "${ref.column}" AS k FROM "${ref.table}" WHERE ${where} AND "${ref.column}" IS NOT NULL;`)) {
+					if (row.k) objectKeys.push(String(row.k));
+				}
+			}
+
+			// Children before parents, and the user last: one batch, so it cannot half-apply.
+			const indirect = INDIRECT_SCOPE.map((link) => link.table);
+			const direct = SUBJECT_SCOPE.map((scope) => scope.table).filter((table) => table !== "users" && table !== "mailboxes");
+			const order = [...indirect, ...direct, "mailboxes"];
+			const deleted: SubjectCount[] = [];
+			const statements: string[] = [];
+			for (const table of order) {
+				const where = predicate(table);
+				if (!where) continue;
+				const [row] = sql(`SELECT count(*) AS n FROM "${table}" WHERE ${where};`);
+				deleted.push({ table, rows: Number(row?.n ?? 0) });
+				statements.push(`DELETE FROM "${table}" WHERE ${where};`);
+			}
+			for (const ref of SUBJECT_OBJECT_KEYS) {
+				const where = ref.table === "users" ? `id='${sqlEscape(userId)}'` : predicate(ref.table);
+				if (where && !statements.some((statement) => statement.startsWith(`DELETE FROM "${ref.table}"`))) {
+					statements.push(`DELETE FROM "${ref.table}" WHERE ${where};`);
+				}
+			}
+			statements.push(`DELETE FROM users WHERE id='${sqlEscape(userId)}';`);
+			sql(statements.join("\n"));
+
+			const objectsDeleted = objectKeys.length > 0 ? r2DeleteObjects(objectKeys) : 0;
+			return { email: trimmed, userId, deleted, objectKeys, objectsDeleted, skipped: ERASE_SKIPPED };
 		},
 		applyMigrations() {
 			runMigrations({ db, local });

@@ -3,6 +3,8 @@
 // Global capabilities (fresh, plan, push) need no domain; the rest do.
 export type Flags = {
 	dryRun: boolean;
+	/** Destructive: actually erase the --data-subject. Without it the report is read-only. */
+	erase: boolean;
 	status: boolean;
 	cleanup: boolean;
 	onboard: boolean;

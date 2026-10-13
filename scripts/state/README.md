@@ -48,6 +48,7 @@ Accounts created during the restore printed one-time passwords; put them in
 | `--cleanup --disable-accounts` | also disables the accounts (the app cannot delete users) |
 | `--cleanup --remove-domain` | also removes the domain — drops its Cloudflare DNS/MX config |
 | `--all` | applies **every** document in `specs/` |
+| `--data-subject <email> --erase` | destroys that person's rows **and their R2 objects** |
 
 Always `--dry-run` or `--status` first. `--fresh` touches the database only: Cloudflare MX,
 Email Routing and DNS survive, so on a live instance it **orphans infrastructure**.
@@ -68,6 +69,8 @@ npm run state -- --license-status
 npm run state -- --push                 # web push round trip
 npm run state -- --steps                # VAPID rotation runbook
 npm run state -- --data-subject <email>  # where one person's data lives (read-only)
+npm run state -- --data-subject <email> --erase --dry-run   # what would be destroyed
+npm run state -- --data-subject <email> --erase             # DESTROY it
 
 npm run state:test       # 28 tests, in-memory fake — no D1, no network, no bindings
 npm run state:typecheck
@@ -262,9 +265,10 @@ wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly th
    instead. The root cause is not fully understood — worth pinning down.
 5. **Mass runs are sequential** (one process, one key) — correct and fast enough, but
    thousands of documents want bounded parallelism.
-6. **The subject index exists; erasure does not.** `--data-subject <email>` reports every
-   row a person owns, but nothing destroys it yet — deliberately, because an index that
-   misses data is the one failure erasure must not have. See *Data subjects* below.
+6. **Erasure exists but does not reach backups.** `--data-subject <email>` reports and
+   `--erase` destroys every row and R2 object. Backup history and trash retention are still
+   out of scope, so the guarantee is "gone from the live instance", not yet "gone". See
+   *Data subjects* below.
 7. **`--fresh --remote` leaves the app showing "Prepare Installation".** Expected — the
    setup wizard sees no admin. Not a bug, just surprising.
 8. Pre-existing, unrelated: `tests/i18n.test.mjs` fails 1 of 8 (138/139 overall).
@@ -334,9 +338,11 @@ messages in two hops. The predicate builder lives in `store/live.ts`; the links 
 to anyone. It is reported as unattributable rather than counted as clean - a distinction
 the report keeps, because "we found nothing" and "we cannot look" are different answers.
 
-**Erasure is not implemented yet, and deliberately so** — the index is the prerequisite, and
-an index that misses data is the one failure erasure must never have. Everything the
-destruction needs is now known:
+**Erasure is implemented**, on top of that index. `--erase` deletes every in-scope row in a
+single SQL batch (children before parents, the `users` row last, so it cannot half-apply)
+and the objects in `SUBJECT_OBJECT_KEYS` — because deleting rows without the bytes leaves
+the mail itself behind. It then re-reports and fails if anything remains, so the result is
+verified rather than assumed. `--erase --dry-run` shows exactly what would go first.
 
 - the rows: every table in `SUBJECT_SCOPE` plus the `INDIRECT_SCOPE` chain
 - the bytes: `SUBJECT_OBJECT_KEYS` — `messages.raw_r2_key`, `message_attachments.r2_key`,
@@ -344,9 +350,14 @@ destruction needs is now known:
   itself behind**, which is the whole trap
 - the order: children before parents, and the `users` row last
 
-Still open beyond that: reaching **backups** (the scalable answer is crypto-shredding — a
-per-subject key whose destruction *is* the erasure), and bypassing trash retention, which
-exists on purpose to keep data around.
+Two deliberate exclusions, printed by the command rather than hidden: **`domains`** are
+infrastructure — deleting one orphans its Cloudflare DNS and Email Routing, so remove it
+with `--cleanup --remove-domain` — and **`ai_usage`** cannot be attributed to anyone.
+
+Still open: reaching **backups** (the scalable answer is crypto-shredding — a per-subject
+key whose destruction *is* the erasure), and bypassing trash retention, which exists on
+purpose to keep data around. Until those land, erasure is complete for the live database and
+the object store, and **not** complete against backup history.
 
 ### Erasure is per *subject*, not per tenant
 

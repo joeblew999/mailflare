@@ -96,6 +96,30 @@ export function entitlementsFor(plan: string, active: boolean) {
 	};
 }
 
+// The first R2 bucket in wrangler.jsonc.
+export function r2BucketName() {
+	try {
+		const match = readFileSync(new URL("../../wrangler.jsonc", import.meta.url), "utf8").match(/"bucket_name"\s*:\s*"([^"]+)"/);
+		return match?.[1] ?? null;
+	} catch {
+		return null;
+	}
+}
+
+// Delete objects from R2. One wrangler call per key - slow, but it is the only handle this
+// runtime has on the bucket, and leaving the bytes behind is not an option.
+export function r2DeleteObjects(keys: string[]): number {
+	const bucket = r2BucketName();
+	if (!bucket) throw new Error("could not read the R2 bucket name from wrangler.jsonc");
+	let deleted = 0;
+	for (const key of keys) {
+		const result = run("npx", ["wrangler", "r2", "object", "delete", `${bucket}/${key}`, "--remote"]);
+		if (result.status === 0) deleted += 1;
+		else console.warn(`  ⚠ could not delete r2://${bucket}/${key}`);
+	}
+	return deleted;
+}
+
 // The Worker name is the first top-level "name" in wrangler.jsonc.
 export function workerNameFromConfig() {
 	try {

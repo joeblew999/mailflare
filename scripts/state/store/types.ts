@@ -59,6 +59,17 @@ export type SubjectReport = {
 	counts: SubjectCount[];
 };
 
+export type EraseResult = {
+	email: string;
+	userId: string | null;
+	deleted: SubjectCount[];
+	/** Object-store keys that held the subject's bytes. */
+	objectKeys: string[];
+	objectsDeleted: number;
+	/** Tables deliberately left alone, with the reason. */
+	skipped: Array<{ table: string; reason: string }>;
+};
+
 export type Store = {
 	readonly base: string;
 	readonly admin: { id: string; email: string };
@@ -97,6 +108,8 @@ export type Store = {
 	// data-subject index: where one person's data lives, across the tables that
 	// name them directly (see subject-scope.ts). Read-only.
 	subjectReport(email: string): Promise<SubjectReport>;
+	/** Destroy the subject's rows AND their objects. Idempotent: a second run finds nothing. */
+	eraseSubject(email: string): Promise<EraseResult>;
 
 	// fresh instance lifecycle: only the reset capability uses these
 	/** Bring the target database up to the current schema. */

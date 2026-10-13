@@ -48,12 +48,37 @@ if (instanceRef?.db) flags.db = instanceRef.db;
 const instanceSpec = instanceRef ? loadSpec(instanceRef.docPath) : null;
 const hasInstanceWork = Boolean(instanceSpec?.fresh || instanceSpec?.license || instanceSpec?.push);
 
-// A subject query: where one person's data lives. Read-only, and it needs no domain and
-// no document - this is the index an erasure would act on, so it is reported before
-// anything is ever destroyed.
+// A subject query: where one person's data lives, and - with --erase - the destruction of
+// it. Read-only unless asked otherwise: it needs no domain and no document.
 if (values["data-subject"]) {
 	const code = await withStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
-		const report = await store.subjectReport(String(values["data-subject"]));
+		const email = String(values["data-subject"]);
+
+		if (flags.erase) {
+			const before = await store.subjectReport(email);
+			const total = subjectTotal(before);
+			if (flags.dryRun) {
+				console.log(`Subject ${email}: ${total} row(s) and its R2 objects would be DESTROYED\n`);
+				for (const line of subjectLines(before)) console.log(line);
+				return total === 0 ? 0 : 1;
+			}
+			if (!before.userId) {
+				console.log(`Subject ${email}: no account for that address — nothing to erase.`);
+				return 0;
+			}
+			const result = await store.eraseSubject(email);
+			console.log(`Erased ${result.email}\n`);
+			for (const line of subjectLines({ ...before, counts: result.deleted })) console.log(line);
+			console.log(`\n  ${result.objectsDeleted}/${result.objectKeys.length} R2 object(s) deleted`);
+			for (const skip of result.skipped) console.log(`  not removed: ${skip.table} (${skip.reason})`);
+			// A fresh report is the only honest confirmation that it worked.
+			const after = await store.subjectReport(email);
+			const left = subjectTotal(after);
+			console.log(`  after: ${left} row(s) remain`);
+			return left === 0 ? 0 : 1;
+		}
+
+		const report = await store.subjectReport(email);
 		if (!report.userId) {
 			console.log(`Subject ${report.email}: no account for that address.`);
 			return 0;

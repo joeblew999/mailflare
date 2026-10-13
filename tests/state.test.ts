@@ -6,7 +6,7 @@ import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
 import { loadFleet, resolveInstance } from "../scripts/state/document";
-import { INDIRECT_SCOPE, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
+import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
 import type { Store } from "../scripts/state/store/types";
@@ -169,6 +169,12 @@ function fakeStore(seed: Seed = {}) {
 		async messageStatusBySubject(subject) {
 			return state.sent.includes(subject) ? { status: "received" } : null;
 		},
+		async eraseSubject(email) {
+			calls.push(`eraseSubject:${email}`);
+			state.subjectCounts = state.subjectCounts.map((count) => ({ ...count, rows: 0 }));
+			state.subjectUserId = null;
+			return { email, userId: "u1", deleted: [{ table: "messages", rows: 12 }, { table: "sessions", rows: 2 }], objectKeys: ["raw/1.eml", "att/2"], objectsDeleted: 2, skipped: [{ table: "domains", reason: "infrastructure" }] };
+		},
 		async subjectReport(email) {
 			calls.push(`subjectReport:${email}`);
 			return { email, userId: state.subjectUserId, mailboxIds: state.subjectMailboxIds, counts: state.subjectCounts };
@@ -221,7 +227,7 @@ function fakeStore(seed: Seed = {}) {
 const flags = (over: Partial<Flags> = {}): Flags => ({
 	dryRun: false, status: false, cleanup: false, onboard: false, confirmMx: false, replaceMx: false,
 	share: false, disableAccounts: false, removeDomain: false, licenseStatus: false, push: false,
-	steps: false, fresh: false, timeout: "40", db: "test", local: false, ...over,
+	steps: false, fresh: false, erase: false, timeout: "40", db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
@@ -610,4 +616,15 @@ test("the subject index says where a person's data is, and what it cannot see", 
 	assert.ok(SUBJECT_SCOPE_UNATTRIBUTABLE.includes("ai_usage"));
 	assert.equal(subjectTotal({ email: "a@b.c", userId: "u", mailboxIds: [], counts: [{ table: "ai_usage", rows: -1 }, { table: "messages", rows: 3 }] }), 3, "unknown rows are never summed as data");
 	assert.ok(SUBJECT_SCOPE.some((scope) => scope.userColumns?.includes("target_user_id")), "audit_logs links both ways");
+});
+
+test("the erasure scope is internally consistent", () => {
+	// These are the invariants that make a destructive pass trustworthy: a table listed
+	// both ways would be deleted twice, and an object key on an unscoped table could never
+	// be found - which is how mail gets left behind.
+	const direct = new Set(SUBJECT_SCOPE.map((scope) => scope.table));
+	const indirect = new Set(INDIRECT_SCOPE.map((link) => link.table));
+	for (const table of indirect) assert.ok(!direct.has(table), `${table} is both direct and indirect`);
+	for (const link of INDIRECT_SCOPE) assert.ok(direct.has(link.parent) || indirect.has(link.parent), `${link.table} names an unknown parent ${link.parent}`);
+	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(direct.has(ref.table) || ref.table === "users", `${ref.table} holds objects but is not in scope`);
 });
