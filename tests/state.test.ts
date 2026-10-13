@@ -542,3 +542,12 @@ test("account updates never send back the schema's null transforms", async () =>
 	assert.ok(!("forwardingEmail" in body), "no forwardingEmail key");
 	assert.equal(body.name, "sam", "an empty stored name falls back to the username");
 });
+
+test("a reset-only document is accepted without a domain", async () => {
+	// Regression: the "needs no domain" check was hand-built in two places and both
+	// forgot fresh, so a document that only reset the instance was rejected outright.
+	const { store, calls } = fakeStore();
+	const code = await quiet(() => runSpecs(store, flags({ fresh: true }), { roles: "" }, [{ name: "instance", spec: { fresh: {} } }]));
+	assert.equal(code, 0);
+	assert.ok(calls.includes("wipeData"), "the reset ran");
+});

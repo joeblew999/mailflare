@@ -53,7 +53,7 @@ try {
 		// The convenience flags are just shorthand for document sections.
 		if (flags.plan !== undefined && !target.license) target.license = { plan: flags.plan };
 		if (flags.push && !target.push) target.push = {};
-		const global = Boolean(target.license) || Boolean(target.push);
+		const global = Boolean(target.fresh) || Boolean(target.license) || Boolean(target.push);
 		singleRoles = rolesFor(values, target, flags);
 		if (!domainValue && !global) {
 			console.error("Nothing to do. Pass a document (--spec <path>), --all, --domain <hostname>, --plan <team|pro|community>, or --push.\n");

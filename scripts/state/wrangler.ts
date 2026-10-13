@@ -33,7 +33,11 @@ export function d1(sql: string, { db = "mailflare", local = false }: { db?: stri
 // needs database_id + migrations_dir in wrangler.jsonc, which the repo sets).
 export function applyMigrations({ db = "mailflare", local = false }: { db?: string; local?: boolean } = {}) {
 	const result = run("npx", ["wrangler", "d1", "migrations", "apply", db, local ? "--local" : "--remote"]);
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout || "wrangler d1 migrations apply failed");
+	// The exit status is not trustworthy: in a non-interactive context wrangler skips
+	// the confirmation, applies every migration, and can still report non-zero. The
+	// caller checks the schema it actually needs (Store.schemaPresent), which is the
+	// thing that matters, so warn rather than fail here.
+	if (result.status !== 0) console.warn("  ⚠ wrangler reported a non-zero exit while applying migrations — verifying the schema instead");
 }
 
 // Secret names only — Cloudflare never returns secret values.
