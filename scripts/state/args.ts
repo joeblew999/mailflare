@@ -63,14 +63,27 @@ export function parseCli() {
 	// --spec and --all - a bare name is a project, a .json is one document, a path is a
 	// projects folder, and no target at all means every project.
 	const VERBS = ["plan", "apply", "destroy", "reset", "subject"];
-	const [first, second] = positionals;
+	const [first, second, third] = positionals;
 	let target: string | undefined;
 	let verb: string | undefined;
-	if (first && VERBS.includes(first)) verb = first;
-	else {
+	let action: string | undefined;
+
+	if (first === "subject") {
+		// `subject <address> plan|destroy` - the address is the target, the action is the verb.
+		verb = "subject";
+		target = second;
+		action = third ?? "plan";
+		if (action !== "plan" && action !== "destroy") {
+			console.error(`Unknown action "${action}" for a subject. Use plan or destroy.`);
+			process.exit(1);
+		}
+	} else if (first && VERBS.includes(first)) {
+		verb = first;
+	} else {
 		target = first;
 		if (second && VERBS.includes(second)) verb = second;
 	}
+
 	if (second && !verb) {
 		console.error(`Unknown verb "${second}". Use ${VERBS.join(", ")}.`);
 		process.exit(1);
@@ -86,7 +99,9 @@ export function parseCli() {
 		}
 		values["data-subject"] = target;
 		target = undefined;
+		if (action === "destroy") flags.cleanup = true;
 	}
+
 	values.target = target;
 	values.verb = verb;
 
