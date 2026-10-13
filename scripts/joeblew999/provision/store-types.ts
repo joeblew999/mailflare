@@ -45,6 +45,11 @@ export type RoutingRulePatch = Pick<
 	"matchValue" | "forwardTo" | "keepCopy" | "mailboxId" | "rejectReason" | "priority" | "enabled"
 >;
 
+/** The single license_settings row the app's entitlement gate reads. */
+export type LicenseRow = { plan: string; state: string };
+
+export type PushTestInput = { from: string; to: string; subject: string; text: string; html: string };
+
 export type Store = {
 	readonly base: string;
 	readonly admin: { id: string; email: string };
@@ -80,8 +85,26 @@ export type Store = {
 	updateRoutingRule(ruleId: string, patch: RoutingRulePatch): void;
 	deleteRoutingRule(domainId: string, pattern: string, action: string): void;
 
+	// license (SQL): the plan the entitlement gate reads
+	licenseRow(): LicenseRow | null;
+	/** Activate a plan, or revert to community when null. */
+	setLicense(plan: string | null): void;
+
+	// web push verification (network + SQL + wrangler)
+	workerSecrets(): string[] | null;
+	pushSubscriptionCount(): number;
+	clearPushSubscriptions(): void;
+	firstAdminEmail(): string | null;
+	sendViaCloudflare(input: PushTestInput): Promise<{ messageId?: string }>;
+	messageStatusBySubject(subject: string): Promise<{ status: string } | null>;
+	/** Injectable so tests and dry runs do not really wait. */
+	wait(ms: number): Promise<void>;
+
 	// MCP keys (SQL)
 	mcpKey(userId: string, name: string): { id: string } | null;
 	createMcpKey(input: { name: string; scopes: string[]; mailboxIds: string[] }): { fullKey: string };
 	deleteMcpKey(userId: string, name: string): void;
+
+	/** Delete the temporary admin key, if one was ever minted. */
+	dispose(): void;
 };

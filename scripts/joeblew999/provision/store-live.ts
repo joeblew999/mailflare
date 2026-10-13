@@ -6,33 +6,79 @@
 // session), so they are written with SQL. Confining that SQL here keeps the column
 // names and the escaping in exactly one place instead of scattering them.
 import { newId } from "@/lib/ids";
+import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
-import { cfApi, d1, keychain, request, sqlEscape } from "../lib";
+import { cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../lib";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "./types";
 import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store } from "./store-types";
 
 // A SQL literal: NULL, or an escaped quoted string.
 const lit = (value: string | null) => (value === null ? "NULL" : `'${sqlEscape(value)}'`);
 
+// The license_settings row the app's entitlement gate reads. instance_id is
+// generated in SQL so this also works on a fresh database.
+const licenceOn = (plan: string) => `INSERT INTO license_settings (id, instance_id, plan, state, features, seat_limit, updated_at)
+VALUES ('default', lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))), '${plan}', 'active', '[]', 1, strftime('%s','now'))
+ON CONFLICT(id) DO UPDATE SET plan = excluded.plan, state = excluded.state, features = excluded.features, updated_at = excluded.updated_at;`;
+const licenceOff = "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';";
+const licenceStatus = "SELECT plan, state FROM license_settings WHERE id='default';";
+
 export function makeLiveStore({
-	base,
-	key,
-	admin,
-	db,
-	local,
+	db = "mailflare",
+	local = false,
+	url,
+	name = "provision",
 }: {
-	base: string;
-	key: string;
-	admin: { id: string; email: string };
-	db: string;
-	local: boolean;
+	db?: string;
+	local?: boolean;
+	url?: string;
+	name?: string;
 }): Store {
+	let adminRow: { id: string; email: string } | null = null;
+	let base = "";
+	let key = "";
+	let keyId: string | null = null;
+
 	const sql = (statement: string) => d1(statement, { db, local });
-	const call = (path: string, options: { method?: string; body?: unknown } = {}) => request(base, path, { key, ...options });
+
+	// The admin is only needed by the SQL paths that record a user id.
+	const admin = () => {
+		if (!adminRow) {
+			adminRow = findAdmin({ db, local });
+			if (!adminRow) throw new Error("No admin user found — is the instance set up?");
+		}
+		return adminRow;
+	};
+
+	const mintAdminKey = () => {
+		const { fullKey, prefix, hash } = generateApiKey();
+		const id = newId("key");
+		sql(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mailbox_scope_enabled, created_at)
+		    VALUES ('${sqlEscape(id)}', 'legacy', '${sqlEscape(admin().id)}', '${sqlEscape(name)}', '${sqlEscape(prefix)}', '${sqlEscape(hash)}', '${sqlEscape(JSON.stringify(ADMIN_API_KEY_SCOPES))}', 0, strftime('%s','now'));`);
+		return { fullKey, keyId: id };
+	};
+
+	// The origin and the temporary key are resolved on the FIRST HTTP call, so a run
+	// that only touches global data (license, web push) needs no Cloudflare
+	// credentials and no instance URL at all.
+	const auth = async () => {
+		if (keyId) return base;
+		base = (await resolveInstanceUrl({ url })) ?? "";
+		if (!base) throw new Error("Could not determine the instance URL. Pass --url or set MAILFLARE_URL.");
+		const minted = mintAdminKey();
+		key = minted.fullKey;
+		keyId = minted.keyId;
+		return base;
+	};
+	const call = async (path: string, options: { method?: string; body?: unknown } = {}) => request(await auth(), path, { key, ...options });
 
 	return {
-		base,
-		admin,
+		get base() {
+			return base;
+		},
+		get admin() {
+			return admin();
+		},
 
 		async currentMx(hostname) {
 			const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
@@ -113,18 +159,66 @@ export function makeLiveStore({
 			);
 			return row ? { id: row.id } : null;
 		},
-		createMcpKey({ name, scopes, mailboxIds }) {
+		createMcpKey({ name: mcpName, scopes, mailboxIds }) {
 			const { fullKey, prefix, hash } = generateApiKey();
 			const id = newId("key");
 			sql(`INSERT INTO api_keys (id, kind, user_id, name, prefix, key_hash, scopes, mailbox_scope_enabled, created_at)
-			    VALUES ('${sqlEscape(id)}', 'mcp', '${sqlEscape(admin.id)}', '${sqlEscape(name)}', '${sqlEscape(prefix)}', '${sqlEscape(hash)}', '${sqlEscape(JSON.stringify(scopes))}', ${mailboxIds.length ? 1 : 0}, strftime('%s','now'));`);
+			    VALUES ('${sqlEscape(id)}', 'mcp', '${sqlEscape(admin().id)}', '${sqlEscape(mcpName)}', '${sqlEscape(prefix)}', '${sqlEscape(hash)}', '${sqlEscape(JSON.stringify(scopes))}', ${mailboxIds.length ? 1 : 0}, strftime('%s','now'));`);
 			for (const mailboxId of mailboxIds) {
 				sql(`INSERT INTO mcp_key_mailboxes (key_id, mailbox_id) VALUES ('${sqlEscape(id)}', '${sqlEscape(mailboxId)}');`);
 			}
 			return { fullKey };
 		},
-		deleteMcpKey(userId, name) {
-			sql(`DELETE FROM api_keys WHERE user_id='${sqlEscape(userId)}' AND kind='mcp' AND name='${sqlEscape(name)}';`);
+		deleteMcpKey(userId, mcpName) {
+			sql(`DELETE FROM api_keys WHERE user_id='${sqlEscape(userId)}' AND kind='mcp' AND name='${sqlEscape(mcpName)}';`);
+		},
+
+		licenseRow() {
+			const [row] = sql(licenceStatus);
+			return row ? { plan: String(row.plan), state: String(row.state) } : null;
+		},
+		setLicense(plan) {
+			sql(plan === null ? licenceOff : licenceOn(plan));
+		},
+
+		workerSecrets() {
+			return workerSecretNames();
+		},
+		pushSubscriptionCount() {
+			return sql("SELECT id FROM push_subscriptions;").length;
+		},
+		clearPushSubscriptions() {
+			sql("DELETE FROM push_subscriptions;");
+		},
+		firstAdminEmail() {
+			const [row] = sql("SELECT email FROM users ORDER BY created_at LIMIT 1;");
+			return row?.email ?? null;
+		},
+		async sendViaCloudflare({ from, to, subject, text, html }) {
+			const token = process.env.CLOUDFLARE_API_TOKEN?.trim() || keychain("CLOUDFLARE_API_TOKEN");
+			const accountId = process.env.CLOUDFLARE_ACCOUNT_ID?.trim() || keychain("CLOUDFLARE_ACCOUNT_ID");
+			if (!token || !accountId) throw new Error("Missing CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID — export them, run via `fnox exec`, or store them in the keychain.");
+			const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/email/sending/send`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ from, to, subject, text, html }),
+			});
+			const payload = (await response.json().catch(() => null)) as { success?: boolean; errors?: unknown; result?: { message_id?: string } } | null;
+			if (!response.ok || !payload?.success) throw new Error(`Cloudflare send failed (HTTP ${response.status}): ${JSON.stringify(payload?.errors ?? payload)}`);
+			return { messageId: payload.result?.message_id };
+		},
+		async messageStatusBySubject(subject) {
+			const [row] = sql(`SELECT status FROM messages WHERE subject='${sqlEscape(subject)}' LIMIT 1;`);
+			return row ? { status: String(row.status) } : null;
+		},
+		async wait(ms) {
+			sleep(ms);
+		},
+
+		dispose() {
+			if (!keyId) return;
+			sql(`DELETE FROM api_keys WHERE id='${sqlEscape(keyId)}';`);
+			keyId = null;
 		},
 	};
 }

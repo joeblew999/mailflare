@@ -3,6 +3,7 @@ import { validateBody } from "../lib-app";
 import { requireDomain } from "./context";
 import { mailboxesForDomain } from "./mailboxes";
 import type { AccountEntry, ApiAccount, Context } from "./types";
+import type { Resource } from "./resource";
 
 // Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
 // Existing accounts are re-enabled, since the app cannot delete a user.
@@ -116,3 +117,37 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 	console.log(`  ${res.status === 200 ? "✓ disabled" : `✗ disable failed (HTTP ${res.status})`} account ${email}`);
 	return res.status === 200 ? 0 : 1;
 }
+
+// Read-only report: each wanted account exists, is enabled, and owns its mailbox.
+async function statusAccounts(ctx: Context): Promise<number> {
+	const accounts = await ctx.store.listAccounts();
+	const boxes = await mailboxesForDomain(ctx);
+	let missing = 0;
+	for (const entry of ctx.project?.accounts ?? []) {
+		const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
+		const email = `${username}@${ctx.domainName}`;
+		const account = accounts.find((row) => String(row.email).toLowerCase() === email);
+		const why = !account ? " — missing" : account.disabled ? " — disabled" : !boxes.has(username) ? " — mailbox missing" : "";
+		if (why) missing += 1;
+		console.log(`  ${why ? "✗" : "✓"} ${email}${why}`);
+	}
+	return missing;
+}
+
+export const accountsResource: Resource = {
+	section: "accounts",
+	needsDomain: true,
+	wanted: (ctx) => (ctx.project?.accounts?.length ?? 0) > 0,
+	status: (ctx) => statusAccounts(ctx),
+	async apply(ctx) {
+		let failures = 0;
+		for (const account of ctx.project?.accounts ?? []) failures += await ensureAccount(ctx, account);
+		return failures;
+	},
+	async remove(ctx) {
+		if (!ctx.flags.disableAccounts) return 0;
+		let failures = 0;
+		for (const account of ctx.project?.accounts ?? []) failures += await disableAccount(ctx, account);
+		return failures;
+	},
+};

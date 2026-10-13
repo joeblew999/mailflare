@@ -19,6 +19,9 @@ type Seed = {
 	access?: Array<{ mailboxId: string; userId: string; permission: string }>;
 	routing?: Array<Record<string, unknown>>;
 	mcpKeys?: Array<{ id: string; name: string }>;
+	license?: { plan: string; state: string } | null;
+	workerSecrets?: string[] | null;
+	pushSubscriptions?: number;
 };
 
 function fakeStore(seed: Seed = {}) {
@@ -30,6 +33,10 @@ function fakeStore(seed: Seed = {}) {
 		access: seed.access ?? [],
 		routing: seed.routing ?? [],
 		mcpKeys: seed.mcpKeys ?? [],
+		license: seed.license ?? null,
+		workerSecrets: seed.workerSecrets ?? ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"],
+		pushSubscriptions: seed.pushSubscriptions ?? 0,
+		sent: [] as string[],
 	};
 	const calls: string[] = [];
 	let seq = 0;
@@ -128,6 +135,37 @@ function fakeStore(seed: Seed = {}) {
 			calls.push(`deleteRoutingRule:${pattern}:${action}`);
 			state.routing = state.routing.filter((r) => !(r.domainId === domainId && r.pattern === pattern && r.action === action));
 		},
+		licenseRow() {
+			return state.license;
+		},
+		setLicense(plan) {
+			calls.push(`setLicense:${plan ?? "community"}`);
+			state.license = plan === null ? { plan: "community", state: "inactive" } : { plan, state: "active" };
+		},
+		workerSecrets() {
+			return state.workerSecrets;
+		},
+		pushSubscriptionCount() {
+			return state.pushSubscriptions;
+		},
+		firstAdminEmail() {
+			return state.users[0]?.email ?? "admin@instance.test";
+		},
+		async sendViaCloudflare({ subject }) {
+			calls.push(`sendViaCloudflare:${subject}`);
+			state.sent.push(subject);
+			return { messageId: "cf_1" };
+		},
+		async messageStatusBySubject(subject) {
+			return state.sent.includes(subject) ? { status: "received" } : null;
+		},
+		dispose() {},
+		clearPushSubscriptions() {
+			calls.push("clearPushSubscriptions");
+			state.pushSubscriptions = 0;
+		},
+		async wait() {},
+
 		mcpKey(userId, name) {
 			return state.mcpKeys.some((k) => k.name === name) ? { id: "k" } : null;
 		},
@@ -146,7 +184,8 @@ function fakeStore(seed: Seed = {}) {
 
 const flags = (over: Partial<Flags> = {}): Flags => ({
 	dryRun: false, status: false, cleanup: false, onboard: false, confirmMx: false, replaceMx: false,
-	share: false, disableAccounts: false, removeDomain: false, db: "test", local: false, ...over,
+	share: false, disableAccounts: false, removeDomain: false, licenseStatus: false, push: false,
+	steps: false, timeout: "40", db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
@@ -341,4 +380,75 @@ test("scanning the projects folder skips the placeholder and drafts", () => {
 	assert.ok(entries.length > 0, "found project manifests");
 	assert.ok(!entries.some((e) => /example\.json$/.test(e.name)), "example.json is skipped");
 	assert.ok(!entries.some((e) => /\/_/.test(e.name)), "_*.json drafts are skipped");
+});
+
+// --- the global capabilities, which need no domain -----------------------------
+
+test("license: applied only when asked, and reverted by --cleanup", async () => {
+	const ctxFor = (f: Flags, project: ProjectManifest) => [f, project] as const;
+
+	const fresh = fakeStore();
+	const [f1, p1] = ctxFor(flags({ plan: "team" }), {});
+	await runOn(fresh.store, f1, p1, []);
+	assert.deepEqual(fresh.calls.filter((c) => c.startsWith("setLicense")), ["setLicense:team"]);
+	assert.deepEqual(fresh.state.license, { plan: "team", state: "active" });
+
+	const manifest = fakeStore();
+	await runOn(manifest.store, flags(), { license: { plan: "pro" } }, []);
+	assert.ok(manifest.calls.includes("setLicense:pro"), "the manifest section works without a flag");
+
+	const dry = fakeStore();
+	await runOn(dry.store, flags({ plan: "team", dryRun: true }), {}, []);
+	assert.ok(!dry.calls.some((c) => c.startsWith("setLicense")), "dry run writes nothing");
+
+	const undo = fakeStore({ license: { plan: "team", state: "active" } });
+	await runOn(undo.store, flags({ cleanup: true }), { license: { plan: "team" } }, []);
+	assert.ok(undo.calls.includes("setLicense:community"), "cleanup reverts to community");
+});
+
+test("license: --license-status reports the gates", async () => {
+	const { store } = fakeStore({ license: { plan: "team", state: "active" } });
+	assert.equal(await runOn(store, flags({ licenseStatus: true, status: true }), { license: {} }, []), 0);
+});
+
+test("a global-only run needs no domain and touches no domain resource", async () => {
+	const { store, calls } = fakeStore();
+	const code = await runOn(store, flags({ plan: "team" }), {}, []);
+	assert.equal(code, 0);
+	assert.ok(!calls.includes("listDomains"), "domain never resolved");
+	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "no domain-scoped work");
+});
+
+test("push: sends a test email, waits for arrival, and cleanup clears subscriptions", async () => {
+	const sent = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
+	assert.equal(await runOn(sent.store, flags({ push: true }), {}, []), 0);
+	assert.equal(sent.calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "one email sent");
+
+	const dry = fakeStore({ pushSubscriptions: 1 });
+	assert.equal(await runOn(dry.store, flags({ push: true, dryRun: true }), {}, []), 0);
+	assert.ok(!dry.calls.some((c) => c.startsWith("sendViaCloudflare")), "dry run sends nothing");
+
+	const undo = fakeStore({ pushSubscriptions: 3 });
+	await runOn(undo.store, flags({ cleanup: true }), { push: {} }, []);
+	assert.ok(undo.calls.includes("clearPushSubscriptions"), "cleanup clears subscriptions");
+});
+
+test("push: a manifest section works without the flag", async () => {
+	const { store, calls } = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
+	assert.equal(await runOn(store, flags(), { push: { to: "you@example.com" } }, []), 0);
+	assert.equal(calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "the section alone triggers it");
+});
+
+test("status resolves mailbox roles for routing rules", async () => {
+	// Regression: status must publish mailbox ids, or a routing rule that names a
+	// mailbox by role reports a bogus "mailbox not found" and fails the run.
+	const { store } = fakeStore({
+		domains: [{ id: "d1", hostname: "dev.example" }],
+		mailboxes: [{ id: "mbx_1", domainId: "d1", localPart: "support", hostname: "dev.example", type: "shared" }],
+		routing: [
+			{ id: "rr_1", domainId: "d1", pattern: "*", action: "store", match_value: "*", forward_to: null, keep_copy: 0, mailbox_id: "mbx_1", reject_reason: null, priority: 0, enabled: 1 },
+		],
+	});
+	const project = projectFor("dev.example", { mailboxes: [{ role: "support" }], routing: [{ pattern: "*", action: "store", mailbox: "support" }] });
+	assert.equal(await runOn(store, flags({ status: true }), project, roles({ role: "support" })), 0);
 });

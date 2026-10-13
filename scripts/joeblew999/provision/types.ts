@@ -34,6 +34,15 @@ export type Flags = {
 	url?: string;
 	db: string;
 	local: boolean;
+	/** Global capabilities: they do not need a domain. */
+	plan?: string;
+	licenseStatus: boolean;
+	push: boolean;
+	steps: boolean;
+	to?: string;
+	from?: string;
+	subject?: string;
+	timeout: string;
 };
 
 export type AccessGrant = { email?: string; permission?: string };
@@ -53,6 +62,9 @@ export type RoutingEntry = {
 	mailbox?: string;
 };
 export type McpKeyEntry = { name?: string; mailboxes?: string[]; scopes?: string[] };
+/** "team" | "pro" | "community" (revert), or { plan } to match the other sections. */
+export type LicenseEntry = { plan?: string } | string;
+export type PushEntry = { to?: string; from?: string; subject?: string };
 
 export type ProjectManifest = {
 	domain?: string;
@@ -61,6 +73,8 @@ export type ProjectManifest = {
 	accounts?: AccountEntry[];
 	routing?: RoutingEntry[];
 	mcpKeys?: McpKeyEntry[];
+	license?: LicenseEntry;
+	push?: PushEntry;
 };
 
 /** A file that names many projects at once, for mass runs. */

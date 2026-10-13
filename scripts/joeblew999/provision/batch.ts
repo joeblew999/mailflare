@@ -44,12 +44,13 @@ export async function runBatch(store: Store, flags: Flags, values: any, entries:
 		console.log(`\n──────── ${name}`);
 		const domainName = String(project.domain ?? "").trim().toLowerCase();
 		const roles = loadRoles(values, project, flags);
-		if (!domainName) {
-			console.log("  ✗ project has no domain");
+		const global = flags.plan !== undefined || flags.push || Boolean(project.license) || Boolean(project.push);
+		if (!domainName && !global) {
+			console.log("  ✗ project has no domain and asks for nothing global");
 			results.push({ name, ok: false });
 			continue;
 		}
-		if (roles.length === 0) {
+		if (domainName && roles.length === 0 && !global) {
 			console.log("  ✗ project has no mailboxes");
 			results.push({ name, ok: false });
 			continue;

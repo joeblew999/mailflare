@@ -1,12 +1,27 @@
 import { domainRoutingRuleSchema } from "@/lib/validators";
 import { requireDomain } from "./context";
 import type { Context, RoutingEntry } from "./types";
-import type { RoutingRulePatch } from "./store-types";
+import type { Resource } from "./resource";
+import type { RoutingRulePatch, RoutingRuleRow } from "./store-types";
 
-// Provision domain-scope routing rules. These decide, during address resolution:
-// reject, forward, or store (catch-all). Validated with the app's own
-// domainRoutingRuleSchema so the shape and its forward/store rules cannot drift.
-export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): number {
+type RoutingPlan =
+	| { ok: false; error: string }
+	| {
+			ok: true;
+			pattern: string;
+			name: string;
+			matchField: string;
+			matchOperator: string;
+			action: string;
+			label: string;
+			patch: RoutingRulePatch;
+			existing: RoutingRuleRow | null;
+	  };
+
+// Validate an entry with the app's own domainRoutingRuleSchema and reduce it to the
+// values that get stored. apply, status and remove all agree on "the desired rule"
+// because they all go through here.
+function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): RoutingPlan {
 	const pattern = String(entry.pattern ?? "*").trim();
 	// keepCopy / store need a destination mailbox; the manifest names one by role.
 	let mailboxId: string | null = entry.mailboxId ?? null;
@@ -28,61 +43,78 @@ export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRol
 		rejectReason: entry.rejectReason ?? null,
 		priority: Number(entry.priority) || 0,
 	});
-	if (!parsed.success) {
-		console.log(`  ✗ routing ${pattern}: ${JSON.stringify(parsed.error.flatten().fieldErrors)}`);
-		return 1;
-	}
+	if (!parsed.success) return { ok: false, error: JSON.stringify(parsed.error.flatten().fieldErrors) };
 
 	const rule = parsed.data;
-	const label = `routing ${pattern} → ${rule.action}${rule.forwardTo ? ` ${rule.forwardTo}` : ""}`;
-	const desired: RoutingRulePatch = {
-		matchValue: rule.matchValue,
-		forwardTo: rule.forwardTo ?? null,
-		keepCopy: rule.keepCopy ? 1 : 0,
-		mailboxId,
-		rejectReason: rule.rejectReason ?? null,
-		priority: rule.priority,
-		enabled: rule.enabled ? 1 : 0,
+	return {
+		ok: true,
+		pattern,
+		name: rule.name ?? pattern,
+		matchField: rule.matchField,
+		matchOperator: rule.matchOperator,
+		action: rule.action,
+		label: `routing ${pattern} → ${rule.action}${rule.forwardTo ? ` ${rule.forwardTo}` : ""}`,
+		patch: {
+			matchValue: rule.matchValue,
+			forwardTo: rule.forwardTo ?? null,
+			keepCopy: rule.keepCopy ? 1 : 0,
+			mailboxId,
+			rejectReason: rule.rejectReason ?? null,
+			priority: rule.priority,
+			enabled: rule.enabled ? 1 : 0,
+		},
+		existing: ctx.store.routingRule(requireDomain(ctx).id, pattern, rule.action),
 	};
+}
 
-	const existing = ctx.store.routingRule(requireDomain(ctx).id, pattern, rule.action);
-	if (existing) {
-		// Reconcile the stored row with the manifest rather than assuming it matches.
-		const same =
-			String(existing.match_value ?? "") === desired.matchValue &&
-			(existing.forward_to ?? null) === desired.forwardTo &&
-			Number(existing.keep_copy) === desired.keepCopy &&
-			(existing.mailbox_id ?? null) === desired.mailboxId &&
-			(existing.reject_reason ?? null) === desired.rejectReason &&
-			Number(existing.priority) === desired.priority &&
-			Number(existing.enabled) === desired.enabled;
-		if (same) {
-			console.log(`  · ${label} — already exists`);
+// Does the stored row already match what the manifest wants?
+function matches(row: RoutingRuleRow, patch: RoutingRulePatch): boolean {
+	return (
+		String(row.match_value ?? "") === patch.matchValue &&
+		(row.forward_to ?? null) === patch.forwardTo &&
+		Number(row.keep_copy) === patch.keepCopy &&
+		(row.mailbox_id ?? null) === patch.mailboxId &&
+		(row.reject_reason ?? null) === patch.rejectReason &&
+		Number(row.priority) === patch.priority &&
+		Number(row.enabled) === patch.enabled
+	);
+}
+
+// Provision (or reconcile) one domain-scope routing rule: reject, forward, or store.
+export function ensureRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): number {
+	const plan = planRouting(ctx, entry, mailboxIdsByRole);
+	if (!plan.ok) {
+		console.log(`  ✗ routing ${entry.pattern ?? "*"}: ${plan.error}`);
+		return 1;
+	}
+	if (plan.existing) {
+		if (matches(plan.existing, plan.patch)) {
+			console.log(`  · ${plan.label} — already exists`);
 			return 0;
 		}
 		if (ctx.flags.dryRun) {
-			console.log(`  → would update ${label}`);
+			console.log(`  → would update ${plan.label}`);
 			return 0;
 		}
-		ctx.store.updateRoutingRule(existing.id, desired);
-		console.log(`  ✓ updated ${label}`);
+		ctx.store.updateRoutingRule(plan.existing.id, plan.patch);
+		console.log(`  ✓ updated ${plan.label}`);
 		return 0;
 	}
 	if (ctx.flags.dryRun) {
-		console.log(`  → would add ${label}`);
+		console.log(`  → would add ${plan.label}`);
 		return 0;
 	}
 	ctx.store.insertRoutingRule({
 		userId: ctx.store.admin.id,
 		domainId: requireDomain(ctx).id,
-		name: rule.name ?? pattern,
-		pattern,
-		matchField: rule.matchField,
-		matchOperator: rule.matchOperator,
-		action: rule.action,
-		...desired,
+		name: plan.name,
+		pattern: plan.pattern,
+		matchField: plan.matchField,
+		matchOperator: plan.matchOperator,
+		action: plan.action,
+		...plan.patch,
 	});
-	console.log(`  ✓ added ${label}`);
+	console.log(`  ✓ added ${plan.label}`);
 	return 0;
 }
 
@@ -97,3 +129,36 @@ export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 	console.log(`  ✓ removed routing ${pattern} → ${action}`);
 	return 0;
 }
+
+async function statusRouting(ctx: Context, entries: RoutingEntry[], mailboxIdsByRole: Map<string, string>): Promise<number> {
+	let missing = 0;
+	for (const entry of entries) {
+		const plan = planRouting(ctx, entry, mailboxIdsByRole);
+		if (!plan.ok) {
+			missing += 1;
+			console.log(`  ✗ routing ${entry.pattern ?? "*"} — invalid: ${plan.error}`);
+			continue;
+		}
+		const ok = plan.existing !== null && matches(plan.existing, plan.patch);
+		if (!ok) missing += 1;
+		console.log(`  ${ok ? "✓" : "✗"} ${plan.label}${plan.existing && !ok ? " — drifted" : ""}`);
+	}
+	return missing;
+}
+
+export const routingResource: Resource = {
+	section: "routing",
+	needsDomain: true,
+	wanted: (ctx) => (ctx.project?.routing?.length ?? 0) > 0,
+	status: (ctx, _roles, state) => statusRouting(ctx, ctx.project?.routing ?? [], state.mailboxIdsByRole),
+	async apply(ctx, _roles, state) {
+		let failures = 0;
+		for (const entry of ctx.project?.routing ?? []) failures += ensureRouting(ctx, entry, state.mailboxIdsByRole);
+		return failures;
+	},
+	async remove(ctx) {
+		let failures = 0;
+		for (const entry of ctx.project?.routing ?? []) failures += removeRouting(ctx, entry);
+		return failures;
+	},
+};

@@ -70,21 +70,6 @@ export async function request(
 
 // The whole plan state lives in one license_settings row; these are the writes the
 // app's getLicenseEntitlements reads.
-export const licenceSql = {
-	// Upsert: instance_id is generated in SQL so this also works on a fresh database.
-	on: (plan) => `
-INSERT INTO license_settings (id, instance_id, plan, state, features, seat_limit, updated_at)
-VALUES (
-	'default',
-	lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))), 2) || '-' || lower(hex(randomblob(6))),
-	'${plan}', 'active', '[]', 1, strftime('%s','now')
-)
-ON CONFLICT(id) DO UPDATE SET
-	plan = excluded.plan, state = excluded.state, features = excluded.features, updated_at = excluded.updated_at;`,
-	off: "UPDATE license_settings SET plan='community', state='inactive', features='[]', updated_at=strftime('%s','now') WHERE id='default';",
-	status: "SELECT plan, state, seat_limit, features FROM license_settings WHERE id='default';",
-};
-
 // Mirrors getLicenseEntitlements (src/lib/licenses/service.ts) for display. It needs
 // D1, so it cannot be imported — keep this the one place that mirrors the gates.
 export function entitlementsFor(plan: string, active: boolean) {

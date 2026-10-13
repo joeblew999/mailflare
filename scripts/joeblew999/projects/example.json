@@ -1,25 +1,79 @@
 {
   "domain": "example.com",
-  "onboard": { "enableRouting": true, "replaceMxRecords": false },
+  "onboard": {
+    "enableRouting": true,
+    "replaceMxRecords": false
+  },
   "mailboxes": [
-    { "role": "office", "displayName": "Office" },
-    { "role": "admin", "displayName": "Admin" },
+    {
+      "role": "office",
+      "displayName": "Office"
+    },
+    {
+      "role": "admin",
+      "displayName": "Admin"
+    },
     {
       "role": "events",
       "displayName": "Events",
       "shared": true,
-      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "full_access" }]
+      "access": [
+        {
+          "email": "gerard.webb@ubuntudesign.com",
+          "permission": "full_access"
+        }
+      ]
     },
     {
       "role": "support",
       "displayName": "Support",
       "shared": true,
-      "access": [{ "email": "gerard.webb@ubuntudesign.com", "permission": "read_only" }]
+      "access": [
+        {
+          "email": "gerard.webb@ubuntudesign.com",
+          "permission": "read_only"
+        }
+      ]
     }
   ],
-  "accounts": [{ "username": "sam", "name": "Sam", "role": "user", "passwordEnv": "PROV_PASSWORD" }],
+  "accounts": [
+    {
+      "username": "sam",
+      "name": "Sam",
+      "role": "user",
+      "passwordEnv": "PROV_PASSWORD"
+    }
+  ],
   "routing": [
-    { "pattern": "*", "action": "forward", "forwardTo": "gerard.webb@ubuntudesign.com", "keepCopy": true, "mailbox": "support" },
-    { "pattern": "no-reply", "action": "reject", "rejectReason": "No such user" }
-  ]
+    {
+      "pattern": "*",
+      "action": "forward",
+      "forwardTo": "gerard.webb@ubuntudesign.com",
+      "keepCopy": true,
+      "mailbox": "support"
+    },
+    {
+      "pattern": "no-reply",
+      "action": "reject",
+      "rejectReason": "No such user"
+    }
+  ],
+  "mcpKeys": [
+    {
+      "name": "agent",
+      "mailboxes": [
+        "office"
+      ],
+      "scopes": [
+        "mcp:read",
+        "mcp:draft"
+      ]
+    }
+  ],
+  "license": {
+    "plan": "team"
+  },
+  "push": {
+    "to": "gerard.webb@ubuntudesign.com"
+  }
 }
