@@ -5,74 +5,55 @@ export function parseCli() {
 	const { values, positionals } = parseArgs({
 		allowPositionals: true,
 		options: {
-			domain: { type: "string" },
-			spec: { type: "string" },
-			instance: { type: "string" },
-			project: { type: "string" },
-			// Set from the positionals, not typed by the user.
+			// Set from the positionals, never typed by the user.
 			target: { type: "string" },
 			verb: { type: "string" },
 			"data-subject": { type: "string" },
-			erase: { type: "boolean", default: false },
-			"source-changes": { type: "boolean", default: false },
-			concurrency: { type: "string", default: "1" },
-			deploy: { type: "string" },
-			undeploy: { type: "string" },
-			"confirm-destroy": { type: "boolean", default: false },
+			// Derived from the target. Declared so the entry point can hold them, never
+			// advertised: there is one way to point this at something.
+			spec: { type: "string" },
+			project: { type: "string" },
 			all: { type: "boolean", default: false },
+
+			// How to run it.
 			dir: { type: "string", default: "scripts/state/specs/projects" },
-			roles: { type: "string", default: "" },
-			"roles-file": { type: "string" },
-			onboard: { type: "boolean", default: false },
-			"replace-mx": { type: "boolean", default: false },
-			"confirm-mx": { type: "boolean", default: false },
-			share: { type: "boolean", default: false },
-			"dry-run": { type: "boolean", default: false },
-			status: { type: "boolean", default: false },
-			cleanup: { type: "boolean", default: false },
-			"disable-accounts": { type: "boolean", default: false },
-			"remove-domain": { type: "boolean", default: false },
-			fresh: { type: "boolean", default: false },
-			"admin-email": { type: "string" },
-			"admin-password": { type: "string" },
-			plan: { type: "string" },
-			"license-status": { type: "boolean", default: false },
-			push: { type: "boolean", default: false },
-			steps: { type: "boolean", default: false },
-			to: { type: "string" },
-			from: { type: "string" },
-			subject: { type: "string" },
-			timeout: { type: "string", default: "40" },
-			url: { type: "string" },
-			db: { type: "string" },
 			local: { type: "boolean", default: false },
+			db: { type: "string" },
+			url: { type: "string" },
+			concurrency: { type: "string", default: "1" },
+
+			// Destructive actions need approval, as in terraform.
+			"confirm-mx": { type: "boolean", default: false },
+			"confirm-destroy": { type: "boolean", default: false },
+
+			// About the system rather than the instance.
+			"source-changes": { type: "boolean", default: false },
+			steps: { type: "boolean", default: false },
 			help: { type: "boolean", short: "h", default: false },
 		},
 	});
 
+	// Flags are INTERNAL: the documents say WHAT to build, these say HOW to run it. What used
+	// to be flags - onboard, share, the licence plan, web push, the admin, teardown - is read
+	// from the documents, and the globals are derived from the instance document in apply.ts
+	// so the resources keep one source of truth.
 	const flags: Flags = {
-		dryRun: Boolean(values["dry-run"]),
-		erase: Boolean(values.erase),
-		confirmDestroy: Boolean(values["confirm-destroy"]),
-		status: Boolean(values.status),
-		cleanup: Boolean(values.cleanup),
-		onboard: Boolean(values.onboard),
+		dryRun: false,
+		status: false,
+		cleanup: false,
+		onboard: false,
 		confirmMx: Boolean(values["confirm-mx"]),
-		replaceMx: Boolean(values["replace-mx"]),
-		share: Boolean(values.share),
-		disableAccounts: Boolean(values["disable-accounts"]),
-		removeDomain: Boolean(values["remove-domain"]),
-		fresh: Boolean(values.fresh),
-		adminEmail: values["admin-email"],
-		adminPassword: values["admin-password"],
-		plan: values.plan,
-		licenseStatus: Boolean(values["license-status"]),
-		push: Boolean(values.push),
+		replaceMx: false,
+		share: false,
+		disableAccounts: false,
+		removeDomain: false,
+		fresh: false,
+		erase: false,
+		confirmDestroy: Boolean(values["confirm-destroy"]),
+		licenseStatus: false,
+		push: false,
 		steps: Boolean(values.steps),
-		to: values.to,
-		from: values.from,
-		subject: values.subject,
-		timeout: String(values.timeout),
+		timeout: "40",
 		url: values.url,
 		db: String(values.db ?? "mailflare"),
 		local: Boolean(values.local),
@@ -115,59 +96,32 @@ export function parseCli() {
 export function usage() {
 	console.log(`state — reconcile a Mailflare instance with its JSON desired state.
 
-Point it at a project folder and it makes everything in it exist, or not exist:
+  npm run state -- <target> <verb> [flags]
 
-  npm run state -- --project <name> plan      what exists vs the documents (read-only)
-  npm run state -- --project <name> apply     make it so — the default
-  npm run state -- --project <name> destroy   remove it, the server included
+  npm run state -- plan                        every project
+  npm run state -- mailflare plan              a project
+  npm run state -- mailflare apply
+  npm run state -- mailflare destroy
+  npm run state -- mailflare reset             wipe it and make a primary admin
+  npm run state -- <path>/<file>.json plan     one document
+  npm run state -- subject <email> plan        where one person's data lives
+  npm run state -- subject <email> destroy     DESTROY it
 
-A project is specs/projects/<name>/: server.json (the server), instance.json (the instance),
-and one document per tenant. --project reconciles all of them, and deploys the server first if
-it is not registered, so create and destroy are the same command either way.
+The target is a project name, a projects folder, or a document. The verb is plan, apply,
+destroy, reset or subject. Everything else lives in the documents:
 
-What to point at:
-  --project <name>        a project folder: its server, instance and every tenant
-  --spec <path>           one document, or many via { "specs": [...] }
-  --all                   every project in --dir (skips example and _*)
+  server.json     the server: database, origin, jurisdiction
+  instance.json   the instance: licence, web push, and fresh.admin for reset
+  <domain>.json   the tenants: mailboxes, accounts, routing, mcpKeys, onboard, teardown
+
+Flags:
   --dir <path>            projects folder (default: scripts/state/specs/projects)
-  --instance <name|path>  only a server's instance document
-  --domain <hostname>     apply a domain without a document
-  --roles <a,b,c>         ad-hoc role names (with --domain)
-  --roles-file <path>     role names from a file (JSON array or one per line)
-
-The server itself:
-  --deploy <name>         deploy it and record its origin (apply does this anyway)
-  --undeploy <name>       undeploy the Worker and deregister it
-  --confirm-destroy       actually destroy/undeploy; without it you get the plan
-
-What to change:
-  --fresh                 reset the instance to empty and make a primary admin
-  --admin-email/--admin-password   the admin --fresh creates
-  --onboard               add a missing domain (publishes MX)
-  --confirm-mx            allow onboarding a domain that already has MX
-  --replace-mx            when onboarding, take MX over from another provider
-  --share                 create the mailboxes as shared
-  --disable-accounts      with destroy, also disable the accounts
-  --remove-domain         with destroy, also remove the domain
-
-How:
-  --dry-run               show what would change, change nothing
-  --concurrency <n>       mass runs: how many documents in flight (default 1)
+  --local / --db <name>   which database (default: the deployed one)
   --url <base>            instance URL (else MAILFLARE_URL, else derived from Cloudflare)
-  --db <name> / --local   which database / the local dev one
-
-Server-wide, no project needed:
-  --plan <team|pro|community>   set the licence plan (community reverts)
-  --license-status        report the licence and its gates
-  --push                  web push round trip
-  --to/--from/--subject/--timeout   web push overrides
-  --steps                 the Web Push (VAPID) key-rotation runbook
-
-One person's data:
-  --data-subject <email>  where their data lives (read-only)
-  --erase                 with --data-subject: destroy those rows and their R2 objects
-
-About this system:
+  --concurrency <n>       mass runs: how many documents in flight (default 1)
+  --confirm-mx            allow onboarding a domain that already has MX records
+  --confirm-destroy       actually destroy/undeploy; without it you get the plan
   --source-changes        what cannot be done without modifying src/, and where
+  --steps                 the Web Push (VAPID) key-rotation runbook
   -h, --help              this`);
 }

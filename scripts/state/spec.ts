@@ -39,7 +39,7 @@ export type RoutingEntry = {
 export type McpKeyEntry = { name?: string; mailboxes?: string[]; scopes?: string[] };
 /** "team" | "pro" | "community" (revert), or { plan } to match the other sections. */
 export type LicenseEntry = { plan?: string } | string;
-export type PushEntry = { to?: string; from?: string; subject?: string };
+export type PushEntry = { to?: string; from?: string; subject?: string; timeout?: number };
 
 /** One desired-state document: any subset of these sections. */
 export type Spec = {
@@ -51,6 +51,8 @@ export type Spec = {
 	mcpKeys?: McpKeyEntry[];
 	license?: LicenseEntry;
 	push?: PushEntry;
+	/** What destroy does to the pieces it cannot simply delete. Declared, not flagged. */
+	teardown?: { accounts?: "disable" | "keep"; domain?: "remove" | "keep" };
 	/** Reset the instance to empty and create its primary admin. */
 	fresh?: { admin?: { email?: string; password?: string } };
 };

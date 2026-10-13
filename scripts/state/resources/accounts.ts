@@ -153,7 +153,7 @@ export const accountsResource: Resource = {
 		return failures;
 	},
 	async remove(ctx) {
-		if (!ctx.flags.disableAccounts) return 0;
+		if (ctx.spec?.teardown?.accounts !== "disable") return 0;
 		let failures = 0;
 		for (const account of ctx.spec?.accounts ?? []) failures += await disableAccount(ctx, account);
 		return failures;

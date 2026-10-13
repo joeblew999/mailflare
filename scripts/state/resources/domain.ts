@@ -26,7 +26,7 @@ export async function ensureDomain(ctx: Context, roles: Role[]): Promise<number>
 		return 1;
 	}
 
-	const onboard = ctx.flags.onboard || Boolean(ctx.spec?.onboard);
+	const onboard = Boolean(ctx.spec?.onboard);
 	if (!onboard) {
 		console.error(`"${ctx.domainName}" is not onboarded in Mailflare.`);
 		console.error("Add it under Admin → Domains, or pass --onboard to add it now (this publishes MX).");
@@ -90,6 +90,6 @@ export const domainResource: Resource = {
 	apply: (ctx, roles) => ensureDomain(ctx, roles),
 	async remove(ctx, roles) {
 		await ensureDomain(ctx, roles); // resolve only: cleanup never onboards
-		return ctx.flags.removeDomain && ctx.domain ? await removeDomain(ctx) : 0;
+		return ctx.spec?.teardown?.domain === "remove" && ctx.domain ? await removeDomain(ctx) : 0;
 	},
 };

@@ -15,34 +15,14 @@ export function loadSpec(path: string): Spec {
 	}
 }
 
-// A roles file is a JSON array or one role per line ("#" comments allowed).
-export function readRolesFile(path: string): any[] {
-	const text = readFileSync(path, "utf8");
-	if (path.toLowerCase().endsWith(".json")) {
-		const parsed = JSON.parse(text);
-		if (!Array.isArray(parsed)) throw new Error("roles file must be a JSON array");
-		return parsed.map((entry: any) => (typeof entry === "string" ? { role: entry } : entry));
-	}
-	return text
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line && !line.startsWith("#"))
-		.map((role) => ({ role }));
-}
-
-// Precedence: the document → roles file → ad-hoc --roles.
-export function rolesFor(values: any, spec: Spec | null, flags: Flags): Role[] {
-	const entries = spec?.mailboxes?.length
-		? spec.mailboxes
-		: values["roles-file"]
-			? readRolesFile(values["roles-file"])
-			: String(values.roles).split(",").filter(Boolean).map((role: string) => ({ role }));
-
-	return entries
+/** The mailboxes a document declares, normalised. Roles come from the document: there is no
+ *  ad-hoc mode, because a state driver's input IS the state. */
+export function rolesFor(spec: Spec | null): Role[] {
+	return (spec?.mailboxes ?? [])
 		.map((entry: any) => {
 			const role = String(entry.role ?? entry.localPart ?? "").trim().toLowerCase();
 			if (!role) return null;
-			const share = typeof entry.share === "boolean" ? entry.share : typeof entry.shared === "boolean" ? entry.shared : flags.share;
+			const share = typeof entry.share === "boolean" ? entry.share : Boolean(entry.shared);
 			const access = Array.isArray(entry.access) ? entry.access : [];
 			return { role, displayName: entry.displayName?.trim() || role, share, access } as Role;
 		})
