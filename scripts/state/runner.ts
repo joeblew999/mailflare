@@ -43,7 +43,8 @@ export async function runSpecs(store: Store, flags: Flags, values: any, entries:
 	// Opt-in: one at a time by default, so the output stays readable and D1 is not hammered.
 	// Thousands of documents want a few in flight, not one.
 	const limit = Math.max(1, Number(values.concurrency ?? 1) || 1);
-	console.log(`Applying ${entries.length} document(s)${limit > 1 ? `, ${limit} at a time` : ""}\n`);
+	const doing = flags.status ? "Planning" : flags.cleanup ? "Destroying" : "Applying";
+	console.log(`${doing} ${entries.length} document(s)${limit > 1 ? `, ${limit} at a time` : ""}\n`);
 
 	const applyOne = async ({ name, spec }: SpecEntry): Promise<{ name: string; ok: boolean }> => {
 		console.log(`\n──────── ${name}`);
