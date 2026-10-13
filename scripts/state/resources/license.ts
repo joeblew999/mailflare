@@ -1,4 +1,3 @@
-import { entitlementsFor } from "../wrangler";
 import type { LicenseEntry } from "../spec";
 import type { Resource } from "./resource";
 
@@ -10,47 +9,34 @@ export function wantedPlan(entry: LicenseEntry | undefined): string | null {
 	return plan;
 }
 
-export function reportLicense(ctx: Parameters<Resource["plan"]>[0]) {
-	const row = ctx.store.licenseRow();
-	if (!row) {
-		console.log("  ⚠ no license_settings row yet — open Settings → License in the app once, then retry.");
-		return;
-	}
-	const active = row.state === "active" && (row.plan === "pro" || row.plan === "team");
-	const gates = entitlementsFor(row.plan, active);
-	console.log(`  plan=${row.plan}  state=${row.state}  active=${active}`);
-	console.log(`     custom branding: ${gates.branding ? "on" : "off"}   manage accounts: ${gates.accounts ? "on" : "off"}`);
-	console.log(`     forwarding:      ${gates.forwarding ? "on" : "off"}   shared mailboxes: ${gates.sharing ? "on" : "off"}`);
-	console.log(`     account seats:   ${gates.seatLimit}`);
-}
-
 // The self-hosted license plan is one row, so this is pure data - no domain needed.
 export const licenseResource: Resource = {
 	section: "license",
 	needsDomain: false,
-	declared: (ctx) => Boolean(ctx.spec?.license),
-	async plan(ctx) {
-		reportLicense(ctx);
-		const raw = typeof ctx.spec?.license === "string" ? ctx.spec.license : ctx.spec?.license?.plan;
-		const wanted = (raw ?? "").trim().toLowerCase();
-		const target = !wanted || wanted === "community" || wanted === "off" ? null : wanted;
+	// An empty licence section asks for nothing. Reading it as "revert to community" would
+	// silently downgrade a live licence.
+	declared: (ctx) => Boolean(wantedPlan(ctx.spec?.license)),
+	async items(ctx) {
+		const wanted = wantedPlan(ctx.spec?.license) as string;
 		const row = ctx.store.licenseRow();
 		const active = row?.state === "active" ? row.plan : "community";
-		return [{ address: "license", action: target && target !== active ? "update" : "unchanged", detail: `${active} -> ${target ?? "community"}` }];
-	},
-	async apply(ctx) {
-		const plan = wantedPlan(ctx.spec?.license);
-		if (!plan) {
-			console.log("  · license — no plan requested");
+		const set = async () => {
+			ctx.store.setLicense(wanted);
+			console.log(`  ✓ licence set to ${wanted}`);
 			return 0;
-		}
-		ctx.store.setLicense(plan);
-		console.log(`  ✓ activated the ${plan} license`);
-		return 0;
-	},
-	async remove(ctx) {
-		ctx.store.setLicense(null);
-		console.log("  ✓ reverted the license to community");
-		return 0;
+		};
+		return [{
+			address: "license",
+			wants: `${active} → ${wanted}`,
+			actual: async () => (row ? row.plan : null),
+			satisfied: () => active === wanted,
+			create: set,
+			update: set,
+			remove: async () => {
+				ctx.store.setLicense(null);
+				console.log("  ✓ reverted the licence to community");
+				return 0;
+			},
+		}];
 	},
 };

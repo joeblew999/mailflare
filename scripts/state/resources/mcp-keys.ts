@@ -1,7 +1,6 @@
 import type { Context } from "../context";
 import type { McpKeyEntry } from "../spec";
 import type { Resource } from "./resource";
-import type { Change } from "../plan";
 
 // MCP tool scopes (mirrors MCP_SCOPES in src/lib/mcp/auth.ts).
 export const MCP_SCOPES = ["mcp:read", "mcp:draft", "mcp:organize", "mcp:request-send", "mcp:calendar-read", "mcp:calendar-write"];
@@ -48,27 +47,19 @@ function resolveMailboxes(name: string, entry: McpKeyEntry, mailboxIdsByRole: Ma
 	return ids;
 }
 
-async function planMcpKeys(ctx: Context): Promise<Change[]> {
-	return (ctx.spec?.mcpKeys ?? []).map((entry) => {
-		const name = String(entry.name ?? "agent").trim();
-		const exists = ctx.store.mcpKey(ctx.store.admin.id, name) !== null;
-		return { address: `mcpKey.${name}`, action: exists ? ("unchanged" as const) : ("create" as const) };
-	});
-}
-
 export const mcpKeysResource: Resource = {
 	section: "mcpKeys",
 	needsDomain: true,
 	declared: (ctx) => (ctx.spec?.mcpKeys?.length ?? 0) > 0,
-	plan: (ctx) => planMcpKeys(ctx),
-	async apply(ctx, _roles, state) {
-		let failures = 0;
-		for (const entry of ctx.spec?.mcpKeys ?? []) failures += ensureMcpKey(ctx, entry, state.mailboxIdsByRole);
-		return failures;
-	},
-	async remove(ctx) {
-		let failures = 0;
-		for (const entry of ctx.spec?.mcpKeys ?? []) failures += removeMcpKey(ctx, entry);
-		return failures;
+	async items(ctx, _roles, state) {
+		return (ctx.spec?.mcpKeys ?? []).map((entry) => {
+			const name = String(entry.name ?? "agent").trim();
+			return {
+				address: `mcpKey.${name}`,
+				actual: async () => ctx.store.mcpKey(ctx.store.admin.id, name),
+				create: async () => ensureMcpKey(ctx, entry, state.mailboxIdsByRole),
+				remove: async () => removeMcpKey(ctx, entry),
+			};
+		});
 	},
 };

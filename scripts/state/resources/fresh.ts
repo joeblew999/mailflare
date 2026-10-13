@@ -12,40 +12,38 @@ import type { Resource } from "./resource";
 export const freshResource: Resource = {
 	section: "fresh",
 	needsDomain: false,
-	declared: (ctx) => ctx.flags.fresh || Boolean(ctx.spec?.fresh),
-	async plan(ctx) {
-		const domains = ctx.store.domainCount();
-		const admin = ctx.store.schemaPresent() ? ctx.store.firstAdminEmail() : null;
-		return [{ address: "instance", action: "update", detail: `wipes ${domains} domain(s) and every table, then makes ${admin ?? "a new admin"}` }];
-	},
-	async apply(ctx) {
-		const entry = typeof ctx.spec?.fresh === "object" ? ctx.spec.fresh : {};
+	prerequisite: true,
+	// The reset VERB triggers it; the document only configures it. So a plain apply never wipes.
+	declared: (ctx) => ctx.flags.fresh,
+	async items(ctx) {
+		const entry = ctx.spec?.fresh ?? {};
 		const email = (entry.admin?.email ?? "admin@localhost").trim().toLowerCase();
 		const password = entry.admin?.password ?? newId();
-		const generated = !entry.admin?.password;
-
-		// A reset touches the database only. Saying so is the difference between a reset and a
-		// surprise: the domains' Cloudflare MX, Email Routing and DNS survive and are orphaned.
-		// Reported in the preview as well as the real run - the preview is where you look.
 		const domains = ctx.store.domainCount();
-		if (domains > 0) {
-			console.log(`  ⚠ ${domains} domain(s) exist — wiping the database does NOT remove their Cloudflare MX/Email Routing/DNS, which will be left orphaned`);
-		}
-
-
-		ctx.store.applyMigrations();
-		if (!ctx.store.schemaPresent()) {
-			console.log("  ✗ the schema is still missing after applying migrations");
-			return 1;
-		}
-		ctx.store.wipeData();
-		ctx.store.insertAdmin({ id: newId("usr"), email, name: email.split("@")[0], passwordHash: hashPassword(password) });
-		console.log(`  ✓ fresh instance — every table emptied, primary admin ${email} created`);
-		console.log(`     password: ${generated ? `${password}  (generated — shown once)` : "as given"}`);
-		return 0;
-	},
-	async remove() {
-		console.log("  · fresh — nothing to undo; a wiped instance cannot be un-reset");
-		return 0;
+		return [{
+			address: "instance",
+			wants: `wipes ${domains} domain(s) and every table, then makes ${email}`,
+			// A reset is always work: there is no state in which it is already done.
+			actual: async () => null,
+			create: async () => {
+				if (domains > 0) {
+					console.log(`  ⚠ ${domains} domain(s) exist — wiping the database does NOT remove their Cloudflare MX/Email Routing/DNS, which will be left orphaned`);
+				}
+				ctx.store.applyMigrations();
+				if (!ctx.store.schemaPresent()) {
+					console.log("  ✗ the schema is still missing after applying migrations");
+					return 1;
+				}
+				ctx.store.wipeData();
+				ctx.store.insertAdmin({ id: newId("usr"), email, name: email.split("@")[0], passwordHash: hashPassword(password) });
+				console.log(`  ✓ fresh instance — every table emptied, primary admin ${email} created`);
+				console.log(`     password: ${entry.admin?.password ? "as given" : `${password}  (generated — shown once)`}`);
+				return 0;
+			},
+			remove: async () => {
+				console.log("  · fresh — nothing to undo; a wiped instance cannot be un-reset");
+				return 0;
+			},
+		}];
 	},
 };

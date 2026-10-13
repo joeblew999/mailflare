@@ -83,22 +83,6 @@ export async function request(
 	return { status: response.status, text, json };
 }
 
-// The whole plan state lives in one license_settings row; these are the writes the
-// app's getLicenseEntitlements reads.
-// Mirrors getLicenseEntitlements (src/lib/licenses/service.ts) for display. It needs
-// D1, so it cannot be imported — keep this the one place that mirrors the gates.
-export function entitlementsFor(plan: string, active: boolean) {
-	const isTeam = active && plan === "team";
-	const isPro = active && plan === "pro";
-	return {
-		branding: active,
-		accounts: active,
-		forwarding: active,
-		sharing: isTeam,
-		seatLimit: isPro ? "from license" : isTeam ? "unlimited" : "1",
-	};
-}
-
 // The first R2 bucket in wrangler.jsonc.
 export function r2BucketName() {
 	try {

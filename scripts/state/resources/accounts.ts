@@ -5,7 +5,6 @@ import { mailboxesForDomain } from "./mailboxes";
 import type { Context } from "../context";
 import type { AccountEntry, ApiAccount } from "../spec";
 import type { Resource } from "./resource";
-import type { Change } from "../plan";
 
 // Create a login account (`accounts: [{ username, name?, role?, password? | passwordEnv? }]`).
 // Existing accounts are re-enabled, since the app cannot delete a user.
@@ -109,34 +108,30 @@ export async function disableAccount(ctx: Context, entry: AccountEntry): Promise
 }
 
 // Read-only report: each declared account exists, is enabled, and owns its mailbox.
-async function planAccounts(ctx: Context): Promise<Change[]> {
-	const accounts = await ctx.store.listAccounts();
-	const boxes = await mailboxesForDomain(ctx);
-	return (ctx.spec?.accounts ?? []).map((entry) => {
-		const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
-		const email = `${username}@${ctx.domainName}`;
-		const account = accounts.find((row) => String(row.email).toLowerCase() === email);
-		if (!account) return { address: `account.${username}`, action: "create" as const, detail: "with its mailbox" };
-		if (account.disabled) return { address: `account.${username}`, action: "update" as const, detail: "re-enable" };
-		if (!boxes.has(username)) return { address: `account.${username}`, action: "update" as const, detail: "rebuild its mailbox" };
-		return { address: `account.${username}`, action: "unchanged" as const };
-	});
-}
-
 export const accountsResource: Resource = {
 	section: "accounts",
 	needsDomain: true,
 	declared: (ctx) => (ctx.spec?.accounts?.length ?? 0) > 0,
-	plan: (ctx) => planAccounts(ctx),
-	async apply(ctx) {
-		let failures = 0;
-		for (const account of ctx.spec?.accounts ?? []) failures += await ensureAccount(ctx, account);
-		return failures;
-	},
-	async remove(ctx) {
-		if (ctx.spec?.teardown?.accounts !== "disable") return 0;
-		let failures = 0;
-		for (const account of ctx.spec?.accounts ?? []) failures += await disableAccount(ctx, account);
-		return failures;
+	async items(ctx) {
+		const accounts = await ctx.store.listAccounts();
+		const boxes = await mailboxesForDomain(ctx);
+		return (ctx.spec?.accounts ?? []).map((entry) => {
+			const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
+			const email = `${username}@${ctx.domainName}`;
+			const account = accounts.find((row) => String(row.email).toLowerCase() === email) ?? null;
+			return {
+				address: `account.${username}`,
+				wants: entry.role ?? "user",
+				actual: async () => account,
+				// An existing, enabled account that owns its mailbox is already what we want.
+				satisfied: (actual: unknown) => {
+					const found = actual as ApiAccount | null;
+					return !!found && !found.disabled && boxes.has(username);
+				},
+				create: async () => ensureAccount(ctx, entry),
+				update: async () => ensureAccount(ctx, entry),
+				remove: async () => (ctx.spec?.teardown?.accounts === "disable" ? disableAccount(ctx, entry) : 0),
+			};
+		});
 	},
 };

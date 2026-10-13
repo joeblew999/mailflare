@@ -7,7 +7,8 @@ const SECTIONS = ["specs", "domain", "server", "onboard", "mailboxes", "accounts
 const PERMISSIONS = ["read_only", "send_as", "send_on_behalf", "full_access"];
 const ACTIONS = ["store", "forward", "reject"];
 const PROVIDERS = ["none", "cloudflare", "resend", "ses"];
-const TEARDOWN = ["disable", "keep"];
+// The two teardown keys have DIFFERENT vocabularies: one disables, the other removes.
+const TEARDOWN: Record<string, string[]> = { accounts: ["disable", "keep"], domain: ["remove", "keep"] };
 
 const FIELDS: Record<string, string[]> = {
 	onboard: ["enableRouting", "enableSending", "replaceMxRecords", "sendingProvider", "receivingProvider"],
@@ -115,8 +116,8 @@ export function validateSpec(value: unknown, where = ""): string[] {
 		const teardown = doc.teardown as Record<string, unknown>;
 		for (const key of ["accounts", "domain"]) {
 			const chosen = teardown[key];
-			if (chosen !== undefined && !TEARDOWN.includes(String(chosen))) {
-				problems.push(`${at(`teardown.${key}`)}: "${String(chosen)}" is not one of ${TEARDOWN.join(", ")}`);
+			if (chosen !== undefined && !TEARDOWN[key].includes(String(chosen))) {
+				problems.push(`${at(`teardown.${key}`)}: "${String(chosen)}" is not one of ${TEARDOWN[key].join(", ")}`);
 			}
 		}
 	}

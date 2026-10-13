@@ -2,17 +2,17 @@
 // with no D1, no Workers binding and no network. Run with `npm run state:test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeContext } from "../scripts/state/context";
-import { run } from "../scripts/state/driver";
-import { loadSpecs, runSpecs } from "../scripts/state/runner";
-import { loadProject } from "../scripts/state/document";
-import { validateSpec } from "../scripts/state/validate";
-import { SOURCE_CHANGES } from "../scripts/state/src-changes";
-import { envBlockFor, stripJsonc } from "../scripts/state/deploy";
-import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
-import type { Flags } from "../scripts/state/flags";
-import type { Role, Spec } from "../scripts/state/spec";
-import type { Store } from "../scripts/state/store/types";
+import { makeContext } from "./context";
+import { run } from "./driver";
+import { loadSpecs, runSpecs } from "./runner";
+import { loadProject } from "./document";
+import { validateSpec } from "./validate";
+import { SOURCE_CHANGES } from "./src-changes";
+import { envBlockFor, stripJsonc } from "./deploy";
+import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
+import type { Flags } from "./flags";
+import type { Role, Spec } from "./spec";
+import type { Store } from "./store/types";
 
 const ok = (json: unknown = {}) => ({ status: 200, text: "", json });
 const created = (json: unknown = {}) => ({ status: 201, text: "", json });
@@ -471,7 +471,7 @@ test("push: sends a test email, waits for arrival, and cleanup clears subscripti
 	assert.equal(sent.calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "one email sent");
 
 	const dry = fakeStore({ pushSubscriptions: 1 });
-	assert.equal(await runOn(dry.store, flags({status: true}), { push: {} }, []), 0);
+	assert.equal(await runOn(dry.store, flags({status: true}), { push: {} }, []), 1, "a plan reports the round trip it would run");
 	assert.ok(!dry.calls.some((c) => c.startsWith("sendViaCloudflare")), "dry run sends nothing");
 
 	const undo = fakeStore({ pushSubscriptions: 3 });

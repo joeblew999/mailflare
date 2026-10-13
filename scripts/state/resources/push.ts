@@ -1,5 +1,4 @@
 import type { Resource } from "./resource";
-import type { Context } from "../context";
 
 // The secrets the Worker needs to encrypt a push payload.
 const VAPID = ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"];
@@ -34,74 +33,51 @@ To rotate and keep a copy in fnox:
        npm run state:push`);
 }
 
-function reportSecrets(ctx: Context) {
-	const secrets = ctx.store.workerSecrets();
-	if (!secrets) {
-		console.log("  ⚠ could not read the Worker's secret list (is wrangler logged in?)");
-		return;
-	}
-	const missing = VAPID.filter((name) => !secrets.includes(name));
-	console.log(missing.length ? `  ⚠ Worker is missing: ${missing.join(", ")}` : "  ✓ VAPID secrets present on the Worker");
-}
-
 // Verify Web Push end to end: send a real email back into our own inbox, then wait
 // for it to land. No domain needed - it uses the instance's own admin address.
 export const pushResource: Resource = {
 	section: "push",
 	needsDomain: false,
-	declared: (ctx) => Boolean(ctx.spec?.push) || Boolean(ctx.spec?.push),
-	async plan(ctx) {
-		const subscriptions = ctx.store.pushSubscriptionCount();
-		const missing = VAPID.filter((name) => !(ctx.store.workerSecrets() ?? []).includes(name));
-		if (missing.length > 0) return [{ address: "push", action: "update", detail: `worker missing ${missing.join(", ")}` }];
-		if (subscriptions === 0) return [{ address: "push", action: "create", detail: "no device subscribed yet" }];
-		return [{ address: "push", action: "unchanged", detail: `${subscriptions} subscription(s)` }];
-	},
-	async apply(ctx) {
+	declared: (ctx) => Boolean(ctx.spec?.push),
+	async items(ctx) {
 		const entry = ctx.spec?.push ?? {};
-		reportSecrets(ctx);
-		const subscriptions = ctx.store.pushSubscriptionCount();
-		console.log(`  push_subscriptions: ${subscriptions}`);
-		if (subscriptions === 0) {
-			console.log('  ⚠ none — enable Settings → Inbox → "Browser push notifications" on the device first');
-		}
-
+		const missing = VAPID.filter((name) => !(ctx.store.workerSecrets() ?? []).includes(name));
 		const to = (entry.to ?? ctx.store.firstAdminEmail())?.trim();
-		if (!to) {
-			console.log("  ✗ no recipient: pass --to, or give the instance a user");
-			return 1;
-		}
-		const from = (entry.from ?? to).trim();
-		const subject = entry.subject ?? `Mailflare push test ${new Date().toISOString()}`;
-
-		const { messageId } = await ctx.store.sendViaCloudflare({
-			from,
-			to,
-			subject,
-			text: "If your device shows a notification, Web Push is working.",
-			html: "<p>If your device shows a notification, <strong>Web Push</strong> is working.</p>",
-		});
-		console.log(`  ✓ queued (${messageId ?? "sent"})`);
-
-		// Match on the unique subject, since the inbound copy gets its own id.
-		const seconds = entry.timeout ?? 40;
-		const deadline = Date.now() + seconds * 1000;
-		let arrived: { status: string } | null = null;
-		while (Date.now() < deadline) {
-			arrived = await ctx.store.messageStatusBySubject(subject);
-			if (arrived) break;
-			await ctx.store.wait(3000);
-		}
-		if (arrived) {
-			console.log(`  ✓ arrived in the inbox (status: ${arrived.status}) — check your devices for the notification`);
-			return 0;
-		}
-		console.log(`  ✗ not seen in the inbox within ${seconds}s — check Email Routing/MX and the inbound queue`);
-		return 1;
-	},
-	async remove(ctx) {
-		ctx.store.clearPushSubscriptions();
-		console.log("  ✓ cleared push_subscriptions — re-enable the toggle on each device");
-		return 0;
+		return [{
+			address: "push",
+			problem: !to ? "no recipient: set push.to, or give the instance a user" : undefined,
+			wants: to && missing.length > 0 ? `test email to ${to} (worker missing ${missing.join(", ")})` : to ? `test email to ${to}` : undefined,
+			// A round trip is not a state to converge on: declaring it means "run the test".
+			actual: async () => null,
+			create: async () => {
+				const from = (entry.from ?? to ?? "").trim();
+				const subject = entry.subject ?? `Mailflare push test ${new Date().toISOString()}`;
+				const { messageId } = await ctx.store.sendViaCloudflare({
+					from, to: to ?? "", subject,
+					text: "If your device shows a notification, Web Push is working.",
+					html: "<p>If your device shows a notification, <strong>Web Push</strong> is working.</p>",
+				});
+				console.log(`  ✓ queued (${messageId ?? "sent"})`);
+				const seconds = entry.timeout ?? 40;
+				const deadline = Date.now() + seconds * 1000;
+				let arrived: { status: string } | null = null;
+				while (Date.now() < deadline) {
+					arrived = await ctx.store.messageStatusBySubject(subject);
+					if (arrived) break;
+					await ctx.store.wait(3000);
+				}
+				if (arrived) {
+					console.log(`  ✓ arrived in the inbox (status: ${arrived.status}) — check your devices for the notification`);
+					return 0;
+				}
+				console.log(`  ✗ not seen in the inbox within ${seconds}s — check Email Routing/MX and the inbound queue`);
+				return 1;
+			},
+			remove: async () => {
+				ctx.store.clearPushSubscriptions();
+				console.log("  ✓ cleared push_subscriptions — re-enable the toggle on each device");
+				return 0;
+			},
+		}];
 	},
 };
