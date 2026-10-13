@@ -89,7 +89,7 @@ to match. Three verbs, as you would expect:
 |---|---|
 | `plan` | read-only: what exists vs what the documents declare (alias of `--status`) |
 | `apply` | make it so — the default |
-| `destroy` | remove what the documents declare (alias of `--cleanup`) |
+| `destroy` | remove what the documents declare, the server included (alias of `--cleanup`) |
 
 ```bash
 npm run state -- --project mailflare plan
@@ -129,8 +129,8 @@ the server in the fleet — it creates no cloud resources:
 # wrangler.jsonc must agree with it - the two are checked against each other, not merged
 npm run state -- --deploy eu1 --dry-run     # the two commands it will run, and what it records
 npm run state -- --deploy eu1               # build, deploy, record the origin
-npm run state -- --destroy eu1 --dry-run    # its inverse: undeploy and deregister
-npm run state -- --destroy eu1 --confirm-destroy
+npm run state -- --undeploy eu1 --dry-run   # its inverse: undeploy and deregister
+npm run state -- --undeploy eu1 --confirm-destroy
 
 #    The top-level config in wrangler.jsonc is itself a server — the DEFAULT environment,
 #    deployed by `npm run deploy` with no --env — so it needs no env block. Every additional
