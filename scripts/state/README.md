@@ -166,7 +166,7 @@ npm run state -- mailflare destroy --confirm-destroy   # and do it
 ```bash
 npm run state -- plan                       # every project in specs/projects/
 npm run state -- apply --concurrency 4      # a few in flight, for thousands
-npm run state:test                          # 37 tests, no D1/network/bindings
+npm run state:test                          # 34 tests, no D1/network/bindings
 npm run state:typecheck
 ```
 

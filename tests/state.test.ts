@@ -5,9 +5,9 @@ import assert from "node:assert/strict";
 import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
-import { loadFleet, loadProject, resolveInstance } from "../scripts/state/document";
+import { loadProject } from "../scripts/state/document";
 import { SOURCE_CHANGES } from "../scripts/state/src-changes";
-import { envBlockFor, stripJsonc, upsertInstance } from "../scripts/state/deploy";
+import { envBlockFor, stripJsonc } from "../scripts/state/deploy";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, isSubjectScoped, parentOf, subjectLines, subjectTotal, subjectUnknown } from "../scripts/state/subject-scope";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
@@ -230,9 +230,8 @@ function fakeStore(seed: Seed = {}) {
 }
 
 const flags = (over: Partial<Flags> = {}): Flags => ({
-	dryRun: false, status: false, cleanup: false, onboard: false, confirmMx: false, replaceMx: false,
-	share: false, disableAccounts: false, removeDomain: false, licenseStatus: false, push: false,
-	steps: false, fresh: false, erase: false, confirmDestroy: false, timeout: "40", db: "test", local: false, ...over,
+	dryRun: false, status: false, cleanup: false, confirmMx: false, replaceMx: false,
+	push: false, fresh: false, confirmDestroy: false, timeout: "40", db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
@@ -294,7 +293,7 @@ test("dry-run changes nothing", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }], users: [{ id: "u_helper", email: "helper@dev.example" }] });
 	const code = await runOn(
 		store,
-		flags({ dryRun: true }),
+		flags({dryRun: true}),
 		projectFor("dev.example", { routing: [{ pattern: "*", action: "forward", forwardTo: "ops@example.com" }], mcpKeys: [{ name: "agent" }], accounts: [{ username: "sam" }] }),
 		roles({ role: "office", access: [{ email: "helper@dev.example" }] }),
 	);
@@ -318,12 +317,12 @@ test("refuses to onboard a domain that already has MX unless --confirm-mx", asyn
 	const { store } = fakeStore();
 	const conflicted: Store = { ...store, currentMx: async () => [{ content: "mx.other.example" }] };
 	assert.equal(await runOn(conflicted, flags(), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 1);
-	assert.equal(await runOn(conflicted, flags({ confirmMx: true }), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 0);
+	assert.equal(await runOn(conflicted, flags({confirmMx: true}), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 0);
 });
 
 test("status reports missing items without writing", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
-	const code = await runOn(store, flags({ status: true }), projectFor("dev.example"), roles({ role: "office" }, { role: "support" }));
+	const code = await runOn(store, flags({status: true}), projectFor("dev.example"), roles({ role: "office" }, { role: "support" }));
 	assert.equal(code, 1, "missing mailboxes make status fail");
 	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "status never writes");
 });
@@ -374,7 +373,7 @@ test("cleanup removes mailboxes, routing, keys, disables accounts and the domain
 	});
 	const code = await runOn(
 		store,
-		flags({ cleanup: true }),
+		flags({cleanup: true}),
 		projectFor("dev.example", { accounts: [{ username: "sam" }], mcpKeys: [{ name: "agent" }], routing: [{ pattern: "*", action: "forward" }], teardown: { accounts: "disable", domain: "remove" } }),
 		roles({ role: "office" }),
 	);
@@ -392,7 +391,7 @@ test("cleanup never disables the primary admin", async () => {
 		domains: [{ id: "d1", hostname: "dev.example" }],
 		accounts: [{ id: "u_root", email: "root@dev.example", name: "root", role: "admin", disabled: false, canManageMailboxes: true, isPrimaryAdmin: true }],
 	});
-	await runOn(store, flags({ cleanup: true }), projectFor("dev.example", { accounts: [{ username: "root" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
+	await runOn(store, flags({cleanup: true}), projectFor("dev.example", { accounts: [{ username: "root" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
 	assert.ok(!calls.some((c) => c.includes("u_root")), "primary admin untouched");
 });
 
@@ -435,7 +434,7 @@ test("license: applied only when asked, and reverted by --cleanup", async () => 
 	const ctxFor = (f: Flags, project: Spec) => [f, project] as const;
 
 	const fresh = fakeStore();
-	const [f1, p1] = ctxFor(flags({ plan: "team" }), {});
+	const [f1, p1] = ctxFor(flags({plan: "team"}), {});
 	await runOn(fresh.store, f1, p1, []);
 	assert.deepEqual(fresh.calls.filter((c) => c.startsWith("setLicense")), ["setLicense:team"]);
 	assert.deepEqual(fresh.state.license, { plan: "team", state: "active" });
@@ -445,22 +444,22 @@ test("license: applied only when asked, and reverted by --cleanup", async () => 
 	assert.ok(fromDocument.calls.includes("setLicense:pro"), "a document section works without a flag");
 
 	const dry = fakeStore();
-	await runOn(dry.store, flags({ plan: "team", dryRun: true }), {}, []);
+	await runOn(dry.store, flags({plan: "team", dryRun: true}), {}, []);
 	assert.ok(!dry.calls.some((c) => c.startsWith("setLicense")), "dry run writes nothing");
 
 	const undo = fakeStore({ license: { plan: "team", state: "active" } });
-	await runOn(undo.store, flags({ cleanup: true }), { license: { plan: "team" } }, []);
+	await runOn(undo.store, flags({cleanup: true}), { license: { plan: "team" } }, []);
 	assert.ok(undo.calls.includes("setLicense:community"), "cleanup reverts to community");
 });
 
 test("license: --license-status reports the gates", async () => {
 	const { store } = fakeStore({ license: { plan: "team", state: "active" } });
-	assert.equal(await runOn(store, flags({ licenseStatus: true, status: true }), { license: {} }, []), 0);
+	assert.equal(await runOn(store, flags({status: true}), { license: {} }, []), 0);
 });
 
 test("a global-only run needs no domain and touches no domain resource", async () => {
 	const { store, calls } = fakeStore();
-	const code = await runOn(store, flags({ plan: "team" }), {}, []);
+	const code = await runOn(store, flags({plan: "team"}), {}, []);
 	assert.equal(code, 0);
 	assert.ok(!calls.includes("listDomains"), "domain never resolved");
 	assert.ok(!calls.some((c) => c.startsWith("createMailbox")), "no domain-scoped work");
@@ -468,15 +467,15 @@ test("a global-only run needs no domain and touches no domain resource", async (
 
 test("push: sends a test email, waits for arrival, and cleanup clears subscriptions", async () => {
 	const sent = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
-	assert.equal(await runOn(sent.store, flags({ push: true }), {}, []), 0);
+	assert.equal(await runOn(sent.store, flags({push: true}), {}, []), 0);
 	assert.equal(sent.calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "one email sent");
 
 	const dry = fakeStore({ pushSubscriptions: 1 });
-	assert.equal(await runOn(dry.store, flags({ push: true, dryRun: true }), {}, []), 0);
+	assert.equal(await runOn(dry.store, flags({push: true, dryRun: true}), {}, []), 0);
 	assert.ok(!dry.calls.some((c) => c.startsWith("sendViaCloudflare")), "dry run sends nothing");
 
 	const undo = fakeStore({ pushSubscriptions: 3 });
-	await runOn(undo.store, flags({ cleanup: true }), { push: {} }, []);
+	await runOn(undo.store, flags({cleanup: true}), { push: {} }, []);
 	assert.ok(undo.calls.includes("clearPushSubscriptions"), "cleanup clears subscriptions");
 });
 
@@ -497,7 +496,7 @@ test("status resolves mailbox roles for routing rules", async () => {
 		],
 	});
 	const project = projectFor("dev.example", { mailboxes: [{ role: "support" }], routing: [{ pattern: "*", action: "store", mailbox: "support" }] });
-	assert.equal(await runOn(store, flags({ status: true }), project, roles({ role: "support" })), 0);
+	assert.equal(await runOn(store, flags({status: true}), project, roles({ role: "support" })), 0);
 });
 
 // --- fresh: take a brand-new server from nothing ---------------------------------
@@ -507,7 +506,7 @@ test("fresh wipes the instance and creates the primary admin", async () => {
 		domains: [{ id: "d1", hostname: "old.example" }],
 		accounts: [{ id: "u_old", email: "old@old.example" }],
 	});
-	const code = await runOn(store, flags({ fresh: true, adminEmail: "root@new.example" }), { fresh: {} }, []);
+	const code = await runOn(store, flags({fresh: true, adminEmail: "root@new.example"}), { fresh: {} }, []);
 	assert.equal(code, 0);
 	assert.ok(calls.includes("wipeData"), "data wiped");
 	assert.ok(calls.includes("insertAdmin:root@new.example"), "admin created");
@@ -517,21 +516,21 @@ test("fresh wipes the instance and creates the primary admin", async () => {
 
 test("fresh in a dry run writes nothing", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "old.example" }] });
-	assert.equal(await runOn(store, flags({ fresh: true, dryRun: true }), { fresh: {} }, []), 0);
+	assert.equal(await runOn(store, flags({fresh: true, dryRun: true}), { fresh: {} }, []), 0);
 	assert.ok(!calls.includes("wipeData") && !calls.includes("insertAdmin:admin@localhost"), "no writes");
 });
 
 test("fresh runs before the domain work, so a new server bootstraps in one go", async () => {
 	const { store, calls } = fakeStore({ domains: [{ id: "d1", hostname: "dev.example" }] });
 	const project = projectFor("dev.example", { onboard: { receivingProvider: "none" }, mailboxes: [{ role: "office" }], fresh: {} });
-	assert.equal(await runOn(store, flags({ fresh: true, onboard: true }), project, roles({ role: "office" })), 0);
+	assert.equal(await runOn(store, flags({fresh: true}), project, roles({ role: "office" })), 0);
 	assert.ok(calls.indexOf("wipeData") < calls.indexOf("listDomains"), "reset precedes domain resolution");
 	assert.ok(calls.includes("createMailbox:office"), "provisioned after the reset");
 });
 
 test("fresh reports a missing schema as a failure in status", async () => {
 	const { store } = fakeStore({ schema: false });
-	assert.equal(await runOn(store, flags({ fresh: true, status: true }), { fresh: {} }, []), 1);
+	assert.equal(await runOn(store, flags({fresh: true, status: true}), { fresh: {} }, []), 1);
 });
 
 test("teardown reverts the license last, so account management still works", async () => {
@@ -543,7 +542,7 @@ test("teardown reverts the license last, so account management still works", asy
 		license: { plan: "team", state: "active" },
 	});
 	const project = projectFor("dev.example", { accounts: [{ username: "sam" }], license: { plan: "team" }, teardown: { accounts: "disable" } });
-	await runOn(store, flags({ cleanup: true }), project, roles({ role: "office" }));
+	await runOn(store, flags({cleanup: true}), project, roles({ role: "office" }));
 	assert.ok(calls.includes("updateAccount:u_sam:disabled=true"), "account disabled during teardown");
 	assert.ok(calls.indexOf("updateAccount:u_sam:disabled=true") < calls.indexOf("setLicense:community"), "license reverted after the accounts");
 });
@@ -555,7 +554,7 @@ test("account updates never send back the schema's null transforms", async () =>
 		domains: [{ id: "d1", hostname: "dev.example" }],
 		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "", role: "user", disabled: false, canManageMailboxes: false }],
 	});
-	await runOn(store, flags({ cleanup: true }), projectFor("dev.example", { accounts: [{ username: "sam" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
+	await runOn(store, flags({cleanup: true}), projectFor("dev.example", { accounts: [{ username: "sam" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
 	const body = state.lastAccountUpdate as Record<string, unknown>;
 	assert.equal(body.disabled, true);
 	assert.ok(!("password" in body), "no password key");
@@ -567,7 +566,7 @@ test("a reset-only document is accepted without a domain", async () => {
 	// Regression: the "needs no domain" check was hand-built in two places and both
 	// forgot fresh, so a document that only reset the instance was rejected outright.
 	const { store, calls } = fakeStore();
-	const code = await quiet(() => runSpecs(store, flags({ fresh: true }), { roles: "" }, [{ name: "instance", spec: { fresh: {} } }]));
+	const code = await quiet(() => runSpecs(store, flags({fresh: true}), { roles: "" }, [{ name: "instance", spec: { fresh: {} } }]));
 	assert.equal(code, 0);
 	assert.ok(calls.includes("wipeData"), "the reset ran");
 });
@@ -588,25 +587,7 @@ test("an instance document is applied before the tenant documents", async () => 
 	assert.ok(calls.indexOf("setLicense:team") < calls.indexOf("createMailbox:support"), "instance layer ran first");
 });
 
-test("--instance resolves a fleet name, and a path stays a path", () => {
-	const fleet = [{ name: "mailflare", url: "https://x.workers.dev", db: "mailflare" }];
-	assert.deepEqual(resolveInstance("mailflare", fleet), {
-		name: "mailflare", docPath: "scripts/state/specs/projects/mailflare/instance.json",
-		url: "https://x.workers.dev", db: "mailflare",
-	});
-	assert.deepEqual(resolveInstance("scripts/state/specs/projects/example/instance.json", fleet), {
-		name: "scripts/state/specs/projects/example/instance.json",
-		docPath: "scripts/state/specs/projects/example/instance.json",
-	});
-	assert.throws(() => resolveInstance("nope", fleet), /unknown instance/);
-});
 
-test("the checked-in fleet names the live instance so a run needs no --url", () => {
-	const fleet = loadFleet();
-	const live = fleet.find((entry) => entry.name === "mailflare");
-	assert.ok(live, "mailflare is in specs/fleet.json");
-	assert.ok(live?.url?.startsWith("https://"), "and carries its origin");
-});
 
 test("the subject index says where a person's data is, and what it cannot see", () => {
 	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }] };
@@ -659,11 +640,6 @@ test("deploy reads the server's env block, and refuses without one", () => {
 	assert.equal(envBlockFor(config, "nope"), null, "an undeclared server is refused, not guessed");
 });
 
-test("registering a server in the fleet is idempotent and sorted", () => {
-	const fleet = upsertInstance([{ name: "b" }], { name: "a" });
-	assert.deepEqual(fleet.map((instance) => instance.name), ["a", "b"]);
-	assert.deepEqual(upsertInstance(fleet, { name: "a", url: "https://x" }), [{ name: "a", url: "https://x" }, { name: "b" }], "re-deploy updates rather than duplicates");
-});
 
 test("a project is the instance document, then its tenants", () => {
 	// The unit a user runs: --project <name> applies the server's facts first, then every

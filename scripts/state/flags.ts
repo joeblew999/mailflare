@@ -3,18 +3,12 @@
 // Global capabilities (fresh, plan, push) need no domain; the rest do.
 export type Flags = {
 	dryRun: boolean;
-	/** Destructive: actually erase the --data-subject. Without it the report is read-only. */
-	erase: boolean;
 	/** Required for --destroy to act, like --confirm-mx. */
 	confirmDestroy: boolean;
 	status: boolean;
 	cleanup: boolean;
-	onboard: boolean;
 	confirmMx: boolean;
 	replaceMx: boolean;
-	share: boolean;
-	disableAccounts: boolean;
-	removeDomain: boolean;
 	url?: string;
 	db: string;
 	local: boolean;
@@ -22,9 +16,7 @@ export type Flags = {
 	adminEmail?: string;
 	adminPassword?: string;
 	plan?: string;
-	licenseStatus: boolean;
 	push: boolean;
-	steps: boolean;
 	to?: string;
 	from?: string;
 	subject?: string;

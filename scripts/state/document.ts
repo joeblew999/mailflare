@@ -105,28 +105,3 @@ export function saveServer(name: string, patch: Partial<Omit<InstanceDecl, "name
 	writeFileSync(serverDocPath(name, base), `${JSON.stringify(merged, null, 2)}\n`);
 	return loadServer(name, base);
 }
-
-/** The fleet, derived by scanning the project folders. There is no fleet.json to drift. */
-export function loadFleet(base = PROJECTS_DIR): InstanceDecl[] {
-	let names: string[];
-	try {
-		names = readdirSync(base).filter((name) => existsSync(serverDocPath(name, base)));
-	} catch {
-		return [];
-	}
-	return names.map((name) => loadServer(name, base)).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export type ResolvedInstance = InstanceDecl & { docPath: string };
-
-/**
- * `--instance` is either a NAME in the fleet - which also supplies the server's origin and
- * database, so a run needs no --url/--db - or a path to a document, for a one-off.
- * Naming an instance means the fleet is authoritative for it; pass a path to override.
- */
-export function resolveInstance(value: string, fleet: InstanceDecl[]): ResolvedInstance {
-	if (value.endsWith(".json")) return { name: value, docPath: value };
-	const decl = fleet.find((entry) => entry.name === value);
-	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${PROJECTS_DIR}`);
-	return { ...decl, docPath: instanceDocPath(decl.name) };
-}

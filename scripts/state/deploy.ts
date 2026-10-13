@@ -7,7 +7,7 @@
 // than stopping. The `env.<name>` block in wrangler.jsonc is the source of truth, and it is
 // the thing a human must add.
 import { readFileSync } from "node:fs";
-import { loadServer, saveServer, serverDocPath, type InstanceDecl } from "./document";
+import { loadServer, saveServer, serverDocPath } from "./document";
 import { resolveInstanceUrl, run } from "./wrangler";
 
 const WRANGLER_PATH = "wrangler.jsonc";
@@ -38,10 +38,6 @@ export function envBlockFor(config: WranglerConfig, name: string): { databaseNam
 }
 
 /** Register or update a server in the fleet, keeping it sorted and duplicate-free. */
-export function upsertInstance(fleet: InstanceDecl[], entry: InstanceDecl): InstanceDecl[] {
-	return [...fleet.filter((instance) => instance.name !== entry.name), entry].sort((a, b) => a.name.localeCompare(b.name));
-}
-
 export async function deployServer({ name, dryRun, url, db }: { name: string; dryRun: boolean; url?: string; db?: string }): Promise<number> {
 	const server = loadServer(name); // throws when the project folder has no server.json
 	const config = readWranglerConfig();
