@@ -2,7 +2,8 @@ import { parseArgs } from "node:util";
 import type { Flags } from "./flags";
 
 export function parseCli() {
-	const { values } = parseArgs({
+	const { values, positionals } = parseArgs({
+		allowPositionals: true,
 		options: {
 			domain: { type: "string" },
 			spec: { type: "string" },
@@ -74,11 +75,25 @@ export function parseCli() {
 		local: Boolean(values.local),
 	};
 
+	// Terraform's three verbs, because that is the model: plan, apply, destroy. They are
+	// aliases for the flags, so nothing is lost by using either.
+	const verb = positionals[0];
+	if (verb === "plan") flags.status = true;
+	else if (verb === "destroy") flags.cleanup = true;
+	else if (verb && verb !== "apply") {
+		console.error(`Unknown verb "${verb}". Use plan, apply or destroy.`);
+		process.exit(1);
+	}
+
 	return { values, flags };
 }
 
 export function usage() {
 	console.log(`state — reconcile a Mailflare instance with its JSON desired state.
+
+  npm run state -- --project <name> plan      what exists vs the documents (read-only)
+  npm run state -- --project <name> apply     make it so (the default)
+  npm run state -- --project <name> destroy   remove what the documents declare
 
 Everything is declared in JSON and applied by one run loop: domain onboarding,
 mailboxes, accounts, routing rules, MCP keys, the license, and web push. The same

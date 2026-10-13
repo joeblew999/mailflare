@@ -80,6 +80,33 @@ Accounts created during the restore printed one-time passwords; put them in
 Always `--dry-run` or `--status` first. `--fresh` touches the database only: Cloudflare MX,
 Email Routing and DNS survive, so on a live instance it **orphans infrastructure**.
 
+## The model: it is Terraform
+
+Point the CLI at a project folder and it reconciles the server, the instance and the tenants
+to match. Three verbs, as you would expect:
+
+| Verb | Does |
+|---|---|
+| `plan` | read-only: what exists vs what the documents declare (alias of `--status`) |
+| `apply` | make it so — the default |
+| `destroy` | remove what the documents declare (alias of `--cleanup`) |
+
+```bash
+npm run state -- --project mailflare plan
+npm run state -- --project mailflare apply
+npm run state -- --project mailflare destroy --confirm-destroy
+```
+
+**One deliberate difference: there is no state file.** Terraform needs one because cloud APIs
+are hard to query, and a stale state file is the source of most of its pain — the plan and
+reality disagree. Here, existence is *queried* every run (D1, the Cloudflare API,
+`server.json`), so drift between a state file and the world cannot exist. The documents are
+the desired state; the world is the actual state; there is nothing in between to rot.
+
+**Not yet Terraform-shaped:** the plan reports per resource but not as one unified diff
+(`+ create`, `~ update`, `- destroy`, `· unchanged`) with addresses like `mailbox.office`. It
+counts missing items instead. That is the next step.
+
 ## The order you actually do things
 
 **1. Deploy a server** (once per server). This shells the repo's own deploy path and records
