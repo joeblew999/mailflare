@@ -308,7 +308,7 @@ test("dry-run changes nothing", async () => {
 
 test("onboards a missing domain, then applies into it", async () => {
 	const { store, calls } = fakeStore();
-	const code = await runOn(store, flags({ onboard: true }), projectFor("fresh.example"), roles({ role: "office" }));
+	const code = await runOn(store, flags(), projectFor("fresh.example", { onboard: {} }), roles({ role: "office" }));
 	assert.equal(code, 0);
 	assert.ok(calls.includes("onboardDomain"), "domain onboarded");
 	assert.ok(calls.includes("createMailbox:office"), "applied after onboarding");
@@ -317,8 +317,8 @@ test("onboards a missing domain, then applies into it", async () => {
 test("refuses to onboard a domain that already has MX unless --confirm-mx", async () => {
 	const { store } = fakeStore();
 	const conflicted: Store = { ...store, currentMx: async () => [{ content: "mx.other.example" }] };
-	assert.equal(await runOn(conflicted, flags({ onboard: true }), projectFor("live.example"), roles({ role: "office" })), 1);
-	assert.equal(await runOn(conflicted, flags({ onboard: true, confirmMx: true }), projectFor("live.example"), roles({ role: "office" })), 0);
+	assert.equal(await runOn(conflicted, flags(), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 1);
+	assert.equal(await runOn(conflicted, flags({ confirmMx: true }), projectFor("live.example", { onboard: {} }), roles({ role: "office" })), 0);
 });
 
 test("status reports missing items without writing", async () => {
@@ -374,8 +374,8 @@ test("cleanup removes mailboxes, routing, keys, disables accounts and the domain
 	});
 	const code = await runOn(
 		store,
-		flags({ cleanup: true, disableAccounts: true, removeDomain: true }),
-		projectFor("dev.example", { accounts: [{ username: "sam" }], mcpKeys: [{ name: "agent" }], routing: [{ pattern: "*", action: "forward" }] }),
+		flags({ cleanup: true }),
+		projectFor("dev.example", { accounts: [{ username: "sam" }], mcpKeys: [{ name: "agent" }], routing: [{ pattern: "*", action: "forward" }], teardown: { accounts: "disable", domain: "remove" } }),
 		roles({ role: "office" }),
 	);
 	assert.equal(code, 0);
@@ -392,7 +392,7 @@ test("cleanup never disables the primary admin", async () => {
 		domains: [{ id: "d1", hostname: "dev.example" }],
 		accounts: [{ id: "u_root", email: "root@dev.example", name: "root", role: "admin", disabled: false, canManageMailboxes: true, isPrimaryAdmin: true }],
 	});
-	await runOn(store, flags({ cleanup: true, disableAccounts: true }), projectFor("dev.example", { accounts: [{ username: "root" }] }), roles({ role: "office" }));
+	await runOn(store, flags({ cleanup: true }), projectFor("dev.example", { accounts: [{ username: "root" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
 	assert.ok(!calls.some((c) => c.includes("u_root")), "primary admin untouched");
 });
 
@@ -542,8 +542,8 @@ test("teardown reverts the license last, so account management still works", asy
 		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "sam", role: "user", disabled: false, canManageMailboxes: false }],
 		license: { plan: "team", state: "active" },
 	});
-	const project = projectFor("dev.example", { accounts: [{ username: "sam" }], license: { plan: "team" } });
-	await runOn(store, flags({ cleanup: true, disableAccounts: true }), project, roles({ role: "office" }));
+	const project = projectFor("dev.example", { accounts: [{ username: "sam" }], license: { plan: "team" }, teardown: { accounts: "disable" } });
+	await runOn(store, flags({ cleanup: true }), project, roles({ role: "office" }));
 	assert.ok(calls.includes("updateAccount:u_sam:disabled=true"), "account disabled during teardown");
 	assert.ok(calls.indexOf("updateAccount:u_sam:disabled=true") < calls.indexOf("setLicense:community"), "license reverted after the accounts");
 });
@@ -555,7 +555,7 @@ test("account updates never send back the schema's null transforms", async () =>
 		domains: [{ id: "d1", hostname: "dev.example" }],
 		accounts: [{ id: "u_sam", email: "sam@dev.example", name: "", role: "user", disabled: false, canManageMailboxes: false }],
 	});
-	await runOn(store, flags({ cleanup: true, disableAccounts: true }), projectFor("dev.example", { accounts: [{ username: "sam" }] }), roles({ role: "office" }));
+	await runOn(store, flags({ cleanup: true }), projectFor("dev.example", { accounts: [{ username: "sam" }], teardown: { accounts: "disable" } }), roles({ role: "office" }));
 	const body = state.lastAccountUpdate as Record<string, unknown>;
 	assert.equal(body.disabled, true);
 	assert.ok(!("password" in body), "no password key");

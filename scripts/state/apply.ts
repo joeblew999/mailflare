@@ -11,7 +11,7 @@
 // run it, and the globals are derived from the instance document below so the resources keep
 // reading one source of truth.
 import { parseCli, usage } from "./args";
-import { loadProject, loadServer, rolesFor } from "./document";
+import { loadProject, loadServer } from "./document";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { deployServer, destroyServer } from "./deploy";
 import { pushRunbook } from "./resources/push";

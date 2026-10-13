@@ -121,92 +121,73 @@ makes it safe to read before a destroy.
 
 ## The order you actually do things
 
-**1. Deploy a server** (once per server). This shells the repo's own deploy path and records
-the server in the fleet — it creates no cloud resources:
+**1. Deploy a server** (once per server). `apply` on a project deploys it if it is not
+registered, so this is usually implicit — but the plan shows it happening:
 
 ```bash
-# the project folder holds server.json (database, jurisdiction); the env.<name> block in
-# wrangler.jsonc must agree with it - the two are checked against each other, not merged
-npm run state -- --deploy eu1 --dry-run     # the two commands it will run, and what it records
-npm run state -- --deploy eu1               # build, deploy, record the origin
-npm run state -- --undeploy eu1 --dry-run   # its inverse: undeploy and deregister
-npm run state -- --undeploy eu1 --confirm-destroy
-
-#    The top-level config in wrangler.jsonc is itself a server — the DEFAULT environment,
-#    deployed by `npm run deploy` with no --env — so it needs no env block. Every additional
-#    server does. `--project <name>` deploys whichever kind is missing, so you rarely call
-#    --deploy by hand.
+# add an env.<name> block to wrangler.jsonc first (its own name, d1 database_id, bucket, queues)
+npm run state -- mailflare plan      # what it would do, the deploy included
+npm run state -- mailflare apply
 ```
 
-**2. Reset it and give it a primary admin.** Nothing else in the app can do this.
+**2. Reset it and give it a primary admin.** Nothing else in the app can do this, and the admin
+comes from the instance document (`fresh.admin`), not from a flag:
 
 ```bash
-npm run state -- --fresh --project eu1 --admin-email root@example.com --admin-password '…'
+npm run state -- mailflare reset
 ```
 
-**3. Run a project.** A project is one folder: its `instance.json` (the server's facts), then
-every tenant in it, in one process under one admin key.
+**3. Run a project.** A project is one folder: its `server.json`, then `instance.json`, then
+every tenant — in one process under one admin key.
 
 ```bash
-npm run state -- --project mailflare            # instance.json, then every tenant
-npm run state -- --project mailflare --status   # drift report, writes nothing
-npm run state -- --project mailflare --dry-run  # what would change
+npm run state -- mailflare plan      # the diff, writes nothing
+npm run state -- mailflare apply
 ```
 
-**Pointing at a folder reconciles the server too, not just its contents.** If the project is
-not registered (its `server.json` has no origin) it is deployed first; if it is, it is left
-alone, so this is idempotent. One command per project, whether that project is one tenant or
-a hundred.
+**4. Change things over time.** Edit a document and run it again — every resource is idempotent
+and reconciles drift, so this is the only supported way to change things.
 
 ```bash
-npm run state -- --project mailflare --cleanup                     # everything goes: tenants, then the server
-npm run state -- --project mailflare --cleanup --confirm-destroy    # ...and actually undeploy
+npm run state -- mailflare apply
 ```
 
-**4. Change things over time.** Edit a document and run it again — every resource is
-idempotent and reconciles drift, so this is the only supported way to change things.
+**5. Tear down.** Reverse order, and safe to re-run. `destroy` removes the tenants *and* the
+Worker; the database, bucket and queues are left alone and their wrangler commands printed,
+because this system does not create them either.
 
 ```bash
-npm run state -- --project mailflare
-```
-
-**5. Tear down.** Reverse order, and safe to re-run. `--project <name> --cleanup` removes
-the tenants *and* the server (the Worker — undeploying needs `--confirm-destroy`); the
-database, bucket and queues are left alone and their exact wrangler commands printed, because
-this system does not create them either.
-
-```bash
-npm run state -- --project mailflare --cleanup --disable-accounts --confirm-destroy
-npm run state -- --spec <path> --cleanup --disable-accounts --remove-domain   # one tenant
+npm run state -- mailflare destroy                     # the plan
+npm run state -- mailflare destroy --confirm-destroy   # and do it
 ```
 
 **Everything, and the checks:**
 
 ```bash
-npm run state -- --all --dry-run                # every project in specs/projects/
-npm run state -- --all --concurrency 4          # a few in flight, for thousands
-npm run state:test                              # 37 tests, no D1/network/bindings
+npm run state -- plan                       # every project in specs/projects/
+npm run state -- apply --concurrency 4      # a few in flight, for thousands
+npm run state:test                          # 37 tests, no D1/network/bindings
 npm run state:typecheck
 ```
 
-**One-off and global** (these need no domain and no project):
+**One person's data** — an operation, so a verb rather than a document:
 
 ```bash
-npm run state -- --domain <host> --roles a,b,c  # ad hoc, no document
-npm run state -- --plan team                    # licence
-npm run state -- --license-status
-npm run state -- --push                         # web push round trip
-npm run state -- --steps                        # VAPID rotation runbook
-npm run state -- --source-changes               # what needs a src/ change, and where
+npm run state -- subject <email> plan        # where their data lives (read-only)
+npm run state -- subject <email> destroy     # DESTROY it, rows and R2 objects
 ```
 
-**Data subjects** — the index, and the erasure:
+**About the system rather than the instance:**
 
 ```bash
-npm run state -- --data-subject <email>              # where one person's data lives (read-only)
-npm run state -- --data-subject <email> --erase --dry-run   # what would be destroyed
-npm run state -- --data-subject <email> --erase             # DESTROY it
+npm run state -- --steps                     # the VAPID rotation runbook
+npm run state -- --source-changes            # what needs a src/ change, and where
 ```
+
+**Flags are how to run it, not what to build.** There are ten: `--dir`, `--local`, `--db`,
+`--url`, `--concurrency`, `--confirm-mx`, `--confirm-destroy`, `--source-changes`, `--steps`,
+`--help`. Everything that used to be a flag — onboard, share, the licence plan, web push, the
+admin, teardown — is a document section, so what gets built is reviewable in a diff.
 
 ### Document shape
 
