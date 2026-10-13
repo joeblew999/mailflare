@@ -626,5 +626,5 @@ test("the erasure scope is internally consistent", () => {
 	const indirect = new Set(INDIRECT_SCOPE.map((link) => link.table));
 	for (const table of indirect) assert.ok(!direct.has(table), `${table} is both direct and indirect`);
 	for (const link of INDIRECT_SCOPE) assert.ok(direct.has(link.parent) || indirect.has(link.parent), `${link.table} names an unknown parent ${link.parent}`);
-	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(direct.has(ref.table) || ref.table === "users", `${ref.table} holds objects but is not in scope`);
+	for (const ref of SUBJECT_OBJECT_KEYS) assert.ok(isSubjectScoped(ref.table) || ref.table === "users", `${ref.table} holds objects but is not in scope`);
 });
