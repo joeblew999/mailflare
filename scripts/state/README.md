@@ -35,6 +35,33 @@ npm run state -- --spec scripts/state/specs/ubuntudesign.com.json --onboard
 
 ---
 
+## Prerequisites
+
+- **Node 24+** and `npm install` (tsx, wrangler and typescript are devDependencies).
+- **Cloudflare credentials**, read from the environment first, then the macOS keychain
+  (service `fnox`): `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The usual route is
+  `fnox exec -- npm run state -- ...`. `npx wrangler whoami` must succeed for anything that
+  touches D1. A run that only touches *global* data (licence, web push) needs neither — the
+  store resolves the instance URL and mints its admin key lazily, on the first HTTP call.
+- **The instance URL** resolves as: `--url` → `MAILFLARE_URL` → `<worker>.<account>.workers.dev`,
+  derived from `wrangler.jsonc`'s `name` plus the Cloudflare API. The live instance is
+  **https://mailflare.gedw99.workers.dev**.
+- This file documents the *operations* layer. The application itself is `src/`, described in
+  the repo-root `README.md` and `CLAUDE.md`.
+
+## Safety — these destroy data
+
+| Flag | Effect |
+|---|---|
+| `--fresh` | deletes **every row** in the target D1 and makes a new admin. Not reversible. |
+| `--cleanup` | deletes the document's mailboxes, routing rules and MCP keys |
+| `--cleanup --disable-accounts` | also disables the accounts (the app cannot delete users) |
+| `--cleanup --remove-domain` | also removes the domain — drops its Cloudflare DNS/MX config |
+| `--all` | applies **every** document in `specs/` |
+
+Always `--dry-run` or `--status` first. `--fresh` touches the database only: Cloudflare MX,
+Email Routing and DNS survive, so on a live instance it **orphans infrastructure**.
+
 ## Commands
 
 ```bash
@@ -84,6 +111,42 @@ Any subset of these sections; one file may hold many via `{ "specs": [ ... ] }`.
 (`_sandbox.json`, a runnable dev fixture) are **skipped by `--all`**.
 
 ---
+
+## Standing up a new server
+
+This is the point of the whole system: from nothing to a provisioned instance with no manual
+clicking. Nothing else in the app can do it — `POST /api/auth/register` creates the first
+admin but also demands Turnstile and a domain, so it is unusable as a bootstrap.
+
+```bash
+# 1. Deploy the Worker and its D1 (npm run deploy). wrangler.jsonc must have the real
+#    database_id, and the Worker `name`, CF_EMAIL_WORKER_NAME and the WORKER_SELF_REFERENCE
+#    service must all agree.
+
+# 2. Reset it and give it a primary admin. One document, applied against the new database:
+cat > /tmp/fresh.json <<'JSON'
+{ "fresh": { "admin": { "email": "root@example.com", "password": "…" } } }
+JSON
+npm run state -- --fresh --spec /tmp/fresh.json --admin-email root@example.com --admin-password '…'
+#    (this runs `wrangler d1 migrations apply DB --remote` first)
+
+# 3. Apply each tenant document, then confirm
+npm run state -- --spec scripts/state/specs/<domain>.json --onboard
+npm run state -- --spec scripts/state/specs/<domain>.json --status
+```
+
+The app now shows its normal login, and `root@example.com` is the primary admin.
+
+## Everyday workflow
+
+- **Add a tenant** — drop `specs/<domain>.json` in and `npm run state -- --spec …`. If the
+  domain is not onboarded, add `--onboard` (publishes MX).
+- **Change one** — edit the document and apply again. Every resource is idempotent and
+  reconciles drift, so this is safe and is the only supported way to change things.
+- **Remove one** — `--cleanup` (add `--disable-accounts`, `--remove-domain` as needed).
+  Safe to re-run.
+- **Mass** — `npm run state -- --all --dry-run` first, then without `--dry-run`. One admin
+  key covers the whole run.
 
 ## Layout
 
@@ -177,6 +240,14 @@ Cloudflare when the receiving provider **is** cloudflare, so a local run stays o
 `lsof -ti:3000`.
 
 ---
+
+### Testing a new resource
+
+Tests drive the **whole** run through an in-memory fake, so they need no D1, no network and
+no bindings. See `tests/state.test.ts`: build the fake with `fakeStore({...seed})`, run
+`runOn(store, flags({...}), spec, roles)`, then assert on the recorded `calls` array and the
+mutated `state`. Add a seed field for anything new the resource touches. Any test that needs
+wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly that once.
 
 ## Known bugs and outstanding work
 
