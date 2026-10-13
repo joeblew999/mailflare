@@ -50,6 +50,15 @@ export type LicenseRow = { plan: string; state: string };
 
 export type PushTestInput = { from: string; to: string; subject: string; text: string; html: string };
 
+export type SubjectCount = { table: string; rows: number };
+export type SubjectReport = {
+	email: string;
+	/** null when no account exists for that address. */
+	userId: string | null;
+	mailboxIds: string[];
+	counts: SubjectCount[];
+};
+
 export type Store = {
 	readonly base: string;
 	readonly admin: { id: string; email: string };
@@ -84,6 +93,10 @@ export type Store = {
 	insertRoutingRule(values: RoutingRuleValues): void;
 	updateRoutingRule(ruleId: string, patch: RoutingRulePatch): void;
 	deleteRoutingRule(domainId: string, pattern: string, action: string): void;
+
+	// data-subject index: where one person's data lives, across the tables that
+	// name them directly (see subject-scope.ts). Read-only.
+	subjectReport(email: string): Promise<SubjectReport>;
 
 	// fresh instance lifecycle: only the reset capability uses these
 	/** Bring the target database up to the current schema. */

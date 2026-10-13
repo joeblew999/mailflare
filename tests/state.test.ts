@@ -6,6 +6,7 @@ import { makeContext } from "../scripts/state/context";
 import { run } from "../scripts/state/driver";
 import { loadSpecs, runSpecs } from "../scripts/state/runner";
 import { loadFleet, resolveInstance } from "../scripts/state/document";
+import { SUBJECT_SCOPE, SUBJECT_SCOPE_INDIRECT, subjectLines, subjectTotal } from "../scripts/state/subject-scope";
 import type { Flags } from "../scripts/state/flags";
 import type { Role, Spec } from "../scripts/state/spec";
 import type { Store } from "../scripts/state/store/types";
@@ -41,6 +42,9 @@ function fakeStore(seed: Seed = {}) {
 		pushSubscriptions: seed.pushSubscriptions ?? 0,
 		sent: [] as string[],
 		schema: seed.schema ?? true,
+		subjectUserId: "u1" as string | null,
+		subjectMailboxIds: ["m1"],
+		subjectCounts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }],
 		lastAccountUpdate: {} as Record<string, unknown>,
 	};
 	const calls: string[] = [];
@@ -164,6 +168,10 @@ function fakeStore(seed: Seed = {}) {
 		},
 		async messageStatusBySubject(subject) {
 			return state.sent.includes(subject) ? { status: "received" } : null;
+		},
+		async subjectReport(email) {
+			calls.push(`subjectReport:${email}`);
+			return { email, userId: state.subjectUserId, mailboxIds: state.subjectMailboxIds, counts: state.subjectCounts };
 		},
 		applyMigrations() {
 			calls.push("applyMigrations");
@@ -587,4 +595,13 @@ test("the checked-in fleet names the live instance so a run needs no --url", () 
 	const live = fleet.find((entry) => entry.name === "mailflare");
 	assert.ok(live, "mailflare is in specs/fleet.json");
 	assert.ok(live?.url?.startsWith("https://"), "and carries its origin");
+});
+
+test("the subject index says where a person's data is, and what it cannot see", () => {
+	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }] };
+	assert.equal(subjectTotal(report), 14, "rows that still exist");
+	assert.deepEqual(subjectLines(report), ["      12  messages", "       2  sessions"], "non-empty tables, biggest first");
+	assert.equal(new Set(SUBJECT_SCOPE.map((scope) => scope.table)).size, SUBJECT_SCOPE.length, "no duplicate scope entries");
+	assert.ok(SUBJECT_SCOPE_INDIRECT.length > 0, "the tables it cannot reach are stated, not implied");
+	assert.ok(SUBJECT_SCOPE.some((scope) => scope.userColumns?.includes("target_user_id")), "audit_logs links both ways");
 });

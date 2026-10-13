@@ -10,7 +10,8 @@ import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
 import { applyMigrations as runMigrations, cfApi, d1, findAdmin, keychain, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
-import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store } from "./types";
+import { SUBJECT_SCOPE } from "../subject-scope";
+import type { RoutingRulePatch, RoutingRuleRow, RoutingRuleValues, Store, SubjectCount } from "./types";
 
 // A SQL literal: NULL, or an escaped quoted string.
 const lit = (value: string | null) => (value === null ? "NULL" : `'${sqlEscape(value)}'`);
@@ -173,6 +174,21 @@ export function makeLiveStore({
 			sql(`DELETE FROM api_keys WHERE user_id='${sqlEscape(userId)}' AND kind='mcp' AND name='${sqlEscape(mcpName)}';`);
 		},
 
+		async subjectReport(email) {
+			const userId = sql(`SELECT id FROM users WHERE lower(email)='${sqlEscape(email.trim().toLowerCase())}' LIMIT 1;`)[0]?.id ?? null;
+			if (!userId) return { email, userId: null, mailboxIds: [], counts: [] };
+			const mailboxIds = sql(`SELECT id FROM mailboxes WHERE user_id='${sqlEscape(userId)}';`).map((row) => String(row.id));
+			const quotedMailboxes = mailboxIds.map((id) => `'${sqlEscape(id)}'`).join(", ");
+			const counts: SubjectCount[] = [];
+			for (const scope of SUBJECT_SCOPE) {
+				const parts = (scope.userColumns ?? []).map((column) => `${column}='${sqlEscape(userId)}'`);
+				if (scope.mailboxColumn && quotedMailboxes) parts.push(`${scope.mailboxColumn} IN (${quotedMailboxes})`);
+				if (parts.length === 0) continue;
+				const [row] = sql(`SELECT count(*) AS n FROM "${scope.table}" WHERE ${parts.join(" OR ")};`);
+				counts.push({ table: scope.table, rows: Number(row?.n ?? 0) });
+			}
+			return { email, userId, mailboxIds, counts };
+		},
 		applyMigrations() {
 			runMigrations({ db, local });
 		},

@@ -67,6 +67,7 @@ npm run state -- --plan team            # licence only (no domain needed)
 npm run state -- --license-status
 npm run state -- --push                 # web push round trip
 npm run state -- --steps                # VAPID rotation runbook
+npm run state -- --data-subject <email>  # where one person's data lives (read-only)
 
 npm run state:test       # 28 tests, in-memory fake — no D1, no network, no bindings
 npm run state:typecheck
@@ -162,6 +163,7 @@ scripts/state/
 │   ├── resource.ts       the Resource contract
 │   ├── registry.ts       RESOURCES — the order, and why
 │   └── fresh domain license accounts mailboxes routing mcp-keys push .ts
+├── subject-scope.ts      where a data subject's data lives — the erasure index
 ├── specs/
 │   ├── fleet.json        which servers exist, and where (name -> url + db)
 │   ├── instances/        per-server documents: the licence, web push
@@ -260,7 +262,9 @@ wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly th
    instead. The root cause is not fully understood — worth pinning down.
 5. **Mass runs are sequential** (one process, one key) — correct and fast enough, but
    thousands of documents want bounded parallelism.
-6. **No `erasure` / subject index yet.** See *Design direction*.
+6. **The subject index exists; erasure does not.** `--data-subject <email>` reports every
+   row a person owns, but nothing destroys it yet — deliberately, because an index that
+   misses data is the one failure erasure must not have. See *Data subjects* below.
 7. **`--fresh --remote` leaves the app showing "Prepare Installation".** Expected — the
    setup wizard sees no admin. Not a bug, just surprising.
 8. Pre-existing, unrelated: `tests/i18n.test.mjs` fails 1 of 8 (138/139 overall).
@@ -309,6 +313,28 @@ tenant document, and a tenant must not silently depend on something it never dec
 resolves through it (so no `--url`/`--db` is needed), and `specs/instances/<name>.json` holds
 what belongs to the server rather than a tenant. Still to come: jurisdiction/region in the
 fleet entry, and the derived subject index.
+
+### Data subjects — the index, not the erasure
+
+`npm run state -- --data-subject alice@acme.de` finds the account and reports every table
+holding a row for that person, biggest first, plus the total. Read-only, exits non-zero if
+anything remains, so it is usable as a check. It needs no domain and no document.
+
+The scope in `subject-scope.ts` is **derived from the database** (`pragma_table_info`), not
+from the schema file, so it describes what an erasure would actually run against. It is
+data, not SQL: `store/live.ts` builds the predicate, and a table that links both ways
+(`messages` names a user *and* a mailbox) is ORed.
+
+**What it cannot see is printed, not implied**: `SUBJECT_SCOPE_INDIRECT` lists the tables
+reachable only through a parent row (`message_attachments` -> messages,
+`agent_chat_messages` -> agent_conversations, `webhook_deliveries` -> webhooks,
+`shared_attachment_links`, `ai_usage`). A clean report is not yet a clean bill of health.
+
+**Still to do for real erasure:** follow those indirect links; destroy rather than count
+(idempotently, with an auditable report); delete the R2 objects (raw MIME, attachments,
+drive); reach **backups**, for which the scalable answer is crypto-shredding — a
+per-subject key whose destruction *is* the erasure; and bypass trash retention, which is
+currently a feature that keeps data around on purpose.
 
 ### Erasure is per *subject*, not per tenant
 

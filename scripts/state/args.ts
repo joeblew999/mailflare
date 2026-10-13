@@ -7,6 +7,7 @@ export function parseCli() {
 			domain: { type: "string" },
 			spec: { type: "string" },
 			instance: { type: "string" },
+			"data-subject": { type: "string" },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts/state/specs" },
 			roles: { type: "string", default: "" },
@@ -105,6 +106,7 @@ Desired-state document (JSON) — any subset of these sections:
 Flags:
   --spec <path>         one document, or many via { "specs": [...] }
   --instance <name|path>  a fleet server (or a document path), applied BEFORE the tenants
+  --data-subject <email>  report where one person's data lives (read-only; the erasure index)
   --all                 apply every project in --dir (skips example.json, _*.json)
   --dir <path>          specs folder for --all (default: scripts/state/specs)
   --domain <hostname>   apply a domain without a document

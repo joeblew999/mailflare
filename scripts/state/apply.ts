@@ -15,6 +15,7 @@
 //   real mail, so the script refuses unless you pass --confirm-mx.
 import { parseCli, usage } from "./args";
 import { loadFleet, loadSpec, resolveInstance, rolesFor } from "./document";
+import { SUBJECT_SCOPE_INDIRECT, subjectLines, subjectTotal } from "./subject-scope";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -46,6 +47,29 @@ if (instanceRef?.url) flags.url = instanceRef.url;
 if (instanceRef?.db) flags.db = instanceRef.db;
 const instanceSpec = instanceRef ? loadSpec(instanceRef.docPath) : null;
 const hasInstanceWork = Boolean(instanceSpec?.fresh || instanceSpec?.license || instanceSpec?.push);
+
+// A subject query: where one person's data lives. Read-only, and it needs no domain and
+// no document - this is the index an erasure would act on, so it is reported before
+// anything is ever destroyed.
+if (values["data-subject"]) {
+	const code = await withStore({ db: flags.db, local: flags.local, url: flags.url }, async (store) => {
+		const report = await store.subjectReport(String(values["data-subject"]));
+		if (!report.userId) {
+			console.log(`Subject ${report.email}: no account for that address.`);
+			return 0;
+		}
+		console.log(`Subject ${report.email} — ${report.mailboxIds.length} mailbox(es)\n`);
+		for (const line of subjectLines(report)) console.log(line);
+		const total = subjectTotal(report);
+		console.log(`\n  ${total} row(s) in ${report.counts.filter((count) => count.rows > 0).length} table(s)`);
+		console.log(`  NOT covered yet (reachable only through a parent row): ${SUBJECT_SCOPE_INDIRECT.join(", ")}`);
+		return total === 0 ? 0 : 1;
+	}).catch((error) => {
+		console.error(message(error));
+		return 1;
+	});
+	process.exit(code);
+}
 
 let entries: SpecEntry[];
 let singleRoles: Role[] = [];
