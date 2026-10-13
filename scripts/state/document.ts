@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateBody } from "./app";
 import type { Flags } from "./flags";
@@ -62,20 +62,7 @@ export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
 
 // --- the fleet: which servers exist, and where -----------------------------------
 
-/** One server: its name, its origin, and the database it owns. No personal data. */
-export type InstanceDecl = {
-	name: string;
-	url?: string;
-	db?: string;
-	/** Where this server is meant to live. Declaring it is INTENT; enforcing it needs the
-	 *  source changes `--source-changes` lists. Absent means "not pinned". */
-	jurisdiction?: string;
-	region?: string;
-};
-export type Fleet = { instances?: InstanceDecl[] };
-
-export const FLEET_PATH = "scripts/state/specs/fleet.json";
-/** Every project lives in its own folder: an instance document, then its tenants. */
+/** Every project lives in its own folder: a server, an instance document, and its tenants. */
 export const PROJECTS_DIR = "scripts/state/specs/projects";
 
 /** One document queued for a run. */
@@ -94,7 +81,7 @@ export function loadProject(name: string, base = PROJECTS_DIR): SpecEntry[] {
 	let files: string[];
 	try {
 		files = readdirSync(dir)
-			.filter((file) => file.endsWith(".json") && file !== "instance.json" && !file.startsWith("_") && file !== "example.json")
+			.filter((file) => file.endsWith(".json") && file !== "instance.json" && file !== "server.json" && !file.startsWith("_") && file !== "example.json")
 			.sort();
 	} catch {
 		throw new Error(`no project "${name}" — expected a folder at ${dir}/`);
@@ -106,14 +93,48 @@ export function loadProject(name: string, base = PROJECTS_DIR): SpecEntry[] {
 	return entries;
 }
 
-/** The fleet document, or [] when there is none (then --instance must be a path). */
-export function loadFleet(path = FLEET_PATH): InstanceDecl[] {
+/**
+ * A SERVER, declared by projects/<name>/server.json - not by a separate registry. One place,
+ * so the fleet cannot drift from the folders that make it up. No personal data.
+ */
+export type InstanceDecl = {
+	name: string;
+	url?: string;
+	db?: string;
+	/** Where this server is meant to live. Declaring it is INTENT; enforcing it needs the
+	 *  source changes `--source-changes` lists. Absent means "not pinned". */
+	jurisdiction?: string;
+	region?: string;
+};
+
+export const serverDocPath = (name: string, base = PROJECTS_DIR) => `${projectDir(name, base)}/server.json`;
+
+/** The server declared by a project folder. The FOLDER names it; the file describes it. */
+export function loadServer(name: string, base = PROJECTS_DIR): InstanceDecl {
+	const path = serverDocPath(name, base);
+	if (!existsSync(path)) throw new Error(`no server "${name}" — expected ${path}`);
+	const declared = JSON.parse(readFileSync(path, "utf8")) as Omit<InstanceDecl, "name">;
+	return { ...declared, name };
+}
+
+/** Write back what we learned (an origin, a database) without disturbing the rest. */
+export function saveServer(name: string, patch: Partial<Omit<InstanceDecl, "name">>, base = PROJECTS_DIR): InstanceDecl {
+	const merged: Record<string, unknown> = { ...loadServer(name, base), ...patch };
+	for (const [key, value] of Object.entries(merged)) if (value === undefined) delete merged[key];
+	delete merged.name; // the folder already says it
+	writeFileSync(serverDocPath(name, base), `${JSON.stringify(merged, null, 2)}\n`);
+	return loadServer(name, base);
+}
+
+/** The fleet, derived by scanning the project folders. There is no fleet.json to drift. */
+export function loadFleet(base = PROJECTS_DIR): InstanceDecl[] {
+	let names: string[];
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as Fleet;
-		return Array.isArray(parsed?.instances) ? parsed.instances : [];
+		names = readdirSync(base).filter((name) => existsSync(serverDocPath(name, base)));
 	} catch {
 		return [];
 	}
+	return names.map((name) => loadServer(name, base)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export type ResolvedInstance = InstanceDecl & { docPath: string };
@@ -126,6 +147,6 @@ export type ResolvedInstance = InstanceDecl & { docPath: string };
 export function resolveInstance(value: string, fleet: InstanceDecl[]): ResolvedInstance {
 	if (value.endsWith(".json")) return { name: value, docPath: value };
 	const decl = fleet.find((entry) => entry.name === value);
-	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${FLEET_PATH}`);
+	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${PROJECTS_DIR}`);
 	return { ...decl, docPath: instanceDocPath(decl.name) };
 }

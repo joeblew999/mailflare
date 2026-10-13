@@ -5,6 +5,8 @@ export type Flags = {
 	dryRun: boolean;
 	/** Destructive: actually erase the --data-subject. Without it the report is read-only. */
 	erase: boolean;
+	/** Required for --destroy to act, like --confirm-mx. */
+	confirmDestroy: boolean;
 	status: boolean;
 	cleanup: boolean;
 	onboard: boolean;

@@ -13,6 +13,8 @@ export function parseCli() {
 			"source-changes": { type: "boolean", default: false },
 			concurrency: { type: "string", default: "1" },
 			deploy: { type: "string" },
+			destroy: { type: "string" },
+			"confirm-destroy": { type: "boolean", default: false },
 			all: { type: "boolean", default: false },
 			dir: { type: "string", default: "scripts/state/specs/projects" },
 			roles: { type: "string", default: "" },
@@ -47,6 +49,7 @@ export function parseCli() {
 	const flags: Flags = {
 		dryRun: Boolean(values["dry-run"]),
 		erase: Boolean(values.erase),
+		confirmDestroy: Boolean(values["confirm-destroy"]),
 		status: Boolean(values.status),
 		cleanup: Boolean(values.cleanup),
 		onboard: Boolean(values.onboard),
@@ -114,7 +117,9 @@ Flags:
   --project <name>        run a whole project: its instance.json, then every tenant
   --instance <name|path>  just a server's instance document (or a path)
   --data-subject <email>  report where one person's data lives (read-only)
-  --deploy <name>         deploy the server's env block and register it in the fleet
+  --deploy <name>         deploy the server (its env block) and record its origin
+  --destroy <name>        its inverse: undeploy the Worker and deregister the server
+  --confirm-destroy       actually do it (without this, --destroy only prints the plan)
   --concurrency <n>       mass runs: how many documents in flight (default 1)
   --source-changes        list what cannot be done without modifying src/, and where
   --erase                 with --data-subject: DESTROY those rows and their R2 objects

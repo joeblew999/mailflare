@@ -86,9 +86,12 @@ Email Routing and DNS survive, so on a live instance it **orphans infrastructure
 the server in the fleet — it creates no cloud resources:
 
 ```bash
-# add an env.<name> block to wrangler.jsonc first (its own name, d1 database_id, bucket, queues)
+# the project folder holds server.json (database, jurisdiction); the env.<name> block in
+# wrangler.jsonc must agree with it - the two are checked against each other, not merged
 npm run state -- --deploy eu1 --dry-run     # the two commands it will run, and what it records
-npm run state -- --deploy eu1               # build, deploy, register in specs/fleet.json
+npm run state -- --deploy eu1               # build, deploy, record the origin
+npm run state -- --destroy eu1 --dry-run    # its inverse: undeploy and deregister
+npm run state -- --destroy eu1 --confirm-destroy
 ```
 
 **2. Reset it and give it a primary admin.** Nothing else in the app can do this.
@@ -238,10 +241,10 @@ scripts/state/
 │   └── fresh domain license accounts mailboxes routing mcp-keys push .ts
 ├── subject-scope.ts      where a data subject's data lives — the erasure index
 ├── specs/
-│   ├── fleet.json          which servers exist, and where (name -> url + db)
 │   └── projects/           ONE FOLDER PER PROJECT — the thing a user runs
 │       └── mailflare/
-│           ├── instance.json      the server: licence, web push
+│           ├── server.json        the SERVER: database, origin, jurisdiction
+│           ├── instance.json      the instance: licence, web push
 │           ├── amplifycms.com.json  the tenants
 │           └── ...
 │       ├── example/        the template (skipped by --all)
@@ -391,12 +394,12 @@ to **take a user and their data down** wherever it lives.
 Bug #1 above is the argument for this: instance-level facts should not be repeated in every
 tenant document, and a tenant must not silently depend on something it never declared.
 
-**Built:** `specs/fleet.json` maps a server name to its url and database, `--instance <name>`
-resolves through it (so no `--url`/`--db` is needed), `specs/instances/<name>.json` holds what
-belongs to the server rather than a tenant, and a fleet entry can declare `jurisdiction` and
-`region`. **Declaring them is intent, not enforcement** — pinning where a Worker actually
-executes needs the source changes `--source-changes` lists, and the realtime Durable Object
-is the one already identified.
+**Built:** a project folder declares its own server (`server.json`: database, origin,
+`jurisdiction`, `region`), so the **fleet is derived by scanning the folders** — there is no
+separate registry to drift, and `--instance <name>` needs no `--url`/`--db`. `--deploy` and
+`--destroy` are inverses over the same structure. **Declaring jurisdiction is intent, not
+enforcement** — pinning where a Worker actually executes needs the source changes
+`--source-changes` lists, and the realtime Durable Object is the one already identified.
 
 ### Data subjects — the index, not the erasure
 

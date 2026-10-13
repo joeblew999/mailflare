@@ -17,7 +17,7 @@ import { parseCli, usage } from "./args";
 import { loadFleet, loadProject, loadSpec, resolveInstance, rolesFor } from "./document";
 import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
 import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
-import { deployServer } from "./deploy";
+import { deployServer, destroyServer } from "./deploy";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";
 import { makeContext } from "./context";
 import { run } from "./driver";
@@ -34,6 +34,15 @@ if (values.help) {
 }
 // Deploying a server: shells the repo's own deploy path for a wrangler env, then records
 // it in the fleet. No cloud resources are created - the env block is the source of truth.
+// Destroying a server is the inverse of deploying one, and needs --confirm-destroy: it
+// removes the Worker. The database, bucket and queues are left alone on purpose.
+if (values.destroy) {
+	const code = await destroyServer({ name: String(values.destroy), dryRun: flags.dryRun, confirmed: flags.confirmDestroy }).catch((error) => {
+		console.error(message(error));
+		return 1;
+	});
+	process.exit(code);
+}
 if (values.deploy) {
 	const code = await deployServer({ name: String(values.deploy), dryRun: flags.dryRun, url: flags.url, db: values.db ? String(values.db) : undefined }).catch((error) => {
 		console.error(message(error));

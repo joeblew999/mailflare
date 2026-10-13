@@ -232,7 +232,7 @@ function fakeStore(seed: Seed = {}) {
 const flags = (over: Partial<Flags> = {}): Flags => ({
 	dryRun: false, status: false, cleanup: false, onboard: false, confirmMx: false, replaceMx: false,
 	share: false, disableAccounts: false, removeDomain: false, licenseStatus: false, push: false,
-	steps: false, fresh: false, erase: false, timeout: "40", db: "test", local: false, ...over,
+	steps: false, fresh: false, erase: false, confirmDestroy: false, timeout: "40", db: "test", local: false, ...over,
 });
 
 const roles = (...entries: Array<Partial<Role> & { role: string }>): Role[] =>
