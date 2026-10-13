@@ -103,7 +103,7 @@ async function ensureAccountMailbox(ctx: Context, account: ApiAccount, username:
 	return 1;
 }
 
-// The app has no user-delete, so de-provisioning an account means disabling it.
+// The app has no user-delete, so tearing an account down means disabling it.
 export async function disableAccount(ctx: Context, entry: AccountEntry): Promise<number> {
 	const username = String(entry.username ?? entry.name ?? "").trim().toLowerCase();
 	const email = `${username}@${ctx.domainName}`;

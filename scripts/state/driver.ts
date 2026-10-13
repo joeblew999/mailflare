@@ -19,7 +19,7 @@ export async function run(ctx: Context, roles: Role[]): Promise<number> {
 			console.log(`\n${resource.section}:`);
 			missing += await resource.status(ctx, roles, state);
 		}
-		console.log(missing === 0 ? "\nEverything provisioned." : `\n${missing} item(s) missing — run without --status to apply.`);
+		console.log(missing === 0 ? "\nEverything reconciled." : `\n${missing} item(s) missing — run without --status to apply.`);
 		return missing === 0 ? 0 : 1;
 	}
 

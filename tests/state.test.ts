@@ -1,4 +1,4 @@
-// Drives the whole provisioner through the Store seam, so a full run is exercised
+// Drives the whole reconciler through the Store seam, so a full run is exercised
 // with no D1, no Workers binding and no network. Run with `npm run state:test`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -286,12 +286,12 @@ test("dry-run changes nothing", async () => {
 	);
 });
 
-test("onboards a missing domain, then provisions into it", async () => {
+test("onboards a missing domain, then applies into it", async () => {
 	const { store, calls } = fakeStore();
 	const code = await runOn(store, flags({ onboard: true }), projectFor("fresh.example"), roles({ role: "office" }));
 	assert.equal(code, 0);
 	assert.ok(calls.includes("onboardDomain"), "domain onboarded");
-	assert.ok(calls.includes("createMailbox:office"), "provisioned after onboarding");
+	assert.ok(calls.includes("createMailbox:office"), "applied after onboarding");
 });
 
 test("refuses to onboard a domain that already has MX unless --confirm-mx", async () => {
@@ -384,7 +384,7 @@ test("mass mode processes every project through one store", async () => {
 	];
 	const code = await quiet(() => runSpecs(store, flags(), { roles: "" }, entries));
 	assert.equal(code, 0);
-	assert.ok(calls.includes("createMailbox:office") && calls.includes("createMailbox:hello"), "both projects provisioned");
+	assert.ok(calls.includes("createMailbox:office") && calls.includes("createMailbox:hello"), "both documents applied");
 });
 
 test("mass mode keeps going and reports failure per project", async () => {
@@ -404,7 +404,7 @@ test("a multi-document file loads every document", () => {
 
 test("scanning the specs folder skips the placeholder and drafts", () => {
 	const entries = loadSpecs({ dir: "scripts/state/specs" });
-	assert.ok(entries.length > 0, "found project manifests");
+	assert.ok(entries.length > 0, "found documents");
 	assert.ok(!entries.some((e) => /example\.json$/.test(e.name)), "example.json is skipped");
 	assert.ok(!entries.some((e) => /\/_/.test(e.name)), "_*.json drafts are skipped");
 });
@@ -420,9 +420,9 @@ test("license: applied only when asked, and reverted by --cleanup", async () => 
 	assert.deepEqual(fresh.calls.filter((c) => c.startsWith("setLicense")), ["setLicense:team"]);
 	assert.deepEqual(fresh.state.license, { plan: "team", state: "active" });
 
-	const manifest = fakeStore();
-	await runOn(manifest.store, flags(), { license: { plan: "pro" } }, []);
-	assert.ok(manifest.calls.includes("setLicense:pro"), "the manifest section works without a flag");
+	const fromDocument = fakeStore();
+	await runOn(fromDocument.store, flags(), { license: { plan: "pro" } }, []);
+	assert.ok(fromDocument.calls.includes("setLicense:pro"), "a document section works without a flag");
 
 	const dry = fakeStore();
 	await runOn(dry.store, flags({ plan: "team", dryRun: true }), {}, []);
@@ -460,7 +460,7 @@ test("push: sends a test email, waits for arrival, and cleanup clears subscripti
 	assert.ok(undo.calls.includes("clearPushSubscriptions"), "cleanup clears subscriptions");
 });
 
-test("push: a manifest section works without the flag", async () => {
+test("push: a document section works without the flag", async () => {
 	const { store, calls } = fakeStore({ users: [{ id: "u_a", email: "admin@instance.test" }], pushSubscriptions: 1 });
 	assert.equal(await runOn(store, flags(), { push: { to: "you@example.com" } }, []), 0);
 	assert.equal(calls.filter((c) => c.startsWith("sendViaCloudflare")).length, 1, "the section alone triggers it");

@@ -1,4 +1,4 @@
-// The live Store - the ONLY module in the provisioner that talks to D1 directly.
+// The live Store - the ONLY module in the reconciler that talks to D1 directly.
 //
 // Domains, mailboxes and accounts go over the app's key-authenticated /api/v1
 // surface. API/MCP keys, mailbox-access grants and domain routing rules have no
@@ -27,7 +27,7 @@ export function makeLiveStore({
 	db = "mailflare",
 	local = false,
 	url,
-	name = "provision",
+	name = "state",
 }: {
 	db?: string;
 	local?: boolean;

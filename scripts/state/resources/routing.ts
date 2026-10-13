@@ -24,7 +24,7 @@ type RoutingPlan =
 // because they all go through here.
 function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): RoutingPlan {
 	const pattern = String(entry.pattern ?? "*").trim();
-	// keepCopy / store need a destination mailbox; the manifest names one by role.
+	// keepCopy / store need a destination mailbox; the document names one by role.
 	let mailboxId: string | null = entry.mailboxId ?? null;
 	if (entry.mailbox) {
 		mailboxId = mailboxIdsByRole.get(String(entry.mailbox).toLowerCase()) ?? null;
@@ -68,7 +68,7 @@ function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<st
 	};
 }
 
-// Does the stored row already match what the manifest wants?
+// Does the stored row already match what the document wants?
 function matches(row: RoutingRuleRow, patch: RoutingRulePatch): boolean {
 	return (
 		String(row.match_value ?? "") === patch.matchValue &&

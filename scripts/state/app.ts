@@ -32,7 +32,7 @@ export function validateBody(kind: string, body: unknown) {
  * a mass run touch thousands of domains without thousands of key round-trips.
  */
 export async function withStore(
-	{ db, local, url, name = "provision" }: { db?: string; local?: boolean; url?: string; name?: string },
+	{ db, local, url, name = "state" }: { db?: string; local?: boolean; url?: string; name?: string },
 	fn: (store: Store) => Promise<number>,
 ): Promise<number> {
 	const store = makeLiveStore({ db, local, url, name });

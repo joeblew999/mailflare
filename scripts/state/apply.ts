@@ -4,7 +4,7 @@
 // ./resources/registry.ts) applied by one loop, and every capability can be declared
 // in JSON. There is no per-capability command.
 //
-//   npm run state -- --file scripts/state/specs/example.json
+//   npm run state -- --spec scripts/state/specs/example.json
 //   npm run state -- --domain example.com --roles office,admin
 //   npm run state -- --all --dry-run
 //   npm run state -- --plan team        # global capabilities need no domain
@@ -34,7 +34,7 @@ if (flags.steps) {
 	process.exit(0);
 }
 
-// --all/--file load many projects; the global convenience flags run a single target.
+// --all/--spec load many documents; the global convenience flags run a single target.
 const specMode = Boolean(values.all) || Boolean(values.spec);
 const useSpecs = specMode && !flags.licenseStatus;
 let entries: SpecEntry[];
@@ -50,18 +50,18 @@ try {
 		const project: Spec | null = values.spec ? loadSpec(String(values.spec)) : null;
 		const domainValue = String(values.domain ?? project?.domain ?? "").trim();
 		const target: Spec = project ?? { domain: domainValue };
-		// The convenience flags are just shorthand for manifest sections.
+		// The convenience flags are just shorthand for document sections.
 		if (flags.plan !== undefined && !target.license) target.license = { plan: flags.plan };
 		if (flags.push && !target.push) target.push = {};
 		const global = Boolean(target.license) || Boolean(target.push);
 		singleRoles = rolesFor(values, target, flags);
 		if (!domainValue && !global) {
-			console.error("Nothing to do. Pass --project/--file, --all, --domain <hostname>, --plan <team|pro|community>, or --push.\n");
+			console.error("Nothing to do. Pass a document (--spec <path>), --all, --domain <hostname>, --plan <team|pro|community>, or --push.\n");
 			usage();
 			process.exit(1);
 		}
 		if (domainValue && singleRoles.length === 0 && !global) {
-			console.error("No mailboxes to provision. Use --project/--file <path>, --roles a,b,c, or --roles-file <path>.\n");
+			console.error("Nothing to do for this domain. Use a document (--spec <path>), --roles a,b,c, or --roles-file <path>.\n");
 			usage();
 			process.exit(1);
 		}

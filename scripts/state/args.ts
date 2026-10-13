@@ -73,12 +73,12 @@ Everything is declared in JSON and applied by one run loop: domain onboarding,
 mailboxes, accounts, routing rules, MCP keys, the license, and web push. The same
 sections drive --status and --cleanup, so nothing has its own command.
 
-  npm run state -- --file scripts/state/specs/example.json
+  npm run state -- --spec scripts/state/specs/example.json
   npm run state -- --domain <hostname> --roles a,b,c [--onboard]
   npm run state -- --all --dry-run
   npm run state -- --plan team               # license only, no domain
   npm run state -- --push                    # web push round trip
-  npm run state -- --fresh --file <project>   # reset an empty/new server, then provision
+  npm run state -- --fresh --spec <path>      # reset a new server, then apply
   npm run state -- --fresh --remote          # same, against a deployed Cloudflare D1
 
 ⚠ Onboarding publishes Mailflare's Email Routing MX. The script refuses to onboard a
@@ -101,7 +101,7 @@ Flags:
   --spec <path>         one document, or many via { "specs": [...] }
   --all                 apply every project in --dir (skips example.json, _*.json)
   --dir <path>          specs folder for --all (default: scripts/state/specs)
-  --domain <hostname>   provision a domain without a manifest
+  --domain <hostname>   apply a domain without a document
   --roles <a,b,c>       ad-hoc role names (with --domain)
   --roles-file <path>   read role names from a file (JSON array or one per line)
   --onboard             add the domain to Mailflare first (publishes MX)
@@ -114,7 +114,7 @@ Flags:
   --to/--from/--subject/--timeout   web push test overrides
   --steps               print the Web Push (VAPID) key-rotation runbook
   --dry-run             list what would change, create nothing
-  --status              report what exists vs the manifest, change nothing
+  --status              report what exists vs the document, change nothing
   --cleanup             remove each section instead of applying it
   --disable-accounts    with --cleanup, also disable the accounts
   --remove-domain       with --cleanup, also remove the domain (drops its DNS/MX)

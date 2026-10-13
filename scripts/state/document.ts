@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any -- manifest shape is user-authored JSON. */
+/* eslint-disable @typescript-eslint/no-explicit-any -- a Spec is user-authored JSON. */
 import { readFileSync } from "node:fs";
 import { validateBody } from "./app";
 import type { Flags } from "./flags";
@@ -48,7 +48,7 @@ export function rolesFor(values: any, spec: Spec | null, flags: Flags): Role[] {
 		.filter((role): role is Role => role !== null);
 }
 
-// Onboard body: manifest options with the flag value winning for MX replacement.
+// Onboard body: the document's options, with the flag value winning for MX replacement.
 export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
 	const o = spec?.onboard ?? {};
 	const replaceMx = flags.replaceMx || Boolean(o.replaceMxRecords);
