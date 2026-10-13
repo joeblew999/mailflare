@@ -16,6 +16,8 @@ export function formatPlan(changes: Change[], heading = "Plan", kind: "plan" | "
 	return `${heading}: ${totals}${problems > 0 ? `, ${problems} PROBLEM(S)` : ""}${lines.length > 0 ? `\n\n${lines.join("\n")}` : ""}`;
 }
 
+const why = (item: Item) => item.removal ?? "not in the document";
+
 /** Nothing, a create, an update, or a removal: one comparison, used by plan and apply alike. */
 async function evaluate(item: Item): Promise<{ change: Change; actual?: unknown }> {
 	if (item.unmanaged) return { change: { address: item.address, action: "unmanaged", detail: item.unmanaged } };
@@ -23,7 +25,7 @@ async function evaluate(item: Item): Promise<{ change: Change; actual?: unknown 
 	const actual = await item.actual();
 	const absent = actual === null || actual === undefined;
 	// On the server, in a section the document writes, and not in it: the document wins.
-	if (item.undeclared) return { change: { address: item.address, action: absent ? "unchanged" : "remove", detail: absent ? undefined : "not in the document" }, actual };
+	if (item.undeclared) return { change: { address: item.address, action: absent ? "unchanged" : "remove", detail: absent ? undefined : `${why(item)}${item.wants ? `: ${item.wants}` : ""}` }, actual };
 	// `satisfied` is the whole truth when an item has one: some things are wanted absent.
 	if (item.satisfied ? item.satisfied(actual) : !absent) return { change: { address: item.address, action: "unchanged" }, actual };
 	return { change: { address: item.address, action: absent ? "create" : "update", detail: item.wants }, actual };
@@ -71,11 +73,11 @@ async function apply(ctx: Context, active: Resource[]): Promise<number> {
 					if (ctx.flags.confirmDestroy) {
 						const note = await item.remove(actual);
 						ctx.changes.push(change);
-						ctx.log(`  - ${item.address}  ${note ? `${note} — ` : ""}not in the document`);
+						ctx.log(`  - ${item.address}  ${note ? `${note} — ` : ""}${why(item)}`);
 						changed += 1;
 					} else {
 						ctx.changes.push({ ...change, action: "keep", detail: "left in place: removing it was not approved" });
-						ctx.log(`  - ${item.address}  not in the document — left in place (--confirm-destroy removes it)`);
+						ctx.log(`  - ${item.address}  ${why(item)} — left in place (--confirm-destroy removes it)`);
 						unapproved += 1;
 					}
 				} else if (change.action !== "unchanged") {

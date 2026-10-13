@@ -56,7 +56,7 @@ export type McpKeyValues = { scopes: string[]; mailboxIds: string[] | null };
 export type ManagedTable =
 	| "app_settings" | "backup_settings" | "users" | "mailboxes" | "mailbox_aliases" | "mailbox_agent_settings"
 	| "folders" | "routing_rules" | "messages" | "contacts" | "webhooks" | "booking_events" | "calendar_events"
-	| "drive_items" | "api_keys" | "mcp_key_mailboxes" | "webhook_deliveries";
+	| "drive_items" | "api_keys" | "mcp_key_mailboxes" | "webhook_deliveries" | "backups";
 export type SettingValue = string | number | null;
 export type SettingsRow = Record<string, SettingValue>;
 
@@ -69,6 +69,10 @@ export type SubjectReport = {
 	userId: string | null;
 	mailboxIds: string[];
 	counts: SubjectCount[];
+	/** How many objects in the bucket hold their bytes: raw mail, attachments, files, avatars. */
+	objects: number;
+	/** Rows that are other people's and name this address: reported, and never erased. */
+	elsewhere: SubjectCount[];
 	/** Why this subject cannot be erased as things stand. Empty means it can. */
 	blockers: string[];
 };
@@ -153,8 +157,26 @@ export type Store = {
 
 	// data-subject index: where one person's data lives (see subject-scope.ts)
 	subjectReport(email: string): Promise<SubjectReport>;
-	/** Destroy the subject's rows AND their objects. Refuses while the report lists blockers. */
+	/**
+	 * Destroy the subject's rows AND their objects, and delete their mailboxes through the app
+	 * so that Cloudflare stops routing mail to them. Refuses while the report lists blockers.
+	 */
 	eraseSubject(email: string): Promise<EraseResult>;
+
+	// objects in the server's bucket: backups are read and rewritten here
+	/** Every key under a prefix. A backup the app has lost its record of is still found here. */
+	listObjects(prefix: string): Promise<string[]>;
+	/** An object's content as text, or null when it is not there. */
+	readObject(key: string): Promise<string | null>;
+	writeObject(key: string, content: string, contentType: string): Promise<void>;
+	/** How many of these were deleted. */
+	deleteObjects(keys: string[]): Promise<number>;
+
+	// backups: made and restored by the app itself, as its primary admin
+	/** Take a backup now. Returns its id; throws with the app's own reason when it fails. */
+	takeBackup(): Promise<string>;
+	/** Replace everything the server holds with what a backup holds. */
+	restoreBackup(content: string): Promise<void>;
 
 	// fresh instance lifecycle: only the reset capability uses these
 	/** Bring the target database up to the current schema. */

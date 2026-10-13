@@ -2,15 +2,17 @@
 // The entry point: a TARGET and a VERB, as terraform has.
 import { UsageError, parseCli, usage, type Cli, type Target } from "./args";
 import { refreshColos } from "./colos";
+import { holds, parseBackup } from "./backup";
 import { conform, verify } from "./conform";
 import { CONFORMANCE_DIR, loadDocumentTarget, loadFolderTarget, loadProject, loadProjects, type Project } from "./document";
 import { liveProbes } from "./probes";
 import { deployServer } from "./deploy";
 import { liveDeps, resolveInstance, runFleet, subjectInstances } from "./fleet";
+import { backupKeys } from "./resources/erased";
 import { pushRunbook } from "./resources/push";
 import { router } from "./router";
-import { SOURCE_CHANGES, printSourceChanges, sourceChangeNeeded } from "./src-changes";
-import { subjectLines, subjectTotal, subjectUnknown } from "./subject-scope";
+import { AI_USAGE_UNATTRIBUTABLE, printSourceChanges, sourceChangeNeeded } from "./src-changes";
+import { digestOf, subjectLines, subjectTotal, subjectUnknown, tombstones } from "./subject-scope";
 import { recordedLogins } from "./vault";
 import { message } from "./wrangler";
 
@@ -21,51 +23,68 @@ function projectsFor(target: Target, dir: string): Project[] {
 	return loadProjects(dir);
 }
 
-// A subject is an OPERATION on one person, not desired state, so it is a verb rather than a
-// document. It looks on every server: an address says nothing about where its data is.
-async function subject(cli: Cli, email: string, action: "plan" | "destroy"): Promise<number> {
+// Where one person is, on every server: an address says nothing about where its data lives.
+// Read-only. Erasing is desired state, so it is written in a document - this says which, and what.
+async function subject(cli: Cli, email: string): Promise<number> {
 	const { flags } = cli;
 	const deps = liveDeps(cli.credentials);
 	// Typed instance flags name one instance; otherwise it is the whole fleet.
 	const single = flags.local || cli.explicit.db || cli.explicit.url;
 	const projects: Project[] = single ? [{ name: flags.local ? "local" : flags.db, dir: cli.dir, server: null, entries: [] }] : loadProjects(cli.dir);
-	const erase = action === "destroy" && flags.confirmDestroy;
+	const digest = digestOf(email);
 	let code = 0;
-	let found = 0;
 	for (const { name, instance } of subjectInstances(projects, cli, deps.template())) {
-		code = Math.max(code, await deps.openStore(instance, async (store) => {
+		const project = projects.find((candidate) => candidate.name === name);
+		const said = await deps.openStore(instance, async (store) => {
 			const report = await store.subjectReport(email);
-			if (!report.userId) {
-				console.log(`${name}: no account for ${email}.`);
-				return 0;
+			// Every backup is read: one that still holds them is the thing an erasure most often misses.
+			const backups = [...(await backupKeys(store)).keys()];
+			let holding = 0;
+			for (const key of backups) {
+				const document = parseBackup((await store.readObject(key)) ?? "");
+				if (!document || holds(document, [digest]).length > 0) holding += 1;
 			}
-			found += 1;
-			console.log(`${name}: ${email} — ${report.mailboxIds.length} mailbox(es)\n`);
-			for (const line of subjectLines(report)) console.log(line);
-			const total = subjectTotal(report);
-			console.log(`\n  ${total} row(s) in ${report.counts.filter((count) => count.rows > 0).length} table(s)`);
+			return { report, backups: backups.length, holding };
+		}).catch((error) => {
+			console.error(`${name}: ${message(error)}`);
+			code = 1;
+			return null;
+		});
+		if (!said) continue;
+		const { report } = said;
+		const elsewhere = report.elsewhere.filter((count) => count.rows > 0).map((count) => `${count.rows} ${count.table}`);
+		const declared = (project?.entries ?? []).filter((entry) => (entry.spec.accounts ?? []).some((account) => `${account.username.trim().toLowerCase()}@${String(entry.spec.domain).trim().toLowerCase()}` === email) || entry.spec.fresh?.admin?.email?.trim().toLowerCase() === email);
+		const tombstoned = (project?.entries ?? []).filter((entry) => tombstones(entry.spec).some((stone) => stone.digest === digest));
+		if (!report.userId && said.holding === 0 && elsewhere.length === 0 && declared.length === 0 && tombstoned.length === 0) {
+			console.log(`${name}: nothing of ${email}.`);
+			continue;
+		}
+		console.log(`\n${name}: ${email}`);
+		if (report.userId) {
+			console.log(`  an account, ${report.mailboxIds.length} mailbox(es), ${subjectTotal(report)} row(s) in ${report.counts.filter((count) => count.rows > 0).length} table(s), ${report.objects} object(s) in the bucket`);
+			for (const line of subjectLines(report)) console.log(`  ${line}`);
 			const unknown = subjectUnknown(report);
 			if (unknown.length > 0) {
 				console.log(`  cannot be attributed to anyone (no user or owner column): ${unknown.join(", ")}`);
-				sourceChangeNeeded(SOURCE_CHANGES[1]);
+				sourceChangeNeeded(AI_USAGE_UNATTRIBUTABLE);
 			}
-			for (const blocker of report.blockers) console.log(`  ! cannot be erased: ${blocker}`);
-			if (!erase || report.blockers.length > 0) return 1;
-
-			const result = await store.eraseSubject(email);
-			console.log(`\n  ✓ erased ${result.email}: ${subjectTotal({ ...report, counts: result.deleted })} row(s), ${result.objectsDeleted}/${result.objectKeys.length} object(s)`);
-			// Their login goes from the credentials folder too.
-			deps.vault(name).forgetLogin(email);
-			sourceChangeNeeded(SOURCE_CHANGES[0]);
-			const left = (await store.subjectReport(email)).userId !== null || result.objectsDeleted < result.objectKeys.length;
-			if (left) console.log("  ✗ something of theirs is still there");
-			return left ? 1 : 0;
-		}).catch((error) => {
-			console.error(`${name}: ${message(error)}`);
-			return 1;
-		}));
+		} else console.log("  no account");
+		console.log(`  backups: ${said.holding} of ${said.backups} hold them`);
+		if (elsewhere.length > 0) console.log(`  named in other people's data, which is theirs and stays: ${elsewhere.join(", ")}`);
+		for (const entry of declared) console.log(`  declared in ${entry.name}`);
+		for (const entry of tombstoned) console.log(`  declared erased in ${entry.name}`);
+		for (const blocker of report.blockers) console.log(`  ! cannot be erased: ${blocker}`);
+		const stale = tombstoned.length > 0 && (report.userId || said.holding > 0);
+		if (stale) console.log("  ! declared erased, and still here: apply with --confirm-destroy");
+		if (stale || report.blockers.length > 0) code = 1;
+		if (tombstoned.length === 0 && (report.userId || said.holding > 0) && report.blockers.length === 0) {
+			console.log(`\n  To erase them from ${name}: take them out of "accounts" if they are there, and add to a document of this server`);
+			console.log(`      "erased": ["${email}"]`);
+			console.log(`  or, to keep no address in the document:`);
+			console.log(`      "erased": ["${digest}"]`);
+			console.log(`  then: npm run state -- ${name} plan   and   npm run state -- ${name} apply --confirm-destroy`);
+		}
 	}
-	if (action === "destroy" && !flags.confirmDestroy && found > 0) console.log("\nNothing was erased. Re-run with --confirm-destroy to erase it.");
 	return code;
 }
 
@@ -103,7 +122,7 @@ async function main(): Promise<number> {
 	if (command.kind === "logins") return console.log(JSON.stringify(recordedLogins(cli.credentials, command.project), null, 2)), 0;
 	try {
 		if (command.kind === "colos") return await refreshColos();
-		if (command.kind === "subject") return await subject(cli, command.email, command.action);
+		if (command.kind === "subject") return await subject(cli, command.email);
 		if (command.kind === "router") return await router(loadProjects(cli.dir), cli.flags, cli.router);
 		if (command.kind === "deploy") return await deploy(cli, projectsFor(command.target, cli.dir));
 		if (command.kind === "verify") return await verify(projectsFor(command.target, cli.dir), cli.concurrency, liveDeps(cli.credentials), liveProbes);

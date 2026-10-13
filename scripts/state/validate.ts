@@ -1,13 +1,14 @@
 // Documents are data, and data with no schema is how a typo becomes a silent no-op. Every
 // problem is reported with its field path, all at once.
-import { ACCOUNT_ROLES, AGENT_PRESETS, AGENT_PROVIDERS, API_KEY_SCOPES, BACKUP_GROUPS, BACKUP_SCHEDULES, CALENDAR_REPEATS, INSTANCE_SECTIONS, RULE_ACTIONS, RULE_FIELDS, RULE_OPERATORS, WEBHOOK_EVENTS, EU_COUNTRIES, JURISDICTIONS, MCP_SCOPES, PERMISSIONS, PLACEMENTS, PLANS, PROVIDERS, REGIONS, ROUTING_ACTIONS, SERVER_FIELDS, SERVER_FLAGS, TENANT_SECTIONS, servedBy } from "./spec";
+import { ACCOUNT_ROLES, AGENT_PRESETS, AGENT_PROVIDERS, API_KEY_SCOPES, BACKUP_GROUPS, BACKUP_SCHEDULES, CALENDAR_REPEATS, INSTANCE_SECTIONS, SHARED_SECTIONS, RULE_ACTIONS, RULE_FIELDS, RULE_OPERATORS, WEBHOOK_EVENTS, EU_COUNTRIES, JURISDICTIONS, MCP_SCOPES, PERMISSIONS, PLACEMENTS, PLANS, PROVIDERS, REGIONS, ROUTING_ACTIONS, SERVER_FIELDS, SERVER_FLAGS, TENANT_SECTIONS, servedBy } from "./spec";
 import { hasColo } from "./colos";
+import { isDigest, tombstones } from "./subject-scope";
 import type { Server, Spec } from "./spec";
 
-const SECTIONS = ["domain", "country", ...TENANT_SECTIONS, ...INSTANCE_SECTIONS] as const;
+const SECTIONS = ["domain", "country", ...TENANT_SECTIONS, ...INSTANCE_SECTIONS, ...SHARED_SECTIONS] as const;
 const COUNTRY = /^[a-z]{2}$/i;
-// The two teardown keys have DIFFERENT vocabularies: one disables, the other removes.
-const TEARDOWN: Record<string, readonly string[]> = { accounts: ["disable", "keep"], domain: ["remove", "keep"] };
+// The two teardown keys have DIFFERENT vocabularies: one disables or erases, the other removes.
+const TEARDOWN: Record<string, readonly string[]> = { accounts: ["disable", "erase", "keep"], domain: ["remove", "keep"] };
 
 const MAILBOX_SETTINGS = ["signature", "autoReply", "aliases", "folders", "rules", "assistant"];
 const PERSON_SETTINGS = ["preferences", "resetEmail", "templates", "contacts", "calendar", "drive", "webhooks", "apiKeys"];
@@ -416,6 +417,27 @@ export function validateSpec(value: unknown, where = ""): string[] {
 	const admin = section("admin");
 	if (admin) personSettings(admin, "admin");
 
+	// Tombstones. An address is checked as one; a digest says nothing more that can be.
+	if (doc.erased !== undefined) {
+		if (!Array.isArray(doc.erased)) fail("erased", "must be an array of addresses, or sha256: digests of them");
+		else {
+			const domain = typeof doc.domain === "string" ? doc.domain.trim().toLowerCase() : "";
+			for (const [index, entry] of (doc.erased as unknown[]).entries()) {
+				const written = typeof entry === "string" ? entry.trim().toLowerCase() : "";
+				if (!written) fail(`erased[${index}]`, "must be an address, or sha256: and the digest of one");
+				else if (written.startsWith("sha256:")) {
+					if (!isDigest(written)) fail(`erased[${index}]`, "a digest is sha256: and 64 hex characters — `state subject <address>` prints it");
+				} else if (written.includes("@")) {
+					if (!EMAIL.test(written)) fail(`erased[${index}]`, `"${written}" is not an address`);
+					else if (domain && !written.endsWith(`@${domain}`)) fail(`erased[${index}]`, `"${written}" is not on ${domain} — a tenant document erases people on its own domain; instance.json takes any address`);
+				} else if (!domain) fail(`erased[${index}]`, `"${written}" needs its domain: write the whole address`);
+				else if (!/^[a-z0-9._+-]+$/.test(written)) fail(`erased[${index}]`, `"${written}" is not a name on ${domain}`);
+			}
+			// Declared and erased at once is a contradiction: each apply would make them and take them away.
+			if (problems.length === 0) for (const problem of erasedAndDeclared([doc as Spec])) problems.push(where ? `${where}.${problem}` : problem);
+		}
+	}
+
 	const teardown = section("teardown");
 	if (teardown) for (const key of Object.keys(TEARDOWN)) anEnum(teardown, "teardown", key, TEARDOWN[key]);
 
@@ -442,10 +464,29 @@ export function assertValidSpec(value: unknown, where: string): Spec {
 	return value as Spec;
 }
 
+/**
+ * People who are both erased and declared, across the documents given: an account, or the admin
+ * a reset makes. One document can erase whom another declares, so a project checks them together.
+ */
+export function erasedAndDeclared(specs: Spec[]): string[] {
+	const erased = new Map(specs.flatMap((spec) => tombstones(spec)).map((stone) => [stone.digest, stone.label]));
+	if (erased.size === 0) return [];
+	const problems: string[] = [];
+	for (const spec of specs) {
+		const domain = String(spec.domain ?? "").trim().toLowerCase();
+		const declared = [...(spec.accounts ?? []).map((entry) => `${String(entry.username ?? "").trim().toLowerCase()}@${domain}`), ...(spec.fresh?.admin?.email ? [spec.fresh.admin.email.trim().toLowerCase()] : [])];
+		for (const email of declared) {
+			const digest = tombstones({ erased: [email] })[0]?.digest;
+			if (digest && erased.has(digest)) problems.push(`erased: ${email} is declared and erased — a person is one or the other`);
+		}
+	}
+	return [...new Set(problems)];
+}
+
 /** instance.json describes the instance, and nothing that lives on a domain. */
 export function validateInstanceDocument(spec: Spec): string[] {
 	return Object.keys(spec)
-		.filter((key) => !(INSTANCE_SECTIONS as readonly string[]).includes(key))
+		.filter((key) => !(INSTANCE_SECTIONS as readonly string[]).includes(key) && !(SHARED_SECTIONS as readonly string[]).includes(key))
 		.map((key) => `${key}: belongs in a <domain>.json document — instance.json holds only ${oneOf(INSTANCE_SECTIONS)}`);
 }
 

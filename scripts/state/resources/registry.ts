@@ -3,6 +3,7 @@ import { licenseResource } from "./license";
 import { backupsResource, settingsResource } from "./settings";
 import { domainResource } from "./domain";
 import { accountsResource } from "./accounts";
+import { erasedResource } from "./erased";
 import { mailboxesResource } from "./mailboxes";
 import { routingResource } from "./routing";
 import { mcpKeysResource } from "./mcp-keys";
@@ -16,6 +17,7 @@ import type { Resource } from "./resource";
 //   license    gates shared inboxes and account management, so it precedes both.
 //   settings, backups   instance rows that depend on nothing.
 //   domain     everything below lives on it; it stops the document if it cannot be had.
+//   erased     people who must not be here go before anyone is made or counted.
 //   accounts   precede mailboxes, because access grants name users.
 //   mailboxes  precede the rules and keys that name them.
 //   mailbox settings, people   what each mailbox and each person is told about itself: after
@@ -30,6 +32,7 @@ export const RESOURCES: Resource[] = [
 	settingsResource,
 	backupsResource,
 	domainResource,
+	erasedResource,
 	accountsResource,
 	mailboxesResource,
 	mailboxSettingsResource,

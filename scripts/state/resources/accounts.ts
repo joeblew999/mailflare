@@ -2,6 +2,8 @@ import { validateBody } from "../app";
 import { requireDomain, usernameOf } from "../context";
 import { newPassword } from "../vault";
 import { credential } from "../wrangler";
+import { digestOf } from "../subject-scope";
+import { erasePerson, erasedDigests } from "./erased";
 import { mailboxesForDomain } from "./mailboxes";
 import { expectOk, type Item, type Resource } from "./resource";
 import type { AccountEntry, ApiAccount } from "../spec";
@@ -40,6 +42,7 @@ export const accountsResource: Resource = {
 				]
 				: [];
 			const lacksMailbox = !!account && !boxes.has(username);
+			const leaving = ctx.spec.teardown?.accounts === "disable" || ctx.spec.teardown?.accounts === "erase" ? ctx.spec.teardown.accounts : null;
 
 			const record = (password: string) => {
 				ctx.vault.at(ctx.store.base);
@@ -57,7 +60,7 @@ export const accountsResource: Resource = {
 			return {
 				address: `account.${username}`,
 				wants: account ? [...differs, ...(lacksMailbox ? ["restore its mailbox"] : [])].join(", ") : `${role}${name ? ` "${name}"` : ""}`,
-				keep: ctx.spec.teardown?.accounts !== "disable" ? 'teardown.accounts is not "disable"' : account?.isPrimaryAdmin ? "the primary admin is never disabled" : undefined,
+				keep: !leaving ? 'teardown.accounts is not "disable" or "erase"' : account?.isPrimaryAdmin ? "the primary admin is never disabled" : undefined,
 				actual: async () => account,
 				satisfied: (actual) => !!actual && differs.length === 0 && !lacksMailbox,
 				create: async () => {
@@ -74,27 +77,32 @@ export const accountsResource: Resource = {
 					if (lacksMailbox) await restoreMailbox(actual as ApiAccount);
 					return [...differs, ...(lacksMailbox ? ["mailbox restored"] : [])].join(", ");
 				},
-				// The app cannot delete a user, so tearing an account down means disabling it.
-				removable: async () => (account && !account.disabled ? account : null),
+				// Tearing an account down disables it, and keeps what is theirs - unless the tenant is
+				// leaving for good, when each of its people is erased as `erased` would erase them.
+				removable: async () => (account && (leaving === "erase" || !account.disabled) ? account : null),
 				remove: async (present) => {
 					const target = present as ApiAccount;
+					if (leaving === "erase") return erasePerson(ctx, await ctx.store.subjectReport(email));
 					expectOk(await ctx.store.updateAccount(target.id, updateBody(target, { name: target.name?.trim() || username, role: target.role, disabled: true })));
 					return "disabled";
 				},
 			};
 		});
 
-		// Anyone else with a login on this domain is not in the document. The app cannot delete
-		// a user, so they are disabled - never the admin whose key this is, and never the primary one.
+		// Anyone else with a login on this domain is not in the document. Leaving a document is
+		// not being erased: they are disabled, and everything of theirs is kept - never the admin
+		// whose key this is, and never the primary one. Those declared erased are that section's.
 		const admin = await ctx.store.admin();
 		const named = new Set((ctx.spec.accounts ?? []).map((entry) => `${usernameOf(entry)}@${ctx.domainName}`));
+		const erased = erasedDigests(ctx);
 		const others = accounts.filter((account) => {
 			const email = String(account.email).toLowerCase();
-			return email.endsWith(`@${ctx.domainName}`) && !named.has(email) && !account.disabled && !account.isPrimaryAdmin && account.id !== admin.id;
+			return email.endsWith(`@${ctx.domainName}`) && !named.has(email) && !erased.has(digestOf(email)) && !account.disabled && !account.isPrimaryAdmin && account.id !== admin.id;
 		});
 		return [...declared, ...others.map((account): Item => ({
 			address: `account.${String(account.email).split("@")[0].toLowerCase()}`,
 			undeclared: true,
+			wants: "it is disabled, and its mail and files are kept — `erased` is what deletes a person",
 			actual: async () => account,
 			remove: async () => {
 				expectOk(await ctx.store.updateAccount(account.id, updateBody(account, { name: account.name?.trim() || String(account.email).split("@")[0], role: account.role, disabled: true })));

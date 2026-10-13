@@ -9,6 +9,7 @@ import { SQLiteTable, getTableConfig } from "drizzle-orm/sqlite-core";
 import * as schema from "@/db/schema";
 import { BACKUP_TABLE_GROUPS } from "@/lib/backups/table-groups";
 import { UsageError, parseCli } from "./args";
+import { dangling, holds, parseBackup, scrub, type BackupDocument } from "./backup";
 import { coloOf, countryOfColo, hasColo, loadColos, parseColoList } from "./colos";
 import { makeContext } from "./context";
 import { deploySteps, secretsFor } from "./deploy";
@@ -19,12 +20,13 @@ import { resolveInstance, runFleet, type FleetDeps } from "./fleet";
 import { fleetMap, fleetVersion } from "./router";
 import { memoryVault } from "./vault";
 import { foreignMx } from "./resources/domain";
+import { scrubBackups } from "./resources/erased";
 import { limiter, runDocuments } from "./runner";
 import { SOURCE_CHANGES, SOURCE_CHANGES_MADE } from "./src-changes";
 import { BACKUP_GROUPS, MCP_SCOPES, PLACEMENTS } from "./spec";
 import { SEED_ROWS, type Instance } from "./store/live";
-import { INDIRECT_SCOPE, INSTANCE_OBJECT_KEYS, INSTANCE_TABLES, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, depthOf, isSubjectScoped, subjectLines, subjectPredicate, subjectTotal, subjectUnknown } from "./subject-scope";
-import { validateInstanceDocument, validateServer, validateSpec, validateTenantDocument } from "./validate";
+import { INDIRECT_SCOPE, INSTANCE_OBJECT_KEYS, INSTANCE_TABLES, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, depthOf, digestOf, isSubjectScoped, subjectLines, subjectPredicate, subjectTotal, subjectUnknown, tombstones } from "./subject-scope";
+import { erasedAndDeclared, validateInstanceDocument, validateServer, validateSpec, validateTenantDocument } from "./validate";
 import { deploymentFor, serverConfig, stripJsonc, type WranglerConfig } from "./wrangler";
 import type { Flags } from "./flags";
 import type { Spec } from "./spec";
@@ -65,6 +67,8 @@ function fakeStore(seed: Seed = {}) {
 		tables: { app_settings: seed.settings?.app_settings ? [{ id: "default", ...seed.settings.app_settings }] : [], backup_settings: seed.settings?.backup_settings ? [{ id: "default", ...seed.settings.backup_settings }] : [] } as Record<string, SettingsRow[]>,
 		extra: new Map<string, SettingsRow>(),
 		pushSubscriptions: seed.pushSubscriptions ?? 0,
+		// The bucket: backups are objects in it, as they are on a server.
+		objects: new Map<string, string>(),
 		sent: [] as string[],
 		schema: seed.schema ?? true,
 		admin: { id: "u_admin", email: "admin@instance.test" } as { id: string; email: string } | null,
@@ -237,10 +241,58 @@ function fakeStore(seed: Seed = {}) {
 			else (state.tables[table] ??= []).push({ ...key, ...values });
 		},
 		async subjectReport(email) {
-			return { email, userId: null, mailboxIds: [], counts: [], blockers: [] };
+			const account = state.accounts.find((entry) => entry.email === email.toLowerCase());
+			if (!account) return { email, userId: null, mailboxIds: [], counts: [], objects: 0, elsewhere: [], blockers: [] };
+			const mailboxIds = state.mailboxes.filter((box) => box.userId === account.id).map((box) => box.id);
+			return { email, userId: account.id, mailboxIds, counts: [{ table: "mailboxes", rows: mailboxIds.length }, { table: "mailbox_access", rows: state.access.filter((grant) => grant.userId === account.id).length }], objects: 0, elsewhere: [], blockers: account.isPrimaryAdmin ? ["is the primary admin — the instance cannot run without one"] : [] };
 		},
 		async eraseSubject(email) {
-			return { email, userId: null, deleted: [], objectKeys: [], objectsDeleted: 0 };
+			const report = await store.subjectReport(email);
+			calls.push(`eraseSubject:${email}`);
+			if (report.blockers.length > 0) throw new Error(`cannot erase ${email}: ${report.blockers.join("; ")}`);
+			state.accounts = state.accounts.filter((account) => account.id !== report.userId);
+			state.mailboxes = state.mailboxes.filter((box) => box.userId !== report.userId);
+			state.access = state.access.filter((grant) => grant.userId !== report.userId && !report.mailboxIds.includes(grant.mailboxId));
+			return { email, userId: report.userId, deleted: report.counts, objectKeys: [], objectsDeleted: 0 };
+		},
+		async listObjects(prefix) {
+			return [...state.objects.keys()].filter((key) => key.startsWith(prefix));
+		},
+		async readObject(key) {
+			return state.objects.get(key) ?? null;
+		},
+		async writeObject(key, content) {
+			calls.push(`writeObject:${key}`);
+			state.objects.set(key, content);
+		},
+		async deleteObjects(keys) {
+			for (const key of keys) calls.push(`deleteObject:${key}`);
+			return keys.filter((key) => state.objects.delete(key)).length;
+		},
+		// A backup is the people and their mailboxes, in the app's own format: enough to erase from and restore.
+		async takeBackup() {
+			const id = `bak_${++seq}`;
+			calls.push("takeBackup");
+			const key = `backups/database/${id}/mailflare.json`;
+			const tables = {
+				users: all("users").map((row) => {
+					const account = state.accounts.find((entry) => entry.id === row.id);
+					return { id: row.id, email: row.email, name: account?.name ?? "root", role: account?.role ?? "admin", disabled: Number(account?.disabled ?? false), can_manage_mailboxes: Number(account?.canManageMailboxes ?? true), is_primary_admin: Number(account?.isPrimaryAdmin ?? false), listed: Number(!!account) };
+				}),
+				domains: state.domains.map((domain) => ({ id: domain.id, hostname: domain.hostname, user_id: state.admin?.id ?? null })),
+				mailboxes: state.mailboxes.map((box) => ({ id: box.id, user_id: box.userId, domain_id: box.domainId, local_part: box.localPart, hostname: box.hostname, display_name: box.displayName, type: box.type })),
+				mailbox_access: state.access.map((grant, index) => ({ id: `mac_${index}`, mailbox_id: grant.mailboxId, user_id: grant.userId, permission: grant.permission, created_by_user_id: state.admin?.id ?? null })),
+			};
+			state.objects.set(key, JSON.stringify({ format: "mailflare-database-backup", version: 1, createdAt: new Date().toISOString(), tables }));
+			(state.tables.backups ??= []).push({ id, status: "completed", r2_key: key, size: 1, created_at: seq });
+			return id;
+		},
+		async restoreBackup(content) {
+			calls.push("restoreBackup");
+			const { tables } = JSON.parse(content) as { tables: Record<string, Array<Record<string, string | number | null>>> };
+			state.accounts = tables.users.filter((row) => row.listed).map((row) => ({ id: String(row.id), email: String(row.email), name: String(row.name), role: String(row.role), disabled: Boolean(row.disabled), canManageMailboxes: Boolean(row.can_manage_mailboxes), isPrimaryAdmin: Boolean(row.is_primary_admin) }));
+			state.mailboxes = tables.mailboxes.map((row) => ({ id: String(row.id), userId: String(row.user_id), domainId: String(row.domain_id), localPart: String(row.local_part), hostname: String(row.hostname), displayName: row.display_name === null ? null : String(row.display_name), type: String(row.type) }));
+			state.access = tables.mailbox_access.map((row) => ({ mailboxId: String(row.mailbox_id), userId: String(row.user_id), permission: String(row.permission) }));
 		},
 		async applyMigrations() {
 			calls.push("applyMigrations");
@@ -529,6 +581,211 @@ test("settings: a secret comes from the environment, is written, and is never pr
 	assert.match((await runOn(store, PLAN, { settings: { resendApiKeyEnv: "STATE_TEST_RESEND" } })).text, /! settings\.resendApiKey\s+\$STATE_TEST_RESEND is not set/);
 });
 
+test("backups are provisioned, not just switched on: the first is taken at once, and one that cannot be made is a failure", async () => {
+	const seed = { settings: { backup_settings: { enabled: 0, schedule_type: "daily", retention_enabled: 0, retention_days: 30, excluded_table_groups: "[]" } } };
+	const spec: Spec = { backups: { enabled: true, schedule: "daily", retentionDays: 30 } };
+	const { store, state, calls } = fakeStore(seed);
+	assert.match((await runOn(store, PLAN, spec)).text, /\+ backups\.first\s+none has completed yet, so one is taken now/);
+	const applied = await runOn(store, flags(), spec);
+	assert.equal(applied.code, 0, applied.text);
+	assert.match(applied.text, /\+ backups\.first\s+taken \(bak_/);
+	assert.deepEqual([state.tables.backups.length, state.objects.size], [1, 1], "a real backup is in the bucket, with its record");
+	assert.equal((await runOn(store, PLAN, spec)).code, 0, "and one is enough: the schedule takes the rest");
+	assert.equal(calls.filter((call) => call === "takeBackup").length, 1);
+	assert.equal((await runOn(store, DESTROY, spec)).code, 0);
+	assert.equal(state.objects.size, 1, "destroy never deletes a backup");
+
+	// Off, nothing is taken. On and failing, the run says why and fails: this is how a server whose backups cannot work is found.
+	const off = fakeStore(seed);
+	assert.equal((await runOn(off.store, flags(), { backups: { enabled: false } })).code, 0);
+	assert.ok(!off.calls.includes("takeBackup"));
+	const broken = fakeStore(seed);
+	broken.store.takeBackup = async () => {
+		throw new Error("the backup failed: Backup aborted: drive_items not listed in BACKUP_TABLES");
+	};
+	const failed = await runOn(broken.store, flags(), spec);
+	assert.equal(failed.code, 1);
+	assert.match(failed.text, /✗ backups\.first\s+the backup failed: Backup aborted/);
+
+	// The app's own list of what a backup holds must name every table, or every backup aborts.
+	const backedUp = BACKUP_TABLE_GROUPS.flatMap((group) => group.tables as string[]);
+	const tables = Object.values(schema).filter((value) => is(value, SQLiteTable)).map((table) => getTableConfig(table as SQLiteTable).name);
+	assert.deepEqual(tables.filter((table) => !backedUp.includes(table) && table !== "jmap_mailbox_revisions"), [], "a table the app does not back up — add it to BACKUP_TABLES and a group in src/lib/backups/");
+});
+
+const PEOPLE = {
+	domains: DOMAIN,
+	license: TEAM,
+	accounts: [{ id: "u_sam", email: "sam@dev.example" }, { id: "u_kim", email: "kim@dev.example" }],
+	mailboxes: [{ id: "mbx_sam", localPart: "sam", userId: "u_sam" }, { id: "mbx_kim", localPart: "kim", userId: "u_kim" }, { id: "mbx_office", localPart: "office" }],
+	access: [{ mailboxId: "mbx_office", userId: "u_sam", permission: "read_only" }, { mailboxId: "mbx_office", userId: "u_kim", permission: "read_only" }],
+};
+
+test("leaving a document disables a person and keeps their data; declaring them erased deletes it, backups included", async () => {
+	const { store, state, calls } = fakeStore(PEOPLE);
+	const vault = memoryVault();
+	vault.recordLogin("sam@dev.example", { name: "Sam", role: "user", password: "pw" });
+	vault.recordSecret("apiKeys", "sam@dev.example/laptop", "ep_secret");
+	vault.recordSecret("apiKeys", "kim@dev.example/laptop", "ep_other");
+	await store.takeBackup();
+	const [backupKey] = state.objects.keys();
+	const copy = state.objects.get(backupKey)!;
+	assert.deepEqual(holds(parseBackup(copy)!, [digestOf("Sam@Dev.Example")]), [digestOf("sam@dev.example")], "the backup holds them, however the address is written");
+
+	// Out of the document: disabled, and the plan says that nothing of theirs is deleted.
+	const left: Spec = { domain: "dev.example", accounts: [{ username: "kim" }] };
+	assert.match((await runOn(store, PLAN, left)).text, /- account\.sam\s+not in the document: it is disabled, and its mail and files are kept — `erased` is what deletes a person/);
+	await runOn(store, flags({ confirmDestroy: true }), left);
+	assert.deepEqual([state.accounts.find((account) => account.id === "u_sam")?.disabled, state.mailboxes.some((box) => box.id === "mbx_sam")], [true, true], "disabled, with their mailbox still there");
+
+	// Declared erased: the plan says what goes, an apply waits for approval, and then it is all gone.
+	const erased: Spec = { ...left, erased: ["sam"] };
+	const planned = await runOn(store, PLAN, erased);
+	assert.equal(planned.code, 1);
+	assert.match(planned.text, /- erased\.sam@dev\.example\s+declared erased: an account, 1 mailbox, 2 rows, 0 objects — and they are taken out of every backup/);
+	const unapproved = await runOn(store, flags(), erased, vault);
+	assert.equal(unapproved.code, 1);
+	assert.match(unapproved.text, /- erased\.sam@dev\.example\s+declared erased — left in place \(--confirm-destroy removes it\)/);
+	assert.ok(state.accounts.some((account) => account.id === "u_sam") && !calls.some((call) => call.startsWith("eraseSubject")));
+
+	const applied = await runOn(store, flags({ confirmDestroy: true }), erased, vault);
+	assert.equal(applied.code, 0, applied.text);
+	assert.match(applied.text, /- erased\.sam@dev\.example\s+erased: 2 rows, 0 objects, 1 backup rewritten without them — declared erased/);
+	assert.deepEqual([state.accounts.map((account) => account.email), state.mailboxes.map((box) => box.id), state.access.map((grant) => grant.userId)], [["kim@dev.example"], ["mbx_kim", "mbx_office"], ["u_kim"]]);
+	const rewritten = parseBackup(state.objects.get(backupKey)!)!;
+	assert.deepEqual([holds(rewritten, [digestOf("sam@dev.example")]), rewritten.tables.users.map((row) => row.email), rewritten.tables.mailbox_access.map((row) => row.user_id), dangling(rewritten)], [[], ["kim@dev.example", "admin@instance.test"], ["u_kim"], []], "the backup is everyone else's, and still whole");
+	assert.deepEqual([vault.password("sam@dev.example"), vault.secret("apiKeys", "sam@dev.example/laptop"), vault.secret("apiKeys", "kim@dev.example/laptop")], [null, null, "ep_other"], "their login and keys leave the credentials folder; nobody else's do");
+	assert.equal((await runOn(store, PLAN, erased)).code, 0, "and the tombstone finds nothing more to do");
+
+	// A rewritten backup restores without them. A copy nobody rewrote brings them back - and the
+	// tombstone, kept as nothing but a digest, says so in the next plan.
+	await store.restoreBackup(state.objects.get(backupKey)!);
+	assert.equal((await runOn(store, PLAN, erased)).code, 0);
+	await store.restoreBackup(copy);
+	const digest: Spec = { ...left, erased: [digestOf("sam@dev.example")] };
+	const back = await runOn(store, PLAN, digest);
+	assert.match(back.text, /- erased\.sha256:[0-9a-f]{12}…\s+declared erased: an account/);
+	assert.ok(!back.text.includes("sam@"), "a tombstone that keeps no address prints none");
+	assert.equal((await runOn(store, flags({ confirmDestroy: true }), digest, vault)).code, 0);
+	assert.ok(!state.accounts.some((account) => account.email === "sam@dev.example"));
+});
+
+test("every backup in the bucket is cleaned: one with no record is found, and one that cannot be rewritten is deleted", async () => {
+	const { store, state } = fakeStore(PEOPLE);
+	await store.takeBackup();
+	// A restore replaces the app's records with older ones, so a backup can have none at all.
+	const orphan = "backups/database/bak_lost/mailflare.json";
+	state.objects.set(orphan, [...state.objects.values()][0]);
+	state.objects.set("backups/database/bak_bad/mailflare.json", "not a backup");
+	(state.tables.backups ??= []).push({ id: "bak_bad", status: "completed", r2_key: "backups/database/bak_bad/mailflare.json", size: 12, created_at: 9 });
+	state.objects.set("inbound/1.eml", "somebody's mail");
+
+	const done = await scrubBackups(store, { digests: [digestOf("sam@dev.example")] });
+	assert.deepEqual(done, { rewritten: 2, deleted: 1, clean: 0 });
+	assert.ok(holds(parseBackup(state.objects.get(orphan)!)!, [digestOf("sam@dev.example")]).length === 0, "the backup with no record was rewritten too");
+	assert.deepEqual([state.objects.has("backups/database/bak_bad/mailflare.json"), state.tables.backups.some((row) => row.id === "bak_bad")], [false, false], "what cannot be checked is deleted, with its record");
+	assert.ok(state.objects.has("inbound/1.eml"), "nothing but backups is touched");
+	assert.deepEqual(await scrubBackups(store, { digests: [digestOf("sam@dev.example")] }), { rewritten: 0, deleted: 0, clean: 2 }, "and a second pass finds them clean");
+});
+
+test("a backup is rewritten by the erasure scope, then by what the database itself would have done", () => {
+	const document = (): BackupDocument => ({
+		format: "mailflare-database-backup",
+		version: 1,
+		tables: {
+			users: [{ id: "u_admin", email: "root@a.test", created_by_user_id: null }, { id: "u_sam", email: "Sam@A.test", created_by_user_id: "u_admin" }, { id: "u_kim", email: "kim@a.test", created_by_user_id: "u_sam" }],
+			domains: [{ id: "d1", hostname: "a.test", user_id: "u_admin" }],
+			mailboxes: [{ id: "m_sam", user_id: "u_sam", domain_id: "d1" }, { id: "m_kim", user_id: "u_kim", domain_id: "d1" }, { id: "m_shared", user_id: "u_admin", domain_id: "d1" }],
+			mailbox_access: [{ id: "a1", mailbox_id: "m_shared", user_id: "u_sam", created_by_user_id: "u_admin" }, { id: "a2", mailbox_id: "m_shared", user_id: "u_kim", created_by_user_id: "u_sam" }],
+			messages: [{ id: "msg_sam", user_id: "u_sam", mailbox_id: "m_sam" }, { id: "msg_kim", user_id: "u_kim", mailbox_id: "m_kim" }],
+			message_attachments: [{ id: "att_sam", message_id: "msg_sam" }, { id: "att_kim", message_id: "msg_kim" }],
+			shared_attachment_links: [{ id: "l_sam", attachment_id: "att_sam" }, { id: "l_kim", attachment_id: "att_kim" }],
+			sessions: [{ id: "s_sam", user_id: "u_sam" }, { id: "s_kim", user_id: "u_kim" }],
+			push_subscriptions: [{ id: "p_sam", user_id: "u_sam", session_id: "s_sam" }, { id: "p_kim", user_id: "u_kim", session_id: "s_kim" }],
+			audit_logs: [{ id: "log1", actor_user_id: "u_admin", target_user_id: "u_sam", mailbox_id: null }, { id: "log2", actor_user_id: "u_admin", target_user_id: "u_kim", mailbox_id: null }],
+			backups: [{ id: "bak1", created_by_user_id: "u_sam" }],
+			drive_items: [{ id: "f_sam", owner_id: "u_sam" }, { id: "f_kim", owner_id: "u_kim" }],
+			drive_upload_parts: [{ item_id: "f_sam", part_number: 1 }, { item_id: "f_kim", part_number: 1 }],
+		},
+	});
+	const ids = (doc: BackupDocument, table: string) => doc.tables[table].map((row) => row.id ?? row.item_id);
+
+	const scrubbed = document();
+	assert.deepEqual(dangling(scrubbed), [], "the fixture is a consistent database");
+	const result = scrub(scrubbed, { digests: [digestOf("sam@a.test")] });
+	assert.equal(result.unsafe, undefined);
+	assert.equal(result.removed, 11);
+	for (const table of ["messages", "message_attachments", "shared_attachment_links", "sessions", "push_subscriptions", "drive_items", "drive_upload_parts"]) assert.equal(scrubbed.tables[table].length, 1, `${table}: theirs is gone and kim's is kept`);
+	assert.deepEqual([ids(scrubbed, "users"), ids(scrubbed, "mailboxes"), ids(scrubbed, "mailbox_access"), ids(scrubbed, "audit_logs")], [["u_admin", "u_kim"], ["m_kim", "m_shared"], ["a2"], ["log2"]]);
+	// What only mentioned them is kept, with the mention blanked - as the database does it.
+	assert.deepEqual([scrubbed.tables.users[1].created_by_user_id, scrubbed.tables.mailbox_access[0].created_by_user_id, scrubbed.tables.backups[0].created_by_user_id], [null, null, null]);
+	assert.deepEqual(dangling(scrubbed), [], "nothing left points at a row that is gone, so it restores");
+
+	// By ids known from the database, when the backup holds no account to find them by.
+	const byId = document();
+	byId.tables.users = byId.tables.users.filter((row) => row.id !== "u_sam");
+	assert.equal(scrub(byId, { digests: [digestOf("sam@a.test")] }).removed, 0, "an address finds nobody without the account");
+	assert.ok(scrub(byId, { userIds: ["u_sam"], mailboxIds: ["m_sam"] }).removed > 0);
+	assert.ok(!byId.tables.messages.some((row) => row.user_id === "u_sam"));
+
+	// Someone the backup shows owning a domain is not cut out of it: every mailbox on it would go.
+	assert.match(scrub(document(), { digests: [digestOf("root@a.test")] }).unsafe ?? "", /the owner of a\.test/);
+	assert.equal(scrub(document(), { digests: [digestOf("nobody@a.test")] }).removed, 0);
+	assert.equal(parseBackup('{"format":"something-else","version":1,"tables":{}}'), null);
+});
+
+test("a tombstone is an address or its digest, and nobody is both declared and erased", () => {
+	const digest = digestOf("sam@a.test");
+	assert.match(digest, /^sha256:[0-9a-f]{64}$/);
+	assert.deepEqual(tombstones({ domain: "A.test", erased: ["Sam", "sam@a.test", digest, "kim"] }).map((stone) => [stone.email, stone.label]), [["sam@a.test", "sam@a.test"], ["kim@a.test", "kim@a.test"]], "one person, however they are written");
+	assert.deepEqual(tombstones({ erased: [digest] }), [{ digest, email: null, label: `${digest.slice(0, 19)}…` }]);
+
+	assert.deepEqual(validateSpec({ domain: "a.test", erased: ["sam", "kim@a.test", digest] }), []);
+	assert.deepEqual(validateInstanceDocument({ erased: ["sam@elsewhere.test", digest] }), [], "the instance document takes any address");
+	for (const [spec, expected] of [
+		[{ domain: "a.test", erased: "sam" }, /erased: must be an array/],
+		[{ domain: "a.test", erased: ["sam@b.test"] }, /"sam@b.test" is not on a.test/],
+		[{ domain: "a.test", erased: ["sha256:abc"] }, /a digest is sha256: and 64 hex characters/],
+		[{ domain: "a.test", erased: ["not an address"] }, /is not a name on a.test/],
+		[{ erased: ["sam"] }, /"sam" needs its domain/],
+		[{ domain: "a.test", accounts: [{ username: "sam" }], erased: ["sam"] }, /sam@a.test is declared and erased — a person is one or the other/],
+		[{ domain: "a.test", accounts: [{ username: "Sam" }], erased: [digest] }, /sam@a.test is declared and erased/],
+	] as Array<[Spec, RegExp]>) assert.match(validateSpec(spec).join("\n"), expected);
+	// One document can erase whom another declares: a project checks them together.
+	assert.match(erasedAndDeclared([{ erased: [digest] }, { domain: "a.test", accounts: [{ username: "sam" }] }]).join("\n"), /sam@a.test is declared and erased/);
+	assert.match(erasedAndDeclared([{ fresh: { admin: { email: "root@a.test" } } }, { domain: "a.test", erased: ["root"] }]).join("\n"), /root@a.test is declared and erased/);
+	assert.deepEqual(erasedAndDeclared([{ domain: "a.test", accounts: [{ username: "kim" }], erased: ["sam"] }]), []);
+});
+
+test("a tenant leaving for good erases its people on destroy; otherwise they are disabled, or kept", async () => {
+	const tenant = (accounts?: "disable" | "erase" | "keep"): Spec => ({ domain: "dev.example", accounts: [{ username: "sam" }, { username: "kim" }], teardown: { ...(accounts ? { accounts } : {}), domain: "keep" } });
+	const kept = fakeStore(PEOPLE);
+	assert.match((await runOn(kept.store, DESTROY, tenant())).text, /· account\.sam\s+kept — teardown\.accounts is not "disable" or "erase"/);
+	const disabled = fakeStore(PEOPLE);
+	await runOn(disabled.store, DESTROY, tenant("disable"));
+	assert.deepEqual(disabled.state.accounts.map((account) => account.disabled), [true, true]);
+	assert.equal(disabled.state.mailboxes.length, 3, "disabled people keep their mailboxes");
+
+	const { store, state, calls } = fakeStore(PEOPLE);
+	await store.takeBackup();
+	assert.match((await runOn(store, flags({ cleanup: true, status: true }), tenant("erase"))).text, /- account\.kim\n\s+- account\.sam|- account\.sam\n\s+- account\.kim/);
+	const gone = await runOn(store, DESTROY, tenant("erase"));
+	assert.equal(gone.code, 0, gone.text);
+	assert.match(gone.text, /- account\.sam\s+erased: 2 rows, 0 objects, 1 backup rewritten without them/);
+	assert.deepEqual([state.accounts.length, state.mailboxes.map((box) => box.id)], [0, ["mbx_office"]]);
+	assert.deepEqual(calls.filter((call) => call.startsWith("eraseSubject")).sort(), ["eraseSubject:kim@dev.example", "eraseSubject:sam@dev.example"]);
+	assert.deepEqual(parseBackup([...state.objects.values()][0])!.tables.users.map((row) => row.email), ["admin@instance.test"], "and they are out of the backup");
+	assert.match(validateSpec({ domain: "a.test", teardown: { accounts: "delete" } }).join("\n"), /"delete" is not one of disable, erase, keep/);
+});
+
+test("the primary admin and a domain's owner cannot be erased: it is a problem in the plan, never attempted", async () => {
+	const { store, state, calls } = fakeStore({ ...PEOPLE, accounts: [...PEOPLE.accounts, { id: "u_admin", email: "admin@instance.test", role: "admin", isPrimaryAdmin: true }] });
+	const spec: Spec = { erased: ["admin@instance.test"] };
+	assert.match((await runOn(store, PLAN, spec)).text, /! erased\.admin@instance\.test\s+cannot be erased: is the primary admin/);
+	assert.equal((await runOn(store, flags({ confirmDestroy: true }), spec)).code, 1);
+	assert.ok(state.accounts.some((account) => account.id === "u_admin") && !calls.some((call) => call.startsWith("eraseSubject")));
+});
+
 test("push is a round trip rather than a state: declaring it runs the test, destroy clears the subscriptions", async () => {
 	const sent = fakeStore({ pushSubscriptions: 3 });
 	assert.equal((await runOn(sent.store, PLAN, { push: {} })).code, 1, "there is always a test to run");
@@ -767,14 +1024,17 @@ test("the data-center list says which country an answer came from, and every cou
 test("conformance holds: builds, converges, follows every kind of edit, leaves, and comes back", async () => {
 	const { deps, stores } = fleet();
 	const server = (name: string, domain: string) => ({ name, dir: "conformance", complete: true, server: { name, url: `https://${name}.example`, disposable: true }, entries: [
-		{ name: `${name}/instance`, spec: { license: { plan: "team" }, settings: { appName: "Conformance" }, fresh: { admin: { email: `root@${domain}` } } } as Spec },
+		{ name: `${name}/instance`, spec: { license: { plan: "team" }, settings: { appName: "Conformance" }, backups: { enabled: true, schedule: "daily", retentionDays: 14 }, fresh: { admin: { email: `root@${domain}` } } } as Spec },
 		{ name: `${name}/${domain}`, spec: { domain, onboard: { receivingProvider: "none" }, mailboxes: [{ role: "office" }], teardown: { accounts: "disable", domain: "remove" } } as Spec },
 	] });
 	const projects = [server("one", "one.example"), server("two", "two.example")];
 	const lines: string[] = [];
 	const code = await conform({ concurrency: 2, quick: false, load: () => projects }, deps, reporter((line) => lines.push(line)));
 	assert.equal(code, 0, lines.join("\n"));
-	assert.ok(lines.filter((line) => line.startsWith("  ✓")).length >= 20, "every property was checked");
+	assert.ok(lines.filter((line) => line.startsWith("  ✓")).length >= 24, "every property was checked");
+	for (const property of ["the current code is rolled out", "apply: every server exists", "plan: nothing to do", "add: the plan is the additions", "declared erased: the plan is that person", "erasing waits for approval", "erased, once approved", "destroy: everything declared"]) {
+		assert.ok(lines.some((line) => line.startsWith(`  ✓ ${property}`)), `"${property}" was not checked`);
+	}
 	assert.deepEqual([...stores.keys()].sort(), ["one", "two"], "each server through its own store");
 
 	// One of every kind of thing: the additions are everything a document can say.
@@ -806,14 +1066,15 @@ test("the command line: a target and a verb, in either order, and nothing ambigu
 
 	assert.equal(run("x", "plan", "--local").flags.url, process.env.MAILFLARE_URL ?? "http://localhost:3000", "--local means the dev server");
 	assert.equal(run("x", "plan").flags.url, undefined);
-	assert.deepEqual(run("subject", "Sam@Example.com", "destroy").command, { kind: "subject", email: "sam@example.com", action: "destroy" });
+	assert.deepEqual([run("subject", "Sam@Example.com").command, run("subject", "sam@example.com", "plan").command], [{ kind: "subject", email: "sam@example.com" }, { kind: "subject", email: "sam@example.com" }]);
+	assert.throws(() => run("subject", "sam@example.com", "destroy"), /erased by a document, not by a command/, "erasing is desired state: it has no command");
 	assert.deepEqual(run("router", "apply").command, { kind: "router", verb: "apply" });
 	assert.deepEqual([run("deploy").command, run("mailflare-eu", "deploy").command], [{ kind: "deploy", target: { kind: "all" } }, { kind: "deploy", target: { kind: "project", name: "mailflare-eu" } }]);
 	assert.deepEqual([run("logins").command, run("mailflare", "logins").command], [{ kind: "logins", project: undefined }, { kind: "logins", project: "mailflare" }]);
 	assert.deepEqual(run("colos").command, { kind: "colos" });
 	assert.deepEqual([run("apply", "--rotate-passwords").flags.rotatePasswords, run("apply").flags.rotatePasswords, run("apply").credentials], [true, false, "scripts/state/credentials"]);
 
-	for (const bad of [["mailflare"], ["reset"], ["mailflare", "frobnicate"], ["a", "plan", "b"], [], ["x", "plan", "--bogus"], ["x", "plan", "--concurrency", "abc"], ["subject"], ["subject", "sam@example.com", "nuke"], ["router"], ["router", "reset"], ["colos", "plan"]]) {
+	for (const bad of [["mailflare"], ["reset"], ["mailflare", "frobnicate"], ["a", "plan", "b"], [], ["x", "plan", "--bogus"], ["x", "plan", "--concurrency", "abc"], ["subject"], ["subject", "sam@example.com", "nuke"], ["subject", "sam@example.com", "destroy", "--confirm-destroy"], ["router"], ["router", "reset"], ["colos", "plan"]]) {
 		assert.throws(() => parseCli(bad), UsageError, `"${bad.join(" ")}" must be refused`);
 	}
 });
@@ -942,7 +1203,7 @@ test("the subject index: one predicate for the report and the erasure, children 
 	assert.equal(subjectPredicate("app_settings", "u1", [], quote), null);
 	assert.ok(depthOf("shared_attachment_links") > depthOf("message_attachments") && depthOf("message_attachments") > depthOf("messages"));
 
-	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], blockers: [], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }, { table: "ai_usage", rows: -1 }] };
+	const report = { email: "a@b.c", userId: "u1", mailboxIds: ["m1"], objects: 0, elsewhere: [], blockers: [], counts: [{ table: "messages", rows: 12 }, { table: "contacts", rows: 0 }, { table: "sessions", rows: 2 }, { table: "ai_usage", rows: -1 }] };
 	assert.equal(subjectTotal(report), 14, "unknown rows are never summed as data");
 	assert.deepEqual(subjectLines(report), ["      12  messages", "       2  sessions"]);
 	assert.deepEqual(subjectUnknown(report), ["ai_usage"]);

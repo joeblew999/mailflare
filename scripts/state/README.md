@@ -18,27 +18,33 @@ npx wrangler login
 npm run state:check                 # types + lint + unit tests, conformance on the in-memory store included
 
 # 1b. Before trusting a change with the fleet: the same conformance, on real Cloudflare.
-npm run state -- conform            # two disposable servers: built, edited, destroyed, rebuilt (~45 min)
+npm run state -- conform            # two disposable servers: built, edited, a person erased, destroyed, rebuilt (~20 min)
 npm run state -- conform --quick    # the same without the destroy and rebuild (~15 min)
 
 # 2. See what the fleet needs. Writes nothing.
 npm run state -- plan               # mailflare, mailflare-eu, and the router
 
 # 3. Make it so. Creates servers that do not exist yet (database, bucket and queues in their
-#    jurisdiction, the Worker, its secrets, its schema, its admin), reconciles every tenant,
-#    and publishes the router. It adds and changes on its own word; anything the plan marks
-#    `-` (deleted from a document) is only removed with --confirm-destroy.
+#    jurisdiction, the Worker, its secrets, its schema, its admin), takes each server's first
+#    backup, reconciles every tenant, and publishes the router. It adds and changes on its own
+#    word; anything the plan marks `-` is only removed with --confirm-destroy.
 npm run state -- apply
 
 # 4. Confirm. Exit 0 means every document on every server is reconciled…
 npm run state -- plan
 #    …and this, read-only, that every recorded login signs in, each server's data is where its
-#    document says, and the front door sends each domain to its own server.
+#    document says, its latest backup completed, nobody declared erased is on a server or in a
+#    backup of one, and the front door sends each domain to its own server.
 npm run state -- verify
 
 # 5. The logins and keys it created, to use and to hand out.
 ls scripts/state/credentials/       # one file per server, and one per person; never committed
 npm run state -- logins             # every person's login as JSON, ready to send each of them
+
+# 6. When someone must be erased (a takedown). Taking them out of the JSON only disables them.
+npm run state -- subject sam@acme.de        # where they are, on every server, and what to write
+#    …write them under "erased" in a document of that server, then steps 2 and 4, and between them:
+npm run state -- apply --confirm-destroy    # their account, mail and files — and out of every backup
 ```
 
 Run it again any time: every step is idempotent, and one that stopped half way is finished
@@ -47,7 +53,7 @@ rolls it out to every server before step 2. Add `--concurrency 8` to steps 2-4 t
 in parallel. `npm run state -- apply --rotate-passwords` gives every declared account a new
 password and every declared key a new secret, for when the folder must hold all of them.
 
-**The fleet today** (last run: 6 of 6 documents reconciled, every recorded login signs in):
+**The fleet today** (last run: 6 of 6 documents reconciled, every recorded login signs in, each server's latest backup completed):
 
 | Server | Jurisdiction | Origin | Domains |
 |---|---|---|---|
@@ -75,15 +81,17 @@ is not met says so.
 | 3 | Works on every spec | every project loads and validates in the unit tests | `state:check`; `verify` on the live fleet |
 | 4 | A fleet: many servers at once | each project runs against its own server through its own store and key, with one shared `--concurrency` limit ([fleet.ts](fleet.ts)) | conformance runs two real servers at once; the live fleet at `--concurrency 4` |
 | 5 | Hundreds of servers, easily | a server is a folder; its Worker, database, bucket and queues are named after it and created by `apply` ([deploy.ts](deploy.ts)) | conformance: built from their folders, destroyed, and built again |
-| 6 | GDPR: data stays in its jurisdiction, and a server runs in an exact country | `server.json` declares `jurisdiction` (database, bucket, Durable Objects) and `country` (the Worker is placed there) | conformance and `verify` ask Cloudflare: database and bucket in `eu`, the Worker placed as declared, and the data center that answered is in the declared country ([colos.json](colos.json)). Limits under Outstanding |
+| 6 | GDPR: data stays in its jurisdiction, and a server runs in a chosen country | `server.json` declares `jurisdiction` (database, bucket, Durable Objects: a guarantee) and `country` (the Worker is placed there: a hint Cloudflare applies some minutes after a deploy) | conformance and `verify` ask Cloudflare: database and bucket in `eu`, the placement set as declared — and, as a fact, that the data center which answered is in that country ([colos.json](colos.json)). Limits under Outstanding |
 | 6a | A tenant lives on a server that is home to its country | a tenant's `country` must be one its server `serves`; someone new is suggested the server for their country | unit: a tenant on the wrong server is refused at load. Conformance and `verify`: the router's suggestion per country |
 | 7 | A person is always sent to their home server, wherever they are | routing is by identity, never geography: a domain's mail is delivered to its own server's Worker, and the router sends a sign-in to the server holding the domain ([router.ts](router.ts)) | conformance: a router across two servers sends each domain home; `verify` asks the fleet's own |
 | 8 | Every aspect is controlled: administration, mail, calendar, drive, integrations | licence, settings, backups; signatures, auto-replies, aliases, folders, inbox rules, the assistant; preferences, templates, contacts, booking pages, events, drive folders, API keys, webhooks | conformance: each is added, then read back from the deployed app signed in as the person |
 | 9 | Mail really flows | — | conformance: messages put on the real inbound queue arrive in a mailbox, through an alias, filed by a rule, stored or turned away by a domain rule; the webhook is called |
 | 10 | Every user name and password comes out, as JSON to send each person | [credentials/](credentials/): one file per server and one per person; `npm run state -- logins` | conformance and `verify`: every recorded login signs in |
 | 11 | Each spec has small, medium and large things to try | `_sandbox` and `example` hold three tenants of increasing size | unit: project sizes |
-| 12 | Destructive actions need approval | `destroy`, `reset`, `subject … destroy` and removals are previews until `--confirm-destroy` | conformance: each is refused first, then approved |
-| 13 | A person's data can be found and erased | `subject <email> plan|destroy`, fleet-wide, held to the real schema by a test | conformance: a real erasure, their mail deleted from the bucket; the domain owner refused |
+| 12 | Destructive actions need approval | `destroy`, `reset`, erasures and removals are previews until `--confirm-destroy` | conformance: each is refused first, then approved |
+| 13 | A person's data can be found | `subject <email>`: on every server, their rows by table, their objects, the backups holding them, and what other people's data names them | unit: the scope covers the real schema, every table classified |
+| 16 | A takedown erases a person everywhere this system keeps them, backups included, and it lasts | a document's `erased` list: account, mailboxes (through the app, so Cloudflare stops routing to them), rows, objects, and every backup in the bucket rewritten without them. The entry is a tombstone, checked on every run | conformance, on real servers: gone from the database, the bucket and every backup; the rewritten backup **restores**; a copy that still held them, restored, is found by the digest alone and erased again. `verify` checks every tombstone against every backup |
+| 17 | Backups are provisioned, and proven to work | `backups` in `instance.json`; the first is taken as the server is provisioned, so one that cannot be made fails the `apply` | conformance: a backup is taken, read, rewritten and restored. `verify`: each server's latest backup completed, and is not old |
 | 14 | It can be changed and improved without fear | conformance is part of the CLI and runs the same properties on real servers and on the in-memory store ([conform.ts](conform.ts)) | see Verifying |
 | 15 | Lean, and this file says how to run all of it | you are reading it | — |
 
@@ -104,8 +112,7 @@ npm run state -- conform [--quick]            # does it all still work? on real,
 npm run state -- deploy                       # roll the current code out to every server
 npm run state -- router plan|apply|destroy    # the front door alone
 npm run state -- logins                       # every login on record, as JSON (or: <project> logins)
-npm run state -- subject <email> plan         # where one person's data lives, on every server
-npm run state -- subject <email> destroy --confirm-destroy
+npm run state -- subject <email>              # where one person's data is, on every server, and how to erase them
 npm run state -- colos                        # pull Cloudflare's data-center list again
 ```
 
@@ -122,7 +129,7 @@ wants it and 1 when it is not, so a plan with work to do exits 1.
 | `--local` | the local dev instance, never a deployed one |
 | `--db <name>` / `--url <base>` | override the server document |
 | `--confirm-mx` | onboard a domain whose mail someone else receives |
-| `--confirm-destroy` | actually destroy, reset, erase, or remove what a document no longer holds; without it you get the plan |
+| `--confirm-destroy` | actually destroy, reset, erase whom a document declares erased, or remove what it no longer holds; without it you get the plan |
 | `--source-changes` | what this system needs from `src/`, and what it changed there |
 | `--steps` | the Web Push (VAPID) key-rotation runbook |
 
@@ -167,7 +174,8 @@ run; files starting with `_` are drafts. Everything is validated before anything
                                "models": ["gpt-4o-mini"], "apiKeyEnv": "OPENAI_API_KEY" },
                 "resendApiKeyEnv": "RESEND_API_KEY",
                 "aws": { "accessKeyIdEnv": "AWS_ACCESS_KEY_ID", "secretAccessKeyEnv": "AWS_SECRET_ACCESS_KEY", "region": "eu-west-1" } },
-  "backups":  { "enabled": true, "schedule": "weekly", "scheduleValue": 1, "retentionDays": 30, "exclude": ["assistant"] },
+  "backups":  { "enabled": true, "schedule": "daily", "retentionDays": 30 },   // see Backups, below
+  "erased":   ["sha256:9f86d0…"],                     // people who must not exist here: see Removing a person
   "push":     { "to": "you@example.com" },            // not a state: declaring it runs the round trip
   "fresh":    { "admin": { "email": "admin@acme.de" } },  // the primary admin of an empty or reset instance
   "admin":    { "preferences": { "timeZone": "Europe/Berlin" },   // the primary admin's own settings:
@@ -188,6 +196,7 @@ Nothing is recorded locally. Every run reads the servers and compares them with 
 | add an entry | `+` | creates it |
 | change a field | `~` | updates it in place |
 | delete an entry | `-` | removes it, with `--confirm-destroy`; without, it is left and the run exits 1 |
+| write someone under `erased` | `-` | erases them, with `--confirm-destroy`: see [Removing a person, and erasing one](#removing-a-person-and-erasing-one) |
 
 **A section you write is complete; a section you leave out is not managed.** So:
 
@@ -195,8 +204,8 @@ Nothing is recorded locally. Every run reads the servers and compares them with 
   An account's own mailbox belongs to the account, not to this section.
 - a mailbox with an `access` list: any other grant on it is revoked. `"access": []` means none;
   no `access` key means "not managed".
-- `accounts` present: anyone else with a login on the domain is disabled — the app cannot
-  delete a user — and their mailbox and mail are kept. Never the primary admin.
+- `accounts` present: anyone else with a login on the domain is **disabled**, and their mailbox,
+  mail and files are kept. Never the primary admin. Deleting a person is `erased`, not this.
 - `routing` present: any other domain rule is removed.
 - `mcpKeys` in any document of the project: a key no document names is removed. This one is
   checked only when the whole project is run, because one document cannot speak for the others.
@@ -239,6 +248,7 @@ password only changes with `--rotate-passwords`.
   "routing":   [ { "pattern": "*", "action": "forward", "forwardTo": "ops@example.com", "keepCopy": true, "mailbox": "support" },
                  { "pattern": "no-reply", "action": "reject", "rejectReason": "No such user" } ],
   "mcpKeys":   [ { "name": "acme-agent", "mailboxes": ["support"], "scopes": ["mcp:read", "mcp:draft"] } ],
+  "erased":    ["kim"],            // kim@acme.de must not exist here; or "sha256:…" to keep no address
   "teardown":  { "accounts": "disable", "domain": "remove" }
 }
 ```
@@ -277,6 +287,98 @@ taken from, whatever the document says.
   Key names are instance-wide.
 - `onboard` applies when the domain is first added. `teardown` says what `destroy` does to
   what it cannot simply delete; the default is to keep the domain and the accounts.
+  `"accounts": "disable"` disables them and keeps what is theirs; `"accounts": "erase"` is a
+  tenant leaving for good — each of its people is erased as `erased` would erase them, backups
+  included, before the domain goes.
+- A mailbox that is removed takes its mail with it: the rows, and each message's bytes in the bucket.
+
+## Removing a person, and erasing one
+
+Two different things. The documents say which.
+
+| You | What happens | Undone by |
+|---|---|---|
+| take them out of `accounts` | the account is **disabled**: they cannot sign in. Their mailbox, mail, files and keys stay exactly where they were | putting them back |
+| write them under `erased` | they are **erased**, as below | nothing |
+
+So deleting someone from the JSON deletes nothing of theirs, and the plan says so on the line:
+``- account.sam  not in the document: it is disabled, and its mail and files are kept — `erased` is what deletes a person``.
+
+### A takedown
+
+```bash
+npm run state -- subject sam@acme.de                    # 1. where they are, on every server, and what stands in the way
+# 2. in that server's <domain>.json: take them out of "accounts", and add  "erased": ["sam"]
+npm run state -- mailflare-eu plan                      # 3. the diff, below
+npm run state -- mailflare-eu apply --confirm-destroy   # 4. without the flag, it is left and the run exits 1
+npm run state -- verify                                 # 5. nobody declared erased is on a server, or in a backup of one
+```
+
+```
+- erased.sam@acme.de  declared erased: an account, 1 mailbox, 412 rows, 37 objects — and they are taken out of every backup
+```
+
+Step 4 does this, in this order, so that a run which stops is finished by running it again:
+
+1. **Every backup in the bucket is read**, whether or not the app still has a record of it. One
+   that holds them is rewritten without them — by the same scope as the database, then by
+   what the database itself would have removed or blanked, so that it still restores. One
+   that cannot be read, or that shows them owning a domain, is deleted: a backup nobody can
+   check is one that may hold them.
+2. **Their objects** — raw mail, attachments, drive files, avatars — are deleted from the bucket.
+   If any cannot be, it stops here with nothing else changed.
+3. **Their rows**, in every table that names them or a mailbox of theirs
+   ([subject-scope.ts](subject-scope.ts), which a test holds to the app's schema).
+4. **Their mailboxes**, through the app, which takes each address out of Cloudflare Email Routing.
+5. **Their account**, last. Then any backup taken while this ran is rewritten too, and their
+   login and keys leave the credentials folder.
+
+An entry of `erased` is an address, a name on the tenant's domain, or `sha256:` and the digest
+of the address — which `subject` prints, for when the document must not keep the address
+either. `instance.json` may hold entries too, for any address. A person both declared and
+erased is refused before anything runs.
+
+**The entry is a tombstone: leave it there.** It is checked on every run. If a restore brings
+them back — from a copy of a backup this system never reached, or Cloudflare's own recovery —
+the next `plan` says `- erased.…` again and `verify` fails until it is applied. That is what
+makes an erasure last, and it needs no more than the digest. Take it out only when no copy of
+anything from before the takedown can still exist.
+
+A whole tenant is taken down by its own document: `"teardown": { "accounts": "erase", "domain":
+"remove" }`, then `npm run state -- <server>/<domain>.json destroy --confirm-destroy`. Its
+shared mailboxes go with their mail, each person is erased, and the domain is removed. If a
+restore ever brings the tenant back, the next plan says `? domain.<name>  on the server, and
+no document declares it`.
+
+### What a takedown does not reach
+
+| | Why | So |
+|---|---|---|
+| Cloudflare's point-in-time recovery of the database | D1 keeps every database restorable to any minute of the last 30 days, and it cannot be shortened | it ages out by itself; the tombstone erases them again after any such restore |
+| The Worker's logs | log lines name addresses, and Cloudflare keeps them for some days (`observability` is on in `wrangler.jsonc`) | they age out by themselves |
+| What other people hold that names them | mail they sent, a contact in someone's address book: those are the other person's | `subject` counts them, so nobody is surprised |
+| Copies that have left | a webhook receiver, a forwarding address, a backup someone downloaded | outside this system; a restore of such a backup is caught by the tombstone |
+| Mail that arrives for them afterwards | their address is now one nobody has: a catch-all rule sends it where it says, and otherwise it is dropped, leaving nothing in the bucket | to refuse it instead, declare a `reject` rule for the address under `routing` |
+| The primary admin, and whoever owns a domain | deleting them would delete every mailbox on it | a `!` in the plan; tear the tenant down instead |
+| `ai_usage` | the table has no column saying whose a row is | see `--source-changes` |
+| The documents | a name in a JSON file, and in the history of the repository it is committed to | write the digest, not the address |
+
+### Backups
+
+`backups` in `instance.json` switches the app's own backups on: `schedule` (`daily`, or
+`weekly`/`monthly` with a `scheduleValue`), and `retentionDays` (`null` keeps them all).
+
+- **The first is taken as the server is provisioned** — `+ backups.first` — not at the next
+  02:00 UTC. A server whose backups cannot be made fails its `apply`, instead of being found
+  out on the day one is needed. `verify` then checks that the latest completed and is not old.
+- A backup is one JSON object in the server's own bucket, `backups/database/<id>/…json`, so it
+  is in the server's jurisdiction. It holds every row, password hashes and provider secrets
+  included, unencrypted.
+- It is the database, **not the bucket**: message text is in it, raw mail, attachments and
+  drive files are not, and nothing else backs those up.
+- `exclude` leaves table groups out, and the app will not restore a backup that leaves any
+  out. It is for exports, not for recovery.
+- `destroy` never deletes a backup.
 
 ## A new server
 
@@ -313,7 +415,7 @@ are, never by where they happen to be. Three things say where "there" is:
 
 | In `server.json` | Decides | How | Strength |
 |---|---|---|---|
-| `country` | where the Worker **runs** | a placement hint: Cloudflare runs it in the data center nearest a cloud region in that country (`de` → `aws:eu-central-1`, Frankfurt) | exact, and checked: every response carries `cf-placement`, naming the data center that answered, and `verify` fails when that data center is in another country |
+| `country` | where the Worker **runs** | a placement hint: Cloudflare runs it in the data center nearest a cloud region in that country (`de` → `aws:eu-central-1`, Frankfurt) | a hint, and checked as a fact: every response of a placed Worker carries `cf-placement`, naming the data center that answered. `verify` fails when that is in another country, or when a server deployed more than half an hour ago is not placed at all |
 | `jurisdiction` | where the data is **kept** | the database and bucket are created in it; the Durable Objects are pinned to it | a guarantee, for `eu` and `fedramp` |
 | `serves` | whose tenants are **at home** here | a tenant's `country` must be one the server serves, or the documents are refused before anything runs | checked at load |
 
@@ -324,7 +426,13 @@ refuses a `country` Cloudflare has no data center in before anything runs. Cloud
 data centers; when one answers that the list has not heard of, the check says so, and
 `npm run state -- colos` pulls the list again and prints what changed.
 
-So a server can run in an exact country, on any plan, with nothing Enterprise. Changing
+**Placement is not immediate.** After every deploy Cloudflare runs the Worker wherever a
+request arrives until it has placed it: seen here, under four minutes for two servers placed
+in Frankfurt, and between four and ten for one placed in London. `verify` says which is true right now —
+`– it answers from GB (not checked: Cloudflare has not placed it yet — it was deployed 6
+minute(s) ago…)` — so run it again before relying on it.
+
+So a server can run in a chosen country, on any plan, with nothing Enterprise. Changing
 `country` or `placement` on a server that exists is a plan line of its own —
 `~ server mailflare-eu: it runs wherever a request arrives, not beside aws:eu-central-1` — and
 `apply` deploys it again.
@@ -390,13 +498,15 @@ driver.ts           one document: the walk, and the plan
 document.ts         loading and validating projects
 spec.ts             the document model       validate.ts   checking documents against it
 resources/          one file per capability, plus registry.ts (the order);
-                    collection.ts reconciles any list, people.ts uses it for mail, calendar and drive
+                    collection.ts reconciles any list, people.ts uses it for mail, calendar and drive,
+                    erased.ts is the takedown
 store/              types.ts (the seam), live.ts (the only SQL)
 deploy.ts           creating and removing a server
 router.ts           the front door           router/worker.js   the Worker itself
 colos.ts            which country a data center is in     colos.json   the saved list
 vault.ts            the credentials folder
-subject-scope.ts    where a person's data lives
+subject-scope.ts    where a person's data lives, and how one is named once erased
+backup.ts           reading a backup, and taking a person out of one so that it still restores
 src-changes.ts      what this system needs from src/
 wrangler.ts         wrangler, the Cloudflare API, the app's HTTP API
 ```
@@ -413,8 +523,9 @@ wrangler.ts         wrangler, the Cloudflare API, the app's HTTP API
 - **A failure is never an empty answer.** A list that cannot be read stops the document;
   it is not "nothing exists".
 - **`src/` is the product.** It is driven from outside, through its API and its database.
-  The three places the fleet needed a change there are listed by `--source-changes`, and a
-  test fails if one is reverted.
+  The places it needed a change there — three for the fleet, and two faults that had to be
+  fixed (backups that aborted, mail for nobody kept forever) — are listed by
+  `--source-changes`, and a test fails if one is reverted.
 - **The order in `registry.ts` is load-bearing.** Read its comment before moving anything.
 
 ## Verifying, and changing this tool
@@ -426,6 +537,7 @@ Conformance is part of the CLI, and it is one set of properties ([conform.ts](co
 | **builds** | `apply` creates each server from its folder; `reset` is refused unconfirmed, then wipes and rebuilds from the documents |
 | **converges** | after an apply a plan finds nothing to do, and a second apply writes nothing |
 | **follows an edit** | one of *every kind of thing* is added, then changed, then removed. Each time the plan must say **exactly** that — a line missing or a line extra fails — and a removal must wait for approval |
+| **forgets** | a person is declared erased: the plan says exactly that, it waits for approval, and then they are gone from the database, the bucket and every backup. The rewritten backup is restored. A copy that still held them is restored, and the plan finds them again from the digest alone |
 | **leaves** | `destroy` is refused unconfirmed, then takes everything declared and the server itself; `apply` builds it again |
 
 The edits are the suite's own entries (`zz-conform…`), added to whatever a project's documents
@@ -437,15 +549,16 @@ The same code runs in three places:
 | | `npm run state:check` | `npm run state -- _sandbox conform` | `npm run state -- conform` |
 |---|---|---|---|
 | Runs the properties on | the in-memory store | the real app, on `npm run dev` | two real Cloudflare servers, at once |
-| Takes | under a minute | ~10 minutes | ~45 minutes; ~15 with `--quick` (no destroy and rebuild) |
+| Takes | under a minute | ~10 minutes | ~20 minutes; ~15 with `--quick` (no destroy and rebuild) |
 | Run it | after every change | to try a change against the app with no Cloudflare | before trusting a change with the fleet |
 | Also | types, lint, the safety rules, and the tests that hold this system to `src/` | the probes that need no Cloudflare | all the probes, below |
 
 On real servers the **probes** ([probes.ts](probes.ts)) ask what a plan cannot know:
 
 - Cloudflare itself: the database and bucket are in the jurisdiction declared; the Worker is
-  told its name and jurisdiction, is placed as declared and answers from a data center in its
-  country, and holds no Cloudflare token.
+  told its name and jurisdiction, its placement is set as declared, and it holds no
+  Cloudflare token. Asked last, because a redeployed Worker is not placed at once: each
+  server answers from a data center in its country.
 - The deployed app, signed in as the people: every generated login works; signatures, folders,
   inbox rules, templates, contacts, booking pages (and the public page), calendar, drive, API
   keys, the assistant and webhooks are all shown as written.
@@ -454,13 +567,24 @@ On real servers the **probes** ([probes.ts](probes.ts)) ask what a plan cannot k
 - Mail, through the real pipeline from the inbound queue on: delivered to a mailbox, through
   an alias, filed by an inbox rule, stored by one domain rule and turned away by another; the
   admin's webhook is called.
-- Erasure: a person is erased and their mail deleted from the bucket; the domain owner is refused.
+- Mail that is stored for nobody: it leaves nothing behind in the bucket.
+- Backups: one is taken as the server is built, and another on request; each completes, is
+  read back from the bucket, and holds what the database holds.
+- A takedown: before it, the person is merely disabled and a backup holds them. After it,
+  nothing of theirs is in the database, their mail is gone from the bucket, no backup holds
+  them, every backup is still whole, they cannot sign in and everyone else can. The rewritten
+  backup is restored over the live server and the documents still match it. A copy from before
+  is restored, the plan says they are back, and they are erased again. The domain's owner is refused.
 - The fleet: a router across both servers sends each domain home, then is removed.
 
 It ends by naming what it did **not** check, so a green run is never read as covering it: mail
-arriving through Cloudflare Email Routing itself and an account's forwarding address (both need
-a zone whose MX points at a server, and a conformance server is given no token so that it can
-touch none), the `fedramp` jurisdiction, and processing confined to a region.
+arriving through Cloudflare Email Routing itself, an account's forwarding address, and Email
+Routing no longer delivering to an erased address (all three need a zone whose MX points at a
+server, and a conformance server is given no token so that it can touch none); the `fedramp`
+jurisdiction; processing confined to a region; and Cloudflare's own 30-day recovery of a database.
+
+It starts by rolling the current code out to the servers it runs on. An `apply` does not do
+that, so without it conformance would be a verdict on whatever was deployed last.
 
 Conformance resets what it runs on, so it only runs on servers whose `server.json` says
 `"disposable": true`. `npm run state -- verify` is the read-only half for servers people use.
@@ -479,7 +603,8 @@ Conformance resets what it runs on, so it only runs on servers whose `server.jso
 
 Limits of the platform or the app. None is hidden by a green run.
 
-- **Placement is where a Worker's web requests run, not a legal boundary.** It covers the
+- **Placement is where a Worker's web requests run, not a legal boundary, and not at once.**
+  For some minutes after each deploy it has not been applied yet. Once applied, it covers the
   requests people and clients make; the handlers for incoming mail, queues and schedules run
   where Cloudflare starts them, static files are served from the nearest edge, and Queues have
   no jurisdiction (their messages carry references and envelope addresses, not bodies).
@@ -488,8 +613,22 @@ Limits of the platform or the app. None is hidden by a green run.
   product this system does not set up. The `eu` jurisdiction for data at rest is a guarantee.
 - A database or bucket can be pinned to the EU, not to one country: `country` places the
   Worker, and the data sits in the jurisdiction (or near the `region` hint).
-- Backup history cannot be erased per person; it needs crypto-shredding in the app.
-- `ai_usage` has no user column, so erasure cannot attribute its rows.
+- **An erasure cannot reach Cloudflare's own recovery of a database** (D1 keeps 30 days), a
+  copy of a backup that has left the bucket, or what a webhook or a forwarding address was
+  already sent. The tombstone erases a person again after any restore; the rest is outside.
+  The full list is under [What a takedown does not reach](#what-a-takedown-does-not-reach).
+- **A backup is the database only.** Raw mail, attachments and drive files live in the bucket
+  and nothing backs them up. A backup is unencrypted, and holds password hashes, TOTP secrets
+  and provider keys. It is restored by wiping every table and inserting, which is not atomic.
+- A restore replaces the app's record of its own backups, so backups made since are in the
+  bucket with no record: the app never lists or expires them. This system finds them by
+  listing the bucket; deleting them is by hand. See `--source-changes`.
+- Erasing and rewriting backups reach the bucket through Cloudflare. A server whose objects
+  are kept in Backblaze B2 or AWS S3 instead (`B2_*`, `S3_*`) is not supported for either.
+- The app cannot delete an account, so a person is erased in the database by a scope this
+  system keeps ([subject-scope.ts](subject-scope.ts)); a test fails when the schema gains a
+  table or a column it does not classify. `ai_usage` has no user column, so its rows cannot
+  be attributed to anyone.
 - A domain's providers, and a mailbox's kind, cannot be changed after creation through the
   key-authenticated API. Both are reported, never guessed at. See `--source-changes`.
 - `reset` empties the database but leaves the domains' Cloudflare DNS and Email Routing in

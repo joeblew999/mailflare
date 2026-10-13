@@ -18,7 +18,8 @@ export type Command =
 	| { kind: "help" }
 	| { kind: "source-changes" }
 	| { kind: "steps" }
-	| { kind: "subject"; email: string; action: "plan" | "destroy" }
+	/** Where one person's data is, on every server, and what erasing them would take. Read-only. */
+	| { kind: "subject"; email: string }
 	/** Does the system still do what it says? Run on disposable servers, which it resets. */
 	| { kind: "conform"; target: Target | null; quick: boolean }
 	/** The live fleet, read-only: logins sign in, data is where declared, the front door is right. */
@@ -115,15 +116,13 @@ export function parseCli(argv: string[] = process.argv.slice(2)): Cli {
 
 	const [first, second, third] = positionals;
 	if (first === "subject") {
-		// `subject <email> plan|destroy` - an operation on one person, not desired state.
-		if (!second || !second.includes("@")) throw new UsageError("subject needs an address: state subject <email> plan|destroy");
-		const action = third ?? "plan";
-		if (action !== "plan" && action !== "destroy") throw new UsageError(`unknown action "${action}" for a subject — use plan or destroy`);
+		// A report on one person. Erasing them is desired state: it is written in a document.
+		if (!second || !second.includes("@")) throw new UsageError("subject needs an address: state subject <email>");
+		if (third === "destroy") throw new UsageError(`a person is erased by a document, not by a command: write ${second} under "erased" and apply with --confirm-destroy (state subject ${second} says where, and what it will take)`);
+		if (third !== undefined && third !== "plan") throw new UsageError(`unexpected "${third}"`);
 		if (positionals.length > 3) throw new UsageError(`unexpected "${positionals[3]}"`);
-		flags.cleanup = action === "destroy";
-		// Unconfirmed, a destroy reports what it would remove.
-		flags.status = action === "plan" || !flags.confirmDestroy;
-		return cli({ kind: "subject", email: second.trim().toLowerCase(), action });
+		flags.status = true;
+		return cli({ kind: "subject", email: second.trim().toLowerCase() });
 	}
 
 	for (const word of ["conform", "verify"] as const) {
@@ -199,8 +198,7 @@ out is not managed.
   npm run state -- router apply                 the front door: each person to their home server
   npm run state -- logins                       every login on record, as JSON (or: <project> logins)
   npm run state -- colos                        pull Cloudflare's data-center list again (which country each is in)
-  npm run state -- subject <email> plan         where one person's data lives, fleet-wide
-  npm run state -- subject <email> destroy --confirm-destroy
+  npm run state -- subject <email>              where one person's data is, fleet-wide, and how to erase them
 
 The target is a project name, a folder, or a document. The verb is ${VERBS.join(", ")}.
 Everything else lives in the documents of a project folder:
@@ -208,6 +206,7 @@ Everything else lives in the documents of a project folder:
   server.json     the server: the country it runs in, whom it serves, its jurisdiction (or "local": true)
   instance.json   the instance: license, settings, backups, push, and fresh (its admin)
   <domain>.json   a tenant: onboard, mailboxes, accounts, routing, mcpKeys, teardown
+  either          erased: people who must not exist here — found, they are deleted, backups included
 
 Flags:
   --dir <path>            projects folder (default: ${PROJECTS_DIR})
@@ -219,8 +218,8 @@ Flags:
   --db <name>             the database, when not the server document's
   --url <base>            the origin, when not the server document's
   --confirm-mx            onboard a domain whose mail someone else receives
-  --confirm-destroy       actually destroy, reset, erase, or remove what a document no
-                          longer holds; without it you get the plan
+  --confirm-destroy       actually destroy, reset, erase whom a document declares erased,
+                          or remove what it no longer holds; without it you get the plan
   --source-changes        what this system needs from src/, and where
   --steps                 the Web Push (VAPID) key-rotation runbook
   -h, --help              this

@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { validateBody } from "./app";
-import { assertValid, validateInstanceDocument, validateServer, validateSpec, validateTenantDocument } from "./validate";
+import { assertValid, erasedAndDeclared, validateInstanceDocument, validateServer, validateSpec, validateTenantDocument } from "./validate";
 import type { Role, Server, Spec } from "./spec";
 
 /** Every project lives in its own folder: a server, an instance document, and its tenants. */
@@ -120,7 +120,9 @@ export function loadProject(name: string, base = PROJECTS_DIR): Project {
 		}
 		entries.push({ name: `${name}/${spec.domain ?? file}`, spec });
 	}
-	if (problems.length > 0) throw new Error(`project "${name}" is not valid:\n    ${problems.join("\n    ")}`);
+	// One document can erase someone another declares; each apply would make them and take them away.
+	problems.push(...erasedAndDeclared(entries.map((entry) => entry.spec)));
+	if (problems.length > 0) throw new Error(`project "${name}" is not valid:\n    ${[...new Set(problems)].join("\n    ")}`);
 	if (entries.length === 0) throw new Error(`${dir} holds no documents`);
 	return { name, dir: base, server, entries, complete: true };
 }

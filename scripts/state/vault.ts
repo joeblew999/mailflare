@@ -24,6 +24,8 @@ export type Vault = {
 	password(email: string): string | null;
 	recordLogin(email: string, login: { name: string; role: string; password: string }): void;
 	forgetLogin(email: string): void;
+	/** Everything on record for one person: their login, their API keys, their webhooks' secrets. */
+	forgetPerson(email: string): void;
 	recordKey(name: string, key: string): void;
 	forgetKey(name: string): void;
 	/** A personal API key, or a webhook's signing secret. */
@@ -51,6 +53,12 @@ function vault(where: string, data: Credentials, save: (changed?: { email: strin
 		},
 		forgetLogin(email) {
 			if (!(email in data.logins)) return;
+			delete data.logins[email];
+			save({ email, login: null });
+		},
+		forgetPerson(email) {
+			for (const name of Object.keys(data.apiKeys)) if (name.startsWith(`${email}/`)) delete data.apiKeys[name];
+			for (const name of Object.keys(data.webhooks)) if (name.startsWith(`${email} `)) delete data.webhooks[name];
 			delete data.logins[email];
 			save({ email, login: null });
 		},

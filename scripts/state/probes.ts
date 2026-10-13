@@ -4,11 +4,14 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { dangling, holds, parseBackup } from "./backup";
 import { COLOS_FILE, coloOf, countryOfColo } from "./colos";
 import { BOX, USER, type Report } from "./conform";
 import { workerSettings } from "./deploy";
 import { resolveInstance, type FleetDeps } from "./fleet";
+import { backupKeys } from "./resources/erased";
 import { fleetMap, router, type FleetMap } from "./router";
+import { digestOf, subjectTotal, tombstones } from "./subject-scope";
 import { cfApi, credential, sleep, workersDevUrl, wrangler } from "./wrangler";
 import type { Project } from "./document";
 import type { Flags } from "./flags";
@@ -16,12 +19,24 @@ import type { Flags } from "./flags";
 export type Probes = {
 	/** Is the data where the server's document says, and does the server hold only what it should? */
 	where(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Does the server answer from the country it declares - as a fact, whatever its settings say? */
+	placed(project: Project, deps: FleetDeps, report: Report): Promise<void>;
 	/** Every login on record signs in. */
 	logins(project: Project, deps: FleetDeps, report: Report): Promise<void>;
 	/** With one of everything added: the app shows it, the keys open it, mail reaches it. */
 	afterAdd(project: Project, deps: FleetDeps, report: Report): Promise<void>;
-	/** A person is erased, with their mail in the bucket. */
-	erase(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** A mailbox that was removed took its mail with it: from the database, and from the bucket. */
+	afterRemove(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Before a takedown: leaving the documents only disabled them, and a backup taken now holds them. */
+	beforeErase(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** After it: nothing of theirs in the database, the bucket or any backup - and the backups still restore. */
+	afterErase(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Restore the copy kept from before: what a backup this system could not reach would do. */
+	restoreCopy(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Read-only: the server's latest backup completed, and is not old. */
+	backups(project: Project, deps: FleetDeps, report: Report): Promise<void>;
+	/** Read-only: nobody a document declares erased is on the server, or in any of its backups. */
+	forgotten(project: Project, deps: FleetDeps, report: Report): Promise<void>;
 	/** A front door for these servers alone: deployed, asked, removed. */
 	fleet(projects: Project[], deps: FleetDeps, report: Report): Promise<void>;
 	/** The fleet's own front door sends each domain to the server its document is on. */
@@ -49,17 +64,28 @@ async function read(origin: string, cookie: string | null, path: string): Promis
 	return { status: response?.status ?? 0, text: response ? await response.text() : "no answer" };
 }
 
+// What a takedown is checked against afterwards: taken while the person was still there.
+type Before = { password: string | null; objectKeys: string[]; backupKey: string | null; copy: string | null };
+const before = new Map<string, Before>();
+/** The mail delivered to the mailbox conformance later removes: what must be gone once it has. */
+const delivered = new Map<string, { subjects: string[]; keys: string[] }>();
+const failed = (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) });
+/** How long after a deploy an unplaced Worker is "not yet", rather than "not". */
+const PLACING_MINUTES = 30;
+/** How old a backup may be before it says the schedule has stopped, in days. */
+const STALE: Record<string, number> = { daily: 2, weekly: 8, monthly: 32 };
+
 const tenantOf = (project: Project) => String(project.entries.find((entry) => entry.spec.domain)?.spec.domain ?? "").trim().toLowerCase();
 const adminOf = (project: Project) => project.entries.find((entry) => !entry.spec.domain)?.spec.fresh?.admin?.email?.trim().toLowerCase() ?? null;
 
 /**
  * Cloudflare names the data center that answered, by airport code: evidence of where the Worker
- * ran, whatever its settings say. Asked a few times, since a placement takes a moment to hold.
+ * ran, whatever its settings say. Asked for up to a minute.
  */
 async function answeredFrom(url: string, home: string): Promise<{ colo: string | null; country: string | null }> {
 	let seen: { colo: string | null; country: string | null } = { colo: null, country: null };
-	for (let attempt = 0; attempt < 3 && seen.country !== home; attempt += 1) {
-		if (attempt > 0) await sleep(2000);
+	for (let attempt = 0; attempt < 15 && seen.country !== home; attempt += 1) {
+		if (attempt > 0) await sleep(4000);
 		const colo = coloOf(await fetch(`${url}/login`, { redirect: "manual" }).then((response) => response.headers.get("cf-placement"), () => null));
 		seen = { colo, country: colo ? countryOfColo(colo) : null };
 	}
@@ -95,20 +121,28 @@ export const liveProbes: Probes = {
 		const { vars: said2, secrets } = settings;
 		// The default server is wrangler.jsonc as it stands; every other is told who and where it is.
 		if (deployment.generated) report.check("the Worker is told its own name and jurisdiction", said2.MAILFLARE_WORKER_NAME === deployment.worker && (said2.MAILFLARE_JURISDICTION ?? null) === (server.jurisdiction ?? null), JSON.stringify(said2));
-		if (deployment.placement) {
-			report.check(`the Worker is placed beside ${deployment.placement}`, settings.placement === deployment.placement, `Cloudflare says it is placed: ${settings.placement ?? "wherever a request arrives"}`);
-			if (server.country && instance.url) {
-				const home = server.country.toLowerCase();
-				const { colo, country } = await answeredFrom(instance.url, home);
-				const found = !colo ? "the answer named no data center (no cf-placement header)" : country ? `it answered from ${colo}, which is in ${country.toUpperCase()}` : `it answered from ${colo}, which ${COLOS_FILE} does not list — \`npm run state -- colos\` pulls the list again`;
-				report.check(`and it answers from ${home.toUpperCase()}${country === home ? ` (the data center ${colo})` : ""}`, country === home, found);
-			}
-		}
+		if (deployment.placement) report.check(`the Worker is placed beside ${deployment.placement}`, settings.placement === deployment.placement, `Cloudflare says it is placed: ${settings.placement ?? "wherever a request arrives"}`);
 		if (server.managesDns === false) {
 			report.check("it holds no Cloudflare token, so it can touch no zone", !secrets.includes("CF_TOKEN"), secrets.join(", "));
 			const domains = await deps.openStore(instance, (store) => store.listDomains()).catch(() => []);
 			report.check("its domains are recorded by hand, not provisioned", domains.every((domain) => domain.zoneId === "manual"), domains.map((domain) => `${domain.hostname}: ${domain.zoneId}`).join(", "));
 		}
+	},
+
+	async placed(project, deps, report) {
+		const server = project.server;
+		const { instance, deployment } = resolveInstance(project, RUN, deps.template());
+		if (!server?.country || !deployment?.placement || !instance.url || instance.local) return;
+		const home = server.country.toLowerCase();
+		const name = `${project.name}: it answers from ${home.toUpperCase()}`;
+		const { colo, country } = await answeredFrom(instance.url, home);
+		if (country === home) return void report.check(`${name} (the data center ${colo})`, true);
+		// A setting is not a fact. After a deploy Cloudflare runs a Worker wherever a request
+		// arrives until it has placed it, which takes minutes and is not the same for every region.
+		const deployedAt = (await workerSettings(deployment.worker))?.deployedAt;
+		const minutes = deployedAt ? Math.round((Date.now() - deployedAt) / 60_000) : null;
+		if (!colo && minutes !== null && minutes < PLACING_MINUTES) return report.skip(name, `Cloudflare has not placed it yet — it was deployed ${minutes} minute(s) ago, and until it is placed it runs wherever a request arrives`);
+		report.check(name, false, !colo ? "the answer named no data center (no cf-placement header): Cloudflare is not placing this Worker, so it runs wherever a request arrives" : country ? `it answered from ${colo}, which is in ${country.toUpperCase()}` : `it answered from ${colo}, which ${COLOS_FILE} does not list — \`npm run state -- colos\` pulls the list again`);
 	},
 
 	async logins(project, deps, report) {
@@ -205,6 +239,8 @@ export const liveProbes: Probes = {
 		}
 		rmSync(dir, { recursive: true, force: true });
 		if (!report.check(`${mail.length + 1} messages are handed to the server`, queued === mail.length + 1, `${queued} queued, on ${queue} (${queueId})`)) return;
+		const kept = mail.map((message, index) => ({ ...message, key: `inbound/${run}-${index}.eml` })).filter((message) => message.box === shared);
+		delivered.set(project.name, { subjects: kept.map((message) => message.subject), keys: kept.map((message) => message.key) });
 		const arrived = await deps.openStore(instance, async (store) => {
 			let rows: Array<Record<string, unknown>> = [];
 			for (let attempt = 0; attempt < 30 && rows.length < mail.length; attempt += 1) {
@@ -217,7 +253,7 @@ export const liveProbes: Probes = {
 				attempts = (await store.rows("webhook_deliveries", {})).length;
 				if (attempts === 0) await sleep(4000);
 			}
-			return { rows, folders, attempts, turnedAway: (await store.rows("messages", { subject: blocked.subject })).length === 0 };
+			return { rows, folders, attempts, turnedAway: (await store.rows("messages", { subject: blocked.subject })).length === 0, leftBehind: await store.readObject(`inbound/${run}-${mail.length}.eml`) };
 		});
 		for (const message of mail) {
 			const row = arrived.rows.find((entry) => entry.subject === message.subject);
@@ -225,29 +261,133 @@ export const liveProbes: Probes = {
 			report.check(message.proves, row?.mailbox_id === message.box && folder === message.folder, row ? `mailbox ${row.mailbox_id}, folder ${folder}` : "never arrived");
 		}
 		report.check("a reject rule turns mail away", arrived.turnedAway, "it was stored");
+		report.check("and mail that is stored for nobody leaves nothing in the bucket", arrived.leftBehind === null, "the raw message is still there, with no row pointing at it");
 		await shows("and the app shows the person their mail", cookie, `/api/messages?mailboxId=${own}`, [`${run} zz-own`]);
 		if (admin) report.check("the admin's webhook was called for mail in the admin's mailbox", arrived.attempts > 0, "no delivery attempt recorded");
 	},
 
-	async erase(project, deps, report) {
+	async afterRemove(project, deps, report) {
+		const { instance } = resolveInstance(project, RUN, deps.template());
+		const sent = delivered.get(project.name);
+		if (!sent) return;
+		const left = await deps.openStore(instance, async (store) => ({
+			rows: (await Promise.all(sent.subjects.map((subject) => store.rows("messages", { subject })))).flat().length,
+			objects: (await Promise.all(sent.keys.map((key) => store.readObject(key)))).filter((content) => content !== null).length,
+		})).catch(failed);
+		report.check(`${project.name}: a removed mailbox took its mail with it, from the database and the bucket (${sent.subjects.length} messages)`, !("error" in left) && left.rows === 0 && left.objects === 0, "error" in left ? left.error : `${left.rows} row(s) and ${left.objects} object(s) left behind`);
+	},
+
+	async beforeErase(project, deps, report) {
 		const { instance } = resolveInstance(project, RUN, deps.template());
 		const domain = tenantOf(project);
 		if (!instance.url || !domain) return;
 		const email = `${USER}@${domain}`;
-		report.section(`erasing a person (${project.name})`);
-		const result = await deps.openStore(instance, async (store) => {
-			const before = await store.subjectReport(email);
+		report.section(`before a takedown (${project.name})`);
+		const found = await deps.openStore(instance, async (store) => {
+			const person = await store.subjectReport(email);
 			const admin = adminOf(project);
 			const blocked = admin ? (await store.subjectReport(admin)).blockers : null;
-			const erased = before.userId ? await store.eraseSubject(email) : null;
-			return { before, blocked, erased, after: await store.subjectReport(email) };
-		}).catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
-		if ("error" in result) return void report.check("the person is erased", false, result.error);
-		report.check("the person's rows are found", !!result.before.userId && result.before.counts.some((count) => count.rows > 0), JSON.stringify(result.before.counts));
-		if (result.blocked) report.check("the admin who owns the domains cannot be erased", result.blocked.length > 0, "nothing stands in the way of erasing the admin");
-		report.check("they are erased, and nothing of theirs is left", !!result.erased && result.after.userId === null, JSON.stringify(result.after));
-		if (!instance.local) report.check("their mail is deleted from the bucket", !!result.erased && result.erased.objectKeys.length > 0 && result.erased.objectsDeleted === result.erased.objectKeys.length, `${result.erased?.objectsDeleted} of ${result.erased?.objectKeys.length} object(s)`);
-		deps.vault(project.server?.name ?? "documents").forgetLogin(email);
+			const objectKeys = person.userId ? (await store.rows("messages", { user_id: person.userId })).map((row) => row.raw_r2_key).filter((key) => key !== null && key !== undefined).map(String) : [];
+			const [backup] = await store.rows("backups", { id: await store.takeBackup() });
+			const backupKey = backup?.r2_key ? String(backup.r2_key) : null;
+			return { person, blocked, objectKeys, backup, backupKey, copy: backupKey ? await store.readObject(backupKey) : null };
+		}).catch(failed);
+		if ("error" in found) return void report.check("a backup is taken, and completes", false, found.error);
+		report.check("leaving the documents only disabled them: their account, mail and files are all still here", !!found.person.userId && subjectTotal(found.person) > 0, JSON.stringify(found.person.counts));
+		if (found.blocked) report.check("the admin who owns the domains cannot be erased", found.blocked.length > 0, "nothing stands in the way of erasing the admin");
+		report.check("a backup is taken, and completes", found.backup?.status === "completed" && !!found.copy, `status ${found.backup?.status}: ${found.backup?.error ?? "no object"}`);
+		const document = parseBackup(found.copy ?? "");
+		report.check("and it holds them, as every backup taken before a takedown does", !!document && holds(document, [digestOf(email)]).length === 1, document ? "the backup holds no account for them" : "the backup could not be read");
+		before.set(project.name, { password: deps.vault(project.server?.name ?? "documents").password(email), objectKeys: found.objectKeys, backupKey: found.backupKey, copy: found.copy });
+	},
+
+	async afterErase(project, deps, report) {
+		const { instance } = resolveInstance(project, RUN, deps.template());
+		const domain = tenantOf(project);
+		const was = before.get(project.name);
+		if (!instance.url || !domain || !was) return;
+		const origin = instance.url;
+		const email = `${USER}@${domain}`;
+		const admin = adminOf(project);
+		const vault = deps.vault(project.server?.name ?? "documents");
+		report.section(`after it (${project.name})`);
+		const found = await deps.openStore(instance, async (store) => {
+			const person = await store.subjectReport(email);
+			const left = (await Promise.all(was.objectKeys.map((key) => store.readObject(key)))).filter((content) => content !== null).length;
+			const contents = await Promise.all([...(await backupKeys(store)).keys()].map(async (key) => ({ key, content: await store.readObject(key) })));
+			return { person, left, contents };
+		}).catch(failed);
+		if ("error" in found) return void report.check("nothing of theirs is left in the database", false, found.error);
+		report.check("nothing of theirs is left in the database", found.person.userId === null, JSON.stringify(found.person.counts));
+		if (was.objectKeys.length === 0) report.skip("their mail is gone from the bucket", "no mail was delivered to them on this server");
+		else report.check(`their mail is gone from the bucket (${was.objectKeys.length} object${was.objectKeys.length === 1 ? "" : "s"})`, found.left === 0, `${found.left} of ${was.objectKeys.length} still there`);
+		const documents = found.contents.map((entry) => ({ key: entry.key, document: parseBackup(entry.content ?? "") }));
+		const holding = documents.filter((entry) => !entry.document || holds(entry.document, [digestOf(email)]).length > 0).map((entry) => entry.key);
+		report.check(`no backup holds them (${documents.length} in the bucket)`, documents.length > 0 && holding.length === 0, holding.join("\n"));
+		const broken = documents.flatMap((entry) => (entry.document ? dangling(entry.document).map((line) => `${entry.key}: ${line}`) : []));
+		report.check("and each is still everyone else's backup: nothing in it points at a row that is gone", broken.length === 0 && documents.every((entry) => (entry.document?.tables.users ?? []).length > 0), broken.join("\n"));
+		report.check("they cannot sign in", (await signIn(origin, email, was.password)) === null, "a session was given");
+		report.check("their login is gone from the credentials folder", vault.password(email) === null);
+		if (admin) report.check("everyone else still signs in", !!(await signIn(origin, admin, vault.password(admin))), `no session for ${admin}`);
+
+		// A backup that was rewritten has to remain a backup: it is restored, over the live server.
+		const rewritten = found.contents.find((entry) => entry.key === was.backupKey)?.content;
+		const restored = rewritten ? await deps.openStore(instance, async (store) => {
+			await store.restoreBackup(rewritten);
+			return { person: await store.subjectReport(email) };
+		}).catch(failed) : { error: "the backup taken before the takedown is not in the bucket" };
+		report.check("the backup that was rewritten restores", !("error" in restored), "error" in restored ? restored.error : "");
+		if ("error" in restored) return;
+		report.check("and they are not in what it brings back", restored.person.userId === null, JSON.stringify(restored.person.counts));
+		if (admin) report.check("and the restored server signs its admin in", !!(await signIn(origin, admin, vault.password(admin))), `no session for ${admin}`);
+	},
+
+	async restoreCopy(project, deps, report) {
+		const { instance } = resolveInstance(project, RUN, deps.template());
+		const domain = tenantOf(project);
+		const was = before.get(project.name);
+		if (!instance.url || !domain || !was?.copy) return;
+		const copy = was.copy;
+		report.section(`a copy from before the takedown, restored (${project.name})`);
+		const restored = await deps.openStore(instance, async (store) => {
+			await store.restoreBackup(copy);
+			return { person: await store.subjectReport(`${USER}@${domain}`) };
+		}).catch(failed);
+		report.check("a copy this system never rewrote restores, and they are back", !("error" in restored) && !!restored.person.userId, "error" in restored ? restored.error : "they did not come back");
+	},
+
+	async backups(project, deps, report) {
+		const { instance } = resolveInstance(project, RUN, deps.template());
+		if (!instance.url && !instance.local) return;
+		const found = await deps.openStore(instance, async (store) => ({ settings: (await store.rows("backup_settings", { id: "default" }))[0], rows: await store.rows("backups", {}) })).catch(failed);
+		if ("error" in found) return void report.check(`${project.name}: its backups can be read`, false, found.error);
+		if (!Number(found.settings?.enabled ?? 0)) return report.skip(`${project.name}: backups`, "they are off for this server");
+		const finished = found.rows.filter((row) => row.status === "completed" || row.status === "failed").sort((a, b) => Number(b.created_at) - Number(a.created_at));
+		const latest = finished[0];
+		const days = latest ? (Date.now() / 1000 - Number(latest.created_at)) / 86_400 : 0;
+		const allowed = STALE[String(found.settings?.schedule_type ?? "daily")] ?? 2;
+		report.check(`${project.name}: its latest backup completed${latest?.status === "completed" ? ` (${new Date(Number(latest.created_at) * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC)` : ""}`, latest?.status === "completed" && days <= allowed,
+			!latest ? "none has ever been taken — apply takes the first" : latest.status !== "completed" ? `it failed: ${latest.error}` : `it is ${Math.floor(days)} days old, and the schedule is ${found.settings?.schedule_type}`);
+	},
+
+	async forgotten(project, deps, report) {
+		const { instance } = resolveInstance(project, RUN, deps.template());
+		const stones = project.entries.flatMap((entry) => tombstones(entry.spec));
+		if (stones.length === 0 || (!instance.url && !instance.local)) return;
+		const digests = stones.map((stone) => stone.digest);
+		const found = await deps.openStore(instance, async (store) => {
+			const here = (await store.rows("users", {})).map((row) => digestOf(String(row.email ?? ""))).filter((digest) => digests.includes(digest));
+			const keys = [...(await backupKeys(store)).keys()];
+			const holding: string[] = [];
+			for (const key of keys) {
+				const document = parseBackup((await store.readObject(key)) ?? "");
+				if (!document || holds(document, digests).length > 0) holding.push(key);
+			}
+			return { here, keys, holding };
+		}).catch(failed);
+		if ("error" in found) return void report.check(`${project.name}: nobody declared erased is here`, false, found.error);
+		report.check(`${project.name}: nobody declared erased is here (${stones.length} declared)`, found.here.length === 0, `${found.here.length} of them have an account — apply with --confirm-destroy`);
+		report.check(`${project.name}: and no backup holds them (${found.keys.length} in the bucket)`, found.holding.length === 0, found.holding.join("\n"));
 	},
 
 	async fleet(projects, deps, report) {
@@ -307,5 +447,7 @@ export const liveProbes: Probes = {
 		report.skip("mail arriving through Cloudflare Email Routing, and an account's forwarding address", "needs a zone whose MX points at the server; a conformance server is given no Cloudflare token so that it can touch none");
 		report.skip("the fedramp jurisdiction", "needs a Cloudflare account entitled to it");
 		report.skip("a guarantee that nothing is processed outside a region", "placement puts a Worker's web requests in a country, not its mail, queue and schedule handlers; the guarantee is Cloudflare's Regional Services");
+		report.skip("Cloudflare Email Routing no longer delivering to an erased address", "needs a zone whose MX points at the server; the mailbox is deleted through the app, which removes the rule");
+		report.skip("the database's own point-in-time recovery", "Cloudflare keeps a D1 database restorable to any minute of the last 30 days, erased rows included; it ages out, and cannot be shortened from here");
 	},
 };

@@ -14,10 +14,7 @@
     "enabled": true,
     "schedule": "weekly",
     "scheduleValue": 1,
-    "retentionDays": 14,
-    "exclude": [
-      "assistant"
-    ]
+    "retentionDays": 14
   },
   "fresh": {
     "admin": {

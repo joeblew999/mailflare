@@ -2,14 +2,17 @@
 // same code as every other verb - against real servers (`npm run state -- conform`), and in
 // milliseconds against the in-memory store in the unit tests.
 //
-// A reconciler is right when four things hold, and they are checked in this order:
+// A reconciler is right when five things hold, and they are checked in this order:
 //   it BUILDS      a server from its folder, and a reset rebuilds it from nothing;
 //   it CONVERGES   after an apply, a plan finds nothing to do, and a second apply writes nothing;
 //   it FOLLOWS     an edit: add one of every kind of thing, change each, remove each - and
 //                  every time the plan says EXACTLY that, no more and no less;
+//   it FORGETS     a person declared erased is gone from the server, its bucket and every
+//                  backup, the backups still restore, and one that brings them back is found;
 //   it LEAVES      a destroy takes it all away, and an apply brings it back.
 // Around those, the probes ask the running app and Cloudflare what a plan cannot know.
-import { reconcile, type FleetDeps, type ProjectResult } from "./fleet";
+import { reconcile, resolveInstance, type FleetDeps, type ProjectResult } from "./fleet";
+import { digestOf, tombstones } from "./subject-scope";
 import { message } from "./wrangler";
 import type { Project, SpecEntry } from "./document";
 import type { Flags } from "./flags";
@@ -56,8 +59,12 @@ export const USER = "zz-conform-user";
 const HOOK = "https://hooks.conform.invalid/zz";
 const SYMBOL: Partial<Record<ChangeAction, string>> = { create: "+", update: "~", remove: "-", problem: "!" };
 
-/** The four edits of a project's documents, and exactly what a plan must say of each. */
-export type Rounds = Record<"add" | "change" | "empty" | "remove", { entries: SpecEntry[]; expects: string[] }>;
+/**
+ * The edits of a project's documents, and exactly what a plan must say of each. `erase` writes
+ * the person's address under `erased`; `again` keeps only the digest of it, which is what must
+ * find them when a backup brings them back.
+ */
+export type Rounds = Record<"add" | "change" | "empty" | "remove" | "erase" | "again", { entries: SpecEntry[]; expects: string[] }>;
 
 /** What the tenant holds in round `v`: everything a document can say, once. */
 function additions(domain: string, v: 1 | 2) {
@@ -122,6 +129,9 @@ export function rounds(project: Project): Rounds | null {
 		}),
 		// The entries go, and the sections stay written - so what they held is no longer declared.
 		remove: { ...spec, mailboxes: spec.mailboxes ?? [], accounts: spec.accounts ?? [], routing: spec.routing ?? [], mcpKeys: spec.mcpKeys ?? [] },
+		// Leaving a document only disables an account. Erasing is said: by address, or by its digest.
+		erase: { ...spec, erased: [...(spec.erased ?? []), user] },
+		again: { ...spec, erased: [...(spec.erased ?? []), digestOf(user)] },
 	};
 	const named = (entry: SpecEntry, lines: string[]) => lines.map((line) => `${entry.name}: ${line}`);
 	const expects: Record<keyof Rounds, string[]> = {
@@ -147,6 +157,8 @@ export function rounds(project: Project): Rounds | null {
 		]),
 		// A key no document names is found by the instance document, which speaks for the whole project.
 		remove: [...named(tenant, [`- mailbox.${box}`, `- account.${USER}`, "- routing.zz-blocked.reject", "- routing.zz-kept.store"]), ...(instance ? named(instance, ["- mcpKey.zz-conform"]) : [])],
+		erase: named(tenant, [`- erased.${user}`]),
+		again: named(tenant, [`- erased.${tombstones({ erased: [digestOf(user)] })[0].label}`]),
 	};
 
 	// The instance: a setting changed and put back, and a webhook added, changed and removed.
@@ -176,7 +188,7 @@ export function rounds(project: Project): Rounds | null {
 		entries: project.entries.map((entry) => (entry === tenant ? { ...entry, spec: tenants[name] } : entry === instance && instances[name] ? { ...entry, spec: instances[name]! } : entry)),
 		expects: expects[name].sort(),
 	});
-	return { add: round("add"), change: round("change"), empty: round("empty"), remove: round("remove") };
+	return { add: round("add"), change: round("change"), empty: round("empty"), remove: round("remove"), erase: round("erase"), again: round("again") };
 }
 
 // --- the properties ---------------------------------------------------------------------
@@ -231,6 +243,16 @@ export async function conform(options: ConformOptions, deps: FleetDeps, report: 
 	};
 
 	report.section(`build (${projects.map((project) => project.name).join(", ")})`);
+	// A server that is already there runs whatever was last rolled out to it, and an apply does
+	// not change that. Conformance is of THIS code, so it goes out first.
+	const standing = projects.filter((project) => project.server?.url && !project.server.local);
+	transcript.length = 0;
+	let rolled = 0;
+	for (const project of standing) {
+		const { deployment } = resolveInstance(project, { flags: BASE, concurrency: 1, explicit: { url: false, db: false } }, deps.template());
+		if (deployment && (await deps.deploy(project.server!, deployment, { base: project.dir, dryRun: false, print: quiet.print, template: deps.template() }).catch(() => null))) rolled += 1;
+	}
+	if (standing.length > 0 && !report.check(`the current code is rolled out to the servers already standing (${standing.length})`, rolled === standing.length, said())) return finish();
 	if (!report.check("apply: every server exists, with its documents applied", allOk(await go({})), said())) return finish();
 	projects = options.load();
 	const preview = await go({ fresh: true, status: true });
@@ -263,10 +285,33 @@ export async function conform(options: ConformOptions, deps: FleetDeps, report: 
 	const remove = edited("remove");
 	exactly("remove an entry: the plan is the removals, and nothing else", await go({ status: true }, remove.target), remove.expects);
 	report.check("remove an entry: applied", allOk(await go({ confirmDestroy: true }, remove.target)), said());
+	if (options.probes) for (const project of projects) await options.probes.afterRemove(project, deps, report);
 	exactly("and the original documents find nothing to do", await go({ status: true }), []);
+
+	// Leaving the documents disabled the person and kept everything of theirs. A takedown is said.
+	if (options.probes) for (const project of projects) await options.probes.beforeErase(project, deps, report);
+	report.section("takedown (a person is declared erased; the plan must say exactly that)");
+	const erase = edited("erase");
+	exactly("declared erased: the plan is that person, and nothing else", await go({ status: true }, erase.target), erase.expects);
+	const waits = await go({}, erase.target);
+	report.check("erasing waits for approval: an apply leaves them in place", !allOk(waits) && documents(waits).some((document) => document.pending) && !work(waits).some((line) => line.includes(": - ")), said());
+	report.check("erased, once approved", allOk(await go({ confirmDestroy: true }, erase.target)), said());
+	exactly("and the plan finds nothing more to do", await go({ status: true }, erase.target), []);
 	if (options.probes) {
-		for (const project of projects) await options.probes.erase(project, deps, report);
+		for (const project of projects) await options.probes.afterErase(project, deps, report);
+		exactly("the restored server is as its documents say, without them", await go({ status: true }, erase.target), []);
+		// A backup this system never reached - a copy on someone's laptop - would bring them back.
+		// The tombstone is what catches it, and it needs no more than the digest of their address.
+		for (const project of projects) await options.probes.restoreCopy(project, deps, report);
+		const again = edited("again");
+		exactly("the plan says they are back, from the digest alone", await go({ status: true }, again.target), again.expects);
+		report.check("and they are erased again", allOk(await go({ confirmDestroy: true }, again.target)), said());
+		exactly("after which there is nothing to do", await go({ status: true }, again.target), []);
+		for (const project of projects) await options.probes.logins(project, deps, report);
 		await options.probes.fleet(projects, deps, report);
+		// Asked last: a server that was just redeployed is not placed in its country at once.
+		report.section("where each server answers from");
+		for (const project of projects) await options.probes.placed(project, deps, report);
 	}
 
 	if (options.quick) report.skip("destroy, and building again", "--quick leaves every server standing");
@@ -290,8 +335,9 @@ export async function conform(options: ConformOptions, deps: FleetDeps, report: 
 
 /**
  * VERIFY: the live fleet, read-only. What a plan cannot say about servers people use - that the
- * logins written down still sign in, that the data is where the documents say, and that the
- * front door sends each domain home. It changes nothing.
+ * logins written down still sign in, that the data is where the documents say, that the latest
+ * backup completed, that nobody declared erased is on a server or in a backup of it, and that
+ * the front door sends each domain home. It changes nothing.
  */
 export async function verify(projects: Project[], concurrency: number, deps: FleetDeps, probes: Probes, report: Report = reporter(deps.print)): Promise<number> {
 	const transcript: string[] = [];
@@ -301,7 +347,10 @@ export async function verify(projects: Project[], concurrency: number, deps: Fle
 	report.check(`plan: every document on every server is reconciled (${results.reduce((sum, result) => sum + result.documents.length, 0)} on ${results.length})`, reconciled, transcript.join("\n").split("\n").slice(-40).join("\n"));
 	for (const project of projects) {
 		await probes.where(project, deps, report);
+		await probes.placed(project, deps, report);
 		await probes.logins(project, deps, report);
+		await probes.backups(project, deps, report);
+		await probes.forgotten(project, deps, report);
 	}
 	await probes.frontDoor(projects, deps, report);
 	deps.print(report.failures() === 0 ? "\nverified." : `\n${report.failures()} check(s) failed.`);

@@ -59,14 +59,19 @@ export async function processInboundMessage(
 	// The sender is passed so that sender-based block rules resolve the same way here as they
 	// do in the Worker email handler.
 	const decision = await resolveInboundAddress(db, payload.to, payload.from);
+	// The raw message was written to the bucket before it was queued. When it is stored for
+	// nobody, no row will ever point at it, so it is deleted here rather than kept forever.
+	const discardRaw = () => env.BUCKET.delete(payload.rawR2Key);
 
 	if (!decision) {
 		console.warn(`No routing for inbound address: ${payload.to}`);
+		await discardRaw();
 		return;
 	}
 
 	if (decision.action === "reject") {
 		console.warn(`Rejected inbound: ${payload.to}`);
+		await discardRaw();
 		return;
 	}
 
@@ -74,10 +79,14 @@ export async function processInboundMessage(
 	// destination mailbox there is nothing to store.
 	if (decision.action === "forward" && !decision.keepCopy) {
 		console.info(`Forward ${payload.to} -> ${decision.forwardTo}`);
+		await discardRaw();
 		return;
 	}
 
-	if (!decision.mailbox) return;
+	if (!decision.mailbox) {
+		await discardRaw();
+		return;
+	}
 	const [stored] = await db.select({ id: messages.id }).from(messages).where(and(
 		eq(messages.mailboxId, decision.mailbox.mailboxId),
 		eq(messages.rawR2Key, payload.rawR2Key),

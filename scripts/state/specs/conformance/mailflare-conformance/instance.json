@@ -5,6 +5,11 @@
   "settings": {
     "appName": "Mailflare Conformance"
   },
+  "backups": {
+    "enabled": true,
+    "schedule": "daily",
+    "retentionDays": 14
+  },
   "fresh": {
     "admin": {
       "email": "root@one.conformance.test"

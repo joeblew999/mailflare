@@ -172,8 +172,23 @@ export const settingsResource: Resource = {
 	items: async (ctx) => fieldItems("settings", appFields(await instanceRow(ctx, "app_settings"), ctx.spec.settings ?? {}), (columns) => ctx.store.upsertRow("app_settings", DEFAULT, columns)),
 };
 
+// A server whose backups are on HAS a backup: the first is taken as it is provisioned, not
+// at the next 02:00 UTC, so one that cannot be made is found now rather than when it is needed.
+const firstBackup = (ctx: Context): Item => ({
+	address: "backups.first",
+	wants: "none has completed yet, so one is taken now",
+	actual: async () => (await ctx.store.rows("backups", { status: "completed" }))[0] ?? null,
+	create: async () => `taken (${await ctx.store.takeBackup()})`,
+	// Backups are kept when the settings go: deleting data is never a side effect.
+	removable: async () => null,
+	remove: async () => undefined,
+});
+
 export const backupsResource: Resource = {
 	section: "backups",
 	declared: (ctx) => ctx.spec.backups !== undefined,
-	items: async (ctx) => fieldItems("backups", backupFields(await instanceRow(ctx, "backup_settings"), ctx.spec.backups ?? {}), (columns) => ctx.store.upsertRow("backup_settings", DEFAULT, columns)),
+	items: async (ctx) => [
+		...fieldItems("backups", backupFields(await instanceRow(ctx, "backup_settings"), ctx.spec.backups ?? {}), (columns) => ctx.store.upsertRow("backup_settings", DEFAULT, columns)),
+		...(ctx.spec.backups?.enabled === true ? [firstBackup(ctx)] : []),
+	],
 };

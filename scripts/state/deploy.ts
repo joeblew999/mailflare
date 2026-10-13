@@ -31,18 +31,18 @@ export function deploySteps(server: Server, deployment: Deployment): string[] {
 }
 
 /** What Cloudflare says a deployed Worker is told and where it is placed. Null when it cannot be asked. */
-export async function workerSettings(worker: string): Promise<{ vars: Record<string, string | undefined>; secrets: string[]; placement: string | null } | null> {
+export async function workerSettings(worker: string): Promise<{ vars: Record<string, string | undefined>; secrets: string[]; placement: string | null; /** When it was last deployed, in ms. */ deployedAt: number | null } | null> {
 	const token = credential("CLOUDFLARE_API_TOKEN");
 	const account = credential("CLOUDFLARE_ACCOUNT_ID");
 	if (!token || !account) return null;
 	type Settings = { bindings?: Array<{ type: string; name: string; text?: string }> };
 	// The settings name a placement only by an id; the service says which region that id is.
-	type Service = { default_environment?: { script?: { placement?: { target?: Array<{ region?: string }> } } } };
+	type Service = { default_environment?: { script?: { modified_on?: string; placement?: { target?: Array<{ region?: string }> } } } };
 	const settings = (await cfApi<Settings>(`/accounts/${account}/workers/scripts/${worker}/settings`, token))?.result;
 	if (!settings) return null;
 	const service = (await cfApi<Service>(`/accounts/${account}/workers/services/${worker}`, token))?.result;
 	const bindings = settings.bindings ?? [];
-	return { vars: Object.fromEntries(bindings.filter((binding) => binding.type === "plain_text").map((binding) => [binding.name, binding.text])), secrets: bindings.filter((binding) => binding.type === "secret_text").map((binding) => binding.name), placement: service?.default_environment?.script?.placement?.target?.[0]?.region ?? null };
+	return { vars: Object.fromEntries(bindings.filter((binding) => binding.type === "plain_text").map((binding) => [binding.name, binding.text])), secrets: bindings.filter((binding) => binding.type === "secret_text").map((binding) => binding.name), placement: service?.default_environment?.script?.placement?.target?.[0]?.region ?? null, deployedAt: service?.default_environment?.script?.modified_on ? new Date(service.default_environment.script.modified_on).getTime() : null };
 }
 
 /**

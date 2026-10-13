@@ -256,6 +256,9 @@
       ]
     }
   ],
+  "erased": [
+    "former.colleague"
+  ],
   "teardown": {
     "accounts": "disable",
     "domain": "remove"

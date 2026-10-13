@@ -254,6 +254,9 @@
       ]
     }
   ],
+  "erased": [
+    "departed"
+  ],
   "teardown": {
     "accounts": "disable",
     "domain": "remove"

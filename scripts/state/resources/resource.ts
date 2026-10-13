@@ -16,6 +16,8 @@ export type Item = {
 	keep?: string;
 	/** On the server, in a section the document writes, and not in it: to be removed. */
 	undeclared?: boolean;
+	/** Why it is removed, when "not in the document" is not the reason. */
+	removal?: string;
 	/** On the server and nobody's to manage: said, never acted on. */
 	unmanaged?: string;
 	/** Reads the world. `null` means absent. */

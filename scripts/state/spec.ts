@@ -92,7 +92,8 @@ export type OnboardEntry = {
 	sendingProvider?: Provider;
 	receivingProvider?: Provider;
 };
-export type TeardownEntry = { accounts?: "disable" | "keep"; domain?: "remove" | "keep" };
+/** `erase` is a tenant leaving for good: each account is erased, as if it were declared `erased`. */
+export type TeardownEntry = { accounts?: "disable" | "erase" | "keep"; domain?: "remove" | "keep" };
 export type FreshEntry = { admin?: { email?: string; password?: string } };
 /** The password applies when the account is created; a stored hash cannot be compared. */
 export type AccountEntry = PersonSettings & {
@@ -178,11 +179,19 @@ export type Spec = {
 	fresh?: FreshEntry;
 	/** The primary admin's own settings: what `accounts[]` says of everyone else. */
 	admin?: PersonSettings;
+	/**
+	 * People who must not exist on this server: each an address (in a tenant document, a name
+	 * on its domain will do), or `sha256:` and the digest of the address when even that must
+	 * not be kept. Found, they are erased - account, mail, files, and from every backup.
+	 */
+	erased?: string[];
 };
 
 /** Sections that describe the instance, and the ones that describe a tenant on a domain. */
 export const INSTANCE_SECTIONS = ["license", "settings", "backups", "push", "fresh", "admin"] as const;
 export const TENANT_SECTIONS = ["onboard", "mailboxes", "accounts", "routing", "mcpKeys", "teardown"] as const;
+/** Sections either kind of document may write. */
+export const SHARED_SECTIONS = ["erased"] as const;
 
 /** A mailbox the document declares, normalised. `displayName` is null when it is not declared. */
 export type Role = { role: string; displayName: string | null; shared: boolean; access: AccessGrant[]; /** The entry writes an `access` list, so the list is complete. */ managesAccess: boolean };

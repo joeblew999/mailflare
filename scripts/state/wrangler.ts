@@ -2,7 +2,9 @@
 // The transport: wrangler, the Cloudflare API, the keychain and the app's HTTP API. Free of app
 // imports, and asynchronous throughout so many servers can be driven at once.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { placementOf } from "./spec";
 
 export const WRANGLER_CONFIG = "wrangler.jsonc";
@@ -213,13 +215,96 @@ export async function workerSecretNames(config?: string): Promise<string[] | nul
 	}
 }
 
-/** Delete objects from a bucket, one wrangler call each. Returns how many went. */
-export async function r2DeleteObjects(keys: string[], { bucket, local, jurisdiction, config }: { bucket: string; local: boolean; jurisdiction?: string; config?: string }): Promise<number> {
-	let deleted = 0;
-	for (const key of keys) {
-		const result = await wrangler(["r2", "object", "delete", `${bucket}/${key}`, local ? "--local" : "--remote", ...(jurisdiction && !local ? ["--jurisdiction", jurisdiction] : [])], { config });
-		if (result.status === 0) deleted += 1;
+// --- the bucket ---------------------------------------------------------------------
+// Objects are reached through the Cloudflare API when a token is on record: one request each,
+// several at once. Without one - and always for the local dev bucket - wrangler does it.
+
+export type Bucket = { bucket: string; local: boolean; jurisdiction?: string; config?: string };
+const cliWhere = ({ local, jurisdiction }: Bucket) => [local ? "--local" : "--remote", ...(jurisdiction && !local ? ["--jurisdiction", jurisdiction] : [])];
+const lastLines = (result: Ran) => (result.stderr || result.stdout).trim().split("\n").slice(-2).join(" ");
+
+function objectApi(target: Bucket): ((key: string, init?: RequestInit) => Promise<Response>) | null {
+	const token = target.local ? null : credential("CLOUDFLARE_API_TOKEN");
+	const account = target.local ? null : credential("CLOUDFLARE_ACCOUNT_ID");
+	if (!token || !account) return null;
+	const headers = { Authorization: `Bearer ${token}`, ...(target.jurisdiction ? { "cf-r2-jurisdiction": target.jurisdiction } : {}) };
+	return (key, init = {}) => fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${target.bucket}/objects/${encodeURIComponent(key)}`, { ...init, headers: { ...headers, ...(init.headers as Record<string, string> | undefined) }, signal: AbortSignal.timeout(120_000) });
+}
+
+async function withFile<T>(work: (file: string) => Promise<T>): Promise<T> {
+	const dir = mkdtempSync(join(tmpdir(), "state-r2-"));
+	try {
+		return await work(join(dir, "object"));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+/** Every key under a prefix, or null when the bucket cannot be listed from here. */
+export async function r2ListObjects(prefix: string, target: Bucket): Promise<string[] | null> {
+	const token = target.local ? null : credential("CLOUDFLARE_API_TOKEN");
+	const account = target.local ? null : credential("CLOUDFLARE_ACCOUNT_ID");
+	if (!token || !account) return null;
+	const keys: string[] = [];
+	for (let cursor = ""; ; ) {
+		const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/r2/buckets/${target.bucket}/objects?prefix=${encodeURIComponent(prefix)}&per_page=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {
+			headers: { Authorization: `Bearer ${token}`, ...(target.jurisdiction ? { "cf-r2-jurisdiction": target.jurisdiction } : {}) },
+			signal: AbortSignal.timeout(60_000),
+		});
+		if (!response.ok) throw new Error(`could not list ${prefix} in ${target.bucket}: HTTP ${response.status}`);
+		const page = (await response.json()) as { result?: Array<{ key: string }>; result_info?: { cursor?: string; is_truncated?: boolean } };
+		keys.push(...(page.result ?? []).map((object) => object.key));
+		cursor = page.result_info?.is_truncated ? page.result_info.cursor ?? "" : "";
+		if (!cursor) return keys;
+	}
+}
+
+/** An object's content as text, or null when the bucket has no such object. */
+export async function r2ReadObject(key: string, target: Bucket): Promise<string | null> {
+	const api = objectApi(target);
+	if (api) {
+		const response = await api(key);
+		if (response.status === 404) return null;
+		if (!response.ok) throw new Error(`could not read ${key} from ${target.bucket}: HTTP ${response.status}`);
+		return response.text();
+	}
+	return withFile(async (file) => {
+		const result = await wrangler(["r2", "object", "get", `${target.bucket}/${key}`, "--file", file, ...cliWhere(target)], { config: target.config });
+		if (result.status === 0 && existsSync(file)) return readFileSync(file, "utf8");
+		if (/does not exist|not found|NoSuchKey|10007/i.test(`${result.stdout}${result.stderr}`)) return null;
+		throw new Error(`could not read ${key} from ${target.bucket}: ${lastLines(result)}`);
+	});
+}
+
+export async function r2WriteObject(key: string, content: string, contentType: string, target: Bucket): Promise<void> {
+	const api = objectApi(target);
+	if (api) {
+		const response = await api(key, { method: "PUT", headers: { "Content-Type": contentType }, body: content });
+		if (!response.ok) throw new Error(`could not write ${key} to ${target.bucket}: HTTP ${response.status}`);
+		return;
+	}
+	await withFile(async (file) => {
+		writeFileSync(file, content);
+		const result = await wrangler(["r2", "object", "put", `${target.bucket}/${key}`, "--file", file, "--content-type", contentType, ...cliWhere(target)], { config: target.config });
+		if (result.status !== 0) throw new Error(`could not write ${key} to ${target.bucket}: ${lastLines(result)}`);
+	});
+}
+
+/** Delete objects from a bucket. Returns how many are gone; one that was never there counts. */
+export async function r2DeleteObjects(keys: string[], target: Bucket): Promise<number> {
+	const api = objectApi(target);
+	let deleted = 0;
+	if (!api) {
+		for (const key of keys) if ((await wrangler(["r2", "object", "delete", `${target.bucket}/${key}`, ...cliWhere(target)], { config: target.config })).status === 0) deleted += 1;
+		return deleted;
+	}
+	const waiting = [...keys];
+	await Promise.all(Array.from({ length: Math.min(8, waiting.length) }, async () => {
+		for (let key = waiting.shift(); key !== undefined; key = waiting.shift()) {
+			const status = await api(key, { method: "DELETE" }).then((response) => response.status, () => 0);
+			if (status === 200 || status === 204 || status === 404) deleted += 1;
+		}
+	}));
 	return deleted;
 }
 

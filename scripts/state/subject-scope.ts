@@ -1,6 +1,29 @@
 // Where a data subject's data lives. Hand-kept, and held to the real schema by a test: every
 // table is classified here, and every column that names a user or a mailbox is accounted for.
+import { createHash } from "node:crypto";
+import type { Spec } from "./spec";
 import type { SubjectReport } from "./store/types";
+
+/** How a person is named where their address must not be kept: the digest of it, lower-cased. */
+export const digestOf = (email: string): string => `sha256:${createHash("sha256").update(email.trim().toLowerCase()).digest("hex")}`;
+export const isDigest = (entry: string): boolean => /^sha256:[0-9a-f]{64}$/.test(entry);
+
+/** One person a document declares erased. `email` is null when the document kept only the digest. */
+export type Tombstone = { digest: string; email: string | null; label: string };
+
+/** The people a document declares erased. In a tenant document a bare name is on its domain. */
+export function tombstones(spec: Pick<Spec, "erased" | "domain">): Tombstone[] {
+	const domain = String(spec.domain ?? "").trim().toLowerCase();
+	const seen = new Set<string>();
+	return (spec.erased ?? []).flatMap((entry) => {
+		const written = String(entry).trim().toLowerCase();
+		const email = isDigest(written) ? null : written.includes("@") ? written : `${written}@${domain}`;
+		const digest = email ? digestOf(email) : written;
+		if (seen.has(digest)) return [];
+		seen.add(digest);
+		return [{ digest, email, label: email ?? `${written.slice(0, 19)}…` }];
+	});
+}
 
 export type SubjectScope = {
 	table: string;
@@ -114,12 +137,13 @@ export const depthOf = (table: string): number => {
 
 /**
  * The WHERE clause that selects the subject's rows in `table`, or null when the table holds
- * none of theirs. Shared by the report and the erasure, so they cannot disagree.
+ * none of theirs. Shared by the report and the erasure, so they cannot disagree. With no user,
+ * it selects what belongs to the mailboxes alone: what goes when a mailbox does.
  */
-export function subjectPredicate(table: string, userId: string, mailboxIds: string[], quote: (value: string) => string): string | null {
+export function subjectPredicate(table: string, userId: string | null, mailboxIds: string[], quote: (value: string) => string): string | null {
 	const scope = SUBJECT_SCOPE.find((entry) => entry.table === table);
 	if (scope) {
-		const parts = (scope.userColumns ?? []).map((column) => `${column}=${quote(userId)}`);
+		const parts = userId === null ? [] : (scope.userColumns ?? []).map((column) => `${column}=${quote(userId)}`);
 		if (scope.mailboxColumn && mailboxIds.length > 0) parts.push(`${scope.mailboxColumn} IN (${mailboxIds.map(quote).join(", ")})`);
 		return parts.length > 0 ? parts.join(" OR ") : null;
 	}

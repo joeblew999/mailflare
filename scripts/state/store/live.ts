@@ -5,7 +5,8 @@ import * as schema from "@/db/schema";
 import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
-import { apiError, applyMigrations, cfApi, credential, d1, r2DeleteObjects, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
+import { createHash, randomUUID } from "node:crypto";
+import { apiError, applyMigrations, cfApi, credential, d1, r2DeleteObjects, r2ListObjects, r2ReadObject, r2WriteObject, request, resolveInstanceUrl, sleep, sqlEscape, workerSecretNames } from "../wrangler";
 import type { Database, Row } from "../wrangler";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
 import { INDIRECT_SCOPE, SUBJECT_OBJECT_KEYS, SUBJECT_SCOPE, SUBJECT_SCOPE_UNATTRIBUTABLE, depthOf, subjectPredicate } from "../subject-scope";
@@ -108,6 +109,28 @@ export function makeLiveStore(instance: Instance): Store {
 		return (res.json?.[field] ?? []) as T[];
 	};
 
+	// Backups are the primary admin's alone, and only by a session: the app has no key for them.
+	// So one is made for the call - a row nobody else holds the token of - and removed after it.
+	const asPrimaryAdmin = async <T>(act: (headers: Record<string, string>) => Promise<T>): Promise<T> => {
+		const origin = await auth();
+		const [primary] = await sql("SELECT id FROM users WHERE is_primary_admin=1 AND disabled=0 LIMIT 1;");
+		if (!primary) throw new Error("no primary admin — backups are theirs alone");
+		const token = `sess_${randomUUID()}${randomUUID()}`;
+		const id = newId();
+		await sql(`INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (${quote(id)}, ${quote(String(primary.id))}, ${quote(createHash("sha256").update(token).digest("hex"))}, unixepoch() + 900, unixepoch());`);
+		try {
+			return await act({ Authorization: `Bearer ${token}`, Origin: origin });
+		} finally {
+			await sql(`DELETE FROM sessions WHERE id=${quote(id)};`).catch(() => undefined);
+		}
+	};
+	const forget = () => {
+		adminRow = null;
+		key = "";
+		keyId = null;
+		minting = null;
+	};
+
 	const subject = async (email: string) => {
 		const [row] = await sql(`SELECT id, is_primary_admin FROM users WHERE lower(email)=${quote(email.trim().toLowerCase())} LIMIT 1;`);
 		if (!row) return null;
@@ -116,14 +139,37 @@ export function makeLiveStore(instance: Instance): Store {
 		return { userId, mailboxIds, primaryAdmin: Boolean(row.is_primary_admin), where: (table: string) => subjectPredicate(table, userId, mailboxIds, quote) };
 	};
 	const subjectTables = [...SUBJECT_SCOPE.map((scope) => scope.table), ...INDIRECT_SCOPE.map((link) => link.table)];
+	type Found = NonNullable<Awaited<ReturnType<typeof subject>>>;
+	/** Where the subject's bytes are named: each column holding a key, and the rows of theirs it is read from. */
+	const objectRefs = (found: Found) => SUBJECT_OBJECT_KEYS.map((ref) => ({ ...ref, where: ref.table === "users" ? `id=${quote(found.userId)}` : found.where(ref.table) })).filter((ref) => ref.where);
+	const bucket = () => {
+		if (!instance.bucket) throw new Error("no bucket is known for this server");
+		return { bucket: instance.bucket, local: instance.local, jurisdiction: instance.jurisdiction, config: instance.config };
+	};
 
-	const subjectReport: Store["subjectReport"] = async (email) => {
+	// Other people's rows that name the address. They are theirs: counted, so nobody is surprised.
+	const elsewhere = async (email: string, found: Found | null): Promise<SubjectCount[]> => {
+		const address = quote(email);
+		const named = quote(`%${email.replace(/[%_]/g, "")}%`);
+		const notTheirs = (table: string) => (found?.where(table) ? ` AND NOT (${found.where(table)})` : "");
+		const [row] = await sql(`SELECT (SELECT count(*) FROM contacts WHERE lower(email)=${address}${notTheirs("contacts")}) AS contacts,
+			(SELECT count(*) FROM messages WHERE (lower(from_addr) LIKE ${named} OR lower(to_addr) LIKE ${named} OR lower(cc_addr) LIKE ${named})${notTheirs("messages")}) AS messages;`);
+		return [{ table: "contacts", rows: Number(row?.contacts ?? 0) }, { table: "messages", rows: Number(row?.messages ?? 0) }];
+	};
+
+	const subjectReport: Store["subjectReport"] = async (address) => {
+		const email = address.trim().toLowerCase();
 		const found = await subject(email);
-		if (!found) return { email, userId: null, mailboxIds: [], counts: [], blockers: [] };
+		if (!found) return { email, userId: null, mailboxIds: [], counts: [], objects: 0, elsewhere: await elsewhere(email, null), blockers: [] };
 		// One statement for every table: a count per table is a round trip per table.
 		const scoped = subjectTables.map((table) => ({ table, where: found.where(table) })).filter((entry) => entry.where);
-		const [row] = await sql(`SELECT ${scoped.map((entry, index) => `(SELECT count(*) FROM "${entry.table}" WHERE ${entry.where}) AS c${index}`).join(", ")};`);
+		const refs = objectRefs(found);
+		const [row] = await sql(`SELECT ${[
+			...scoped.map((entry, index) => `(SELECT count(*) FROM "${entry.table}" WHERE ${entry.where}) AS c${index}`),
+			...refs.map((ref, index) => `(SELECT count(*) FROM "${ref.table}" WHERE (${ref.where}) AND "${ref.column}" IS NOT NULL) AS o${index}`),
+		].join(", ")};`);
 		const counts: SubjectCount[] = scoped.map((entry, index) => ({ table: entry.table, rows: Number(row?.[`c${index}`] ?? 0) }));
+		const objects = refs.reduce((sum, _ref, index) => sum + Number(row?.[`o${index}`] ?? 0), 0);
 		// Surfaces the tables that cannot be attributed at all, so the caller can say so.
 		for (const table of SUBJECT_SCOPE_UNATTRIBUTABLE) counts.push({ table, rows: -1 });
 
@@ -133,7 +179,7 @@ export function makeLiveStore(instance: Instance): Store {
 		const owned = (await sql(`SELECT hostname FROM domains WHERE user_id=${quote(found.userId)};`)).map((domain) => String(domain.hostname));
 		if (owned.length > 0) blockers.push(`owns ${owned.length} domain(s) (${owned.join(", ")}) — deleting the account would delete every mailbox on them`);
 		if (found.primaryAdmin) blockers.push("is the primary admin — the instance cannot run without one");
-		return { email, userId: found.userId, mailboxIds: found.mailboxIds, counts, blockers };
+		return { email, userId: found.userId, mailboxIds: found.mailboxIds, counts, objects, elsewhere: await elsewhere(email, found), blockers };
 	};
 
 	return {
@@ -177,7 +223,22 @@ export function makeLiveStore(instance: Instance): Store {
 		listMailboxes: () => list<ApiMailbox>("/api/v1/mailboxes", "mailboxes"),
 		createMailbox: (body) => call("/api/v1/mailboxes", { method: "POST", body }),
 		updateMailbox: (mailboxId, body) => call(`/api/v1/mailboxes/${mailboxId}`, { method: "PATCH", body }),
-		deleteMailbox: (mailboxId) => call(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE" }),
+		// A mailbox goes with its mail. The app deletes the row and leaves every message that was
+		// in it, and each one's bytes in the bucket, with nothing pointing at them any more.
+		async deleteMailbox(mailboxId) {
+			const where = (table: string) => subjectPredicate(table, null, [mailboxId], quote);
+			const keys: string[] = [];
+			for (const ref of SUBJECT_OBJECT_KEYS) {
+				const scope = ref.table === "mailboxes" ? `id=${quote(mailboxId)}` : ref.table === "users" ? null : where(ref.table);
+				if (!scope) continue;
+				for (const row of await sql(`SELECT "${ref.column}" AS k FROM "${ref.table}" WHERE (${scope}) AND "${ref.column}" IS NOT NULL;`)) keys.push(String(row.k));
+			}
+			if (keys.length > 0 && (await r2DeleteObjects(keys, bucket())) < keys.length) throw new Error("some of its mail could not be deleted from the bucket, so the mailbox was left as it is");
+			const order = subjectTables.filter((table) => table !== "domains" && table !== "mailboxes").sort((a, b) => depthOf(b) - depthOf(a));
+			const statements = order.map((table) => ({ table, scope: where(table) })).filter((entry) => entry.scope).map((entry) => `DELETE FROM "${entry.table}" WHERE ${entry.scope};`);
+			if (statements.length > 0) await batch(statements);
+			return call(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE" });
+		},
 
 		async listAccounts() {
 			const res = await call("/api/v1/accounts");
@@ -322,26 +383,57 @@ export function makeLiveStore(instance: Instance): Store {
 			if (!found) return { email: trimmed, userId: null, deleted: [], objectKeys: [], objectsDeleted: 0 };
 			if (report.blockers.length > 0) throw new Error(`cannot erase ${trimmed}: ${report.blockers.join("; ")}`);
 
-			// The bytes first: once the rows are gone there is no way to find the objects.
+			// The bytes first, while the rows that name them are still there: if any cannot be
+			// deleted this stops with nothing else changed, and the next run takes it up again.
 			const objectKeys: string[] = [];
-			for (const ref of SUBJECT_OBJECT_KEYS) {
-				const where = ref.table === "users" ? `id=${quote(found.userId)}` : found.where(ref.table);
-				if (!where) continue;
-				for (const row of await sql(`SELECT "${ref.column}" AS k FROM "${ref.table}" WHERE ${where} AND "${ref.column}" IS NOT NULL;`)) objectKeys.push(String(row.k));
+			for (const ref of objectRefs(found)) {
+				for (const row of await sql(`SELECT "${ref.column}" AS k FROM "${ref.table}" WHERE (${ref.where}) AND "${ref.column}" IS NOT NULL;`)) objectKeys.push(String(row.k));
 			}
+			const objectsDeleted = objectKeys.length > 0 ? await r2DeleteObjects(objectKeys, bucket()) : 0;
+			if (objectsDeleted < objectKeys.length) throw new Error(`${objectKeys.length - objectsDeleted} of their ${objectKeys.length} object(s) could not be deleted from the bucket, so nothing else was touched`);
 
-			// Deepest children first and the user last, as one batch so it cannot half-apply.
+			// Deepest children first, as one batch so it cannot half-apply. The mailboxes and the
+			// user stay until last: while the user row is there, a run that stops is taken up again.
 			// Domains are not here: the subject owns none, or the blockers would have stopped this.
 			const order = subjectTables.filter((table) => table !== "domains" && table !== "mailboxes").sort((a, b) => depthOf(b) - depthOf(a));
-			const statements = [...order, "mailboxes"].map((table) => ({ table, where: found.where(table) })).filter((entry) => entry.where).map((entry) => `DELETE FROM "${entry.table}" WHERE ${entry.where};`);
-			await batch([...statements, `DELETE FROM users WHERE id=${quote(found.userId)};`]);
+			await batch(order.map((table) => ({ table, where: found.where(table) })).filter((entry) => entry.where).map((entry) => `DELETE FROM "${entry.table}" WHERE ${entry.where};`));
 
-			let objectsDeleted = 0;
-			if (objectKeys.length > 0) {
-				if (!instance.bucket) throw new Error(`the rows are gone, but ${objectKeys.length} object(s) could not be deleted: no bucket is known for this server`);
-				objectsDeleted = await r2DeleteObjects(objectKeys, { bucket: instance.bucket, local: instance.local, jurisdiction: instance.jurisdiction, config: instance.config });
+			// Each mailbox goes through the app, which also takes its address out of Cloudflare
+			// Email Routing. One the app will not show this admin is deleted as a row, below.
+			for (const mailboxId of found.mailboxIds) {
+				const res = await call(`/api/v1/mailboxes/${mailboxId}`, { method: "DELETE" });
+				if (res.status !== 200 && res.status !== 404) throw new Error(`could not delete their mailbox ${mailboxId}: ${apiError(res)}`);
 			}
+			await batch([`DELETE FROM mailboxes WHERE user_id=${quote(found.userId)};`, `DELETE FROM users WHERE id=${quote(found.userId)};`]);
 			return { email: trimmed, userId: found.userId, deleted: report.counts.filter((count) => count.rows > 0), objectKeys, objectsDeleted };
+		},
+
+		// Without the Cloudflare API the bucket cannot be listed, and the app's records have to do.
+		async listObjects(prefix) {
+			const listed = await r2ListObjects(prefix, bucket());
+			if (listed) return listed;
+			return (await sql("SELECT r2_key FROM backups WHERE r2_key IS NOT NULL;")).map((row) => String(row.r2_key)).filter((name) => name.startsWith(prefix));
+		},
+		readObject: (key) => r2ReadObject(key, bucket()),
+		writeObject: (key, content, contentType) => r2WriteObject(key, content, contentType, bucket()),
+		deleteObjects: async (keys) => (keys.length > 0 ? r2DeleteObjects(keys, bucket()) : 0),
+
+		takeBackup: () => asPrimaryAdmin(async (headers) => {
+			const response = await fetch(`${base}/api/backups`, { method: "POST", headers, signal: AbortSignal.timeout(300_000) });
+			const answer = (await response.json().catch(() => null)) as { backupId?: string; error?: string } | null;
+			if (!response.ok || !answer?.backupId) throw new Error(`the backup failed: ${answer?.error ?? `HTTP ${response.status}`}`);
+			return answer.backupId;
+		}),
+		async restoreBackup(content) {
+			await asPrimaryAdmin(async (headers) => {
+				const form = new FormData();
+				form.set("backup", new Blob([content], { type: "application/json" }), "backup.json");
+				const response = await fetch(`${base}/api/backups/restore`, { method: "POST", headers, body: form, signal: AbortSignal.timeout(300_000) });
+				const answer = (await response.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+				if (!response.ok || !answer?.ok) throw new Error(`the restore failed: ${answer?.error ?? `HTTP ${response.status}`}`);
+			});
+			// The key this store was using went with the rows the restore replaced.
+			forget();
 		},
 
 		applyMigrations: () => applyMigrations(instance),
@@ -361,10 +453,7 @@ export function makeLiveStore(instance: Instance): Store {
 			const tables = await sql("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations' AND name NOT LIKE '%_fts%';");
 			await batch([...tables.map((row) => `DELETE FROM "${String(row.name)}";`), ...SEED_ROWS]);
 			// Everything this store remembered about the instance is gone with it.
-			adminRow = null;
-			key = "";
-			keyId = null;
-			minting = null;
+			forget();
 		},
 		async insertAdmin({ id, email, name, passwordHash }) {
 			await sql(`INSERT INTO users (id, email, password_hash, name, role, is_primary_admin, can_manage_mailboxes, can_manage_domains, can_manage_users, created_at)
