@@ -62,7 +62,15 @@ export function onboardBody(spec: Spec | null, flags: Flags, hostname: string) {
 // --- the fleet: which servers exist, and where -----------------------------------
 
 /** One server: its name, its origin, and the database it owns. No personal data. */
-export type InstanceDecl = { name: string; url?: string; db?: string };
+export type InstanceDecl = {
+	name: string;
+	url?: string;
+	db?: string;
+	/** Where this server is meant to live. Declaring it is INTENT; enforcing it needs the
+	 *  source changes `--source-changes` lists. Absent means "not pinned". */
+	jurisdiction?: string;
+	region?: string;
+};
 export type Fleet = { instances?: InstanceDecl[] };
 
 export const FLEET_PATH = "scripts/state/specs/fleet.json";
@@ -77,7 +85,7 @@ export function loadFleet(path = FLEET_PATH): InstanceDecl[] {
 	}
 }
 
-export type ResolvedInstance = { name: string; docPath: string; url?: string; db?: string };
+export type ResolvedInstance = InstanceDecl & { docPath: string };
 
 /**
  * `--instance` is either a NAME in the fleet - which also supplies the server's origin and
@@ -88,5 +96,5 @@ export function resolveInstance(value: string, fleet: InstanceDecl[]): ResolvedI
 	if (value.endsWith(".json")) return { name: value, docPath: value };
 	const decl = fleet.find((entry) => entry.name === value);
 	if (!decl) throw new Error(`unknown instance "${value}": not a .json path, and not in ${FLEET_PATH}`);
-	return { name: decl.name, docPath: `scripts/state/specs/instances/${decl.name}.json`, url: decl.url, db: decl.db };
+	return { ...decl, docPath: `scripts/state/specs/instances/${decl.name}.json` };
 }

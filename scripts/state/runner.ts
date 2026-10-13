@@ -40,29 +40,35 @@ export function loadSpecs({ spec, dir }: { spec?: string; dir: string }): SpecEn
 }
 
 export async function runSpecs(store: Store, flags: Flags, values: any, entries: SpecEntry[]): Promise<number> {
-	console.log(`Applying ${entries.length} document(s)\n`);
-	const results: Array<{ name: string; ok: boolean }> = [];
-	for (const { name, spec } of entries) {
+	// Opt-in: one at a time by default, so the output stays readable and D1 is not hammered.
+	// Thousands of documents want a few in flight, not one.
+	const limit = Math.max(1, Number(values.concurrency ?? 1) || 1);
+	console.log(`Applying ${entries.length} document(s)${limit > 1 ? `, ${limit} at a time` : ""}\n`);
+
+	const applyOne = async ({ name, spec }: SpecEntry): Promise<{ name: string; ok: boolean }> => {
 		console.log(`\n──────── ${name}`);
 		const domainName = String(spec.domain ?? "").trim().toLowerCase();
 		const roles = rolesFor(values, spec, flags);
 		const global = flags.fresh || flags.plan !== undefined || flags.push || Boolean(spec.fresh) || Boolean(spec.license) || Boolean(spec.push);
 		if (!domainName && !global) {
 			console.log("  ✗ no domain, and the document asks for nothing global");
-			results.push({ name, ok: false });
-			continue;
+			return { name, ok: false };
 		}
 		if (domainName && roles.length === 0 && !global) {
 			console.log("  ✗ no mailboxes in the document");
-			results.push({ name, ok: false });
-			continue;
+			return { name, ok: false };
 		}
 		try {
-			results.push({ name, ok: (await run(makeContext(store, flags, spec, domainName), roles)) === 0 });
+			return { name, ok: (await run(makeContext(store, flags, spec, domainName), roles)) === 0 };
 		} catch (error) {
 			console.log(`  ✗ ${message(error)}`);
-			results.push({ name, ok: false });
+			return { name, ok: false };
 		}
+	};
+
+	const results: Array<{ name: string; ok: boolean }> = [];
+	for (let index = 0; index < entries.length; index += limit) {
+		results.push(...(await Promise.all(entries.slice(index, index + limit).map(applyOne))));
 	}
 
 	const failed = results.filter((result) => !result.ok);

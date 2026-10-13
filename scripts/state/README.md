@@ -80,6 +80,7 @@ Email Routing and DNS survive, so on a live instance it **orphans infrastructure
 ```bash
 npm run state -- --spec scripts/state/specs/example.json    # one document
 npm run state -- --all --dry-run                            # every document in specs/
+npm run state -- --all --concurrency 4                      # a few in flight, for thousands
 npm run state -- --instance mailflare --spec <doc>         # a server from specs/fleet.json
                                                            # (its url and db come from there)
 npm run state -- --spec <file> --status                     # drift report, writes nothing
@@ -279,16 +280,18 @@ wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly th
    does not, so on a fresh instance its account and shared inboxes 403. Either add the
    section or move the licence to an instance-level document (preferred — see below).
 2. **`fresh` resets the database, not the infrastructure.** Cloudflare MX, Email Routing
-   rules and DNS survive, so a from-zero reset on a live instance *orphans* them. It now
-   counts the domains and **warns before wiping**, which makes it visible; making tenant
-   de-provision own both sides is still the real fix.
+   rules and DNS survive, so a from-zero reset on a live instance *orphans* them. It counts
+   the domains and warns before wiping — in `--dry-run` as well as a real run — which makes
+   it visible; making tenant de-provision own both sides is still the real fix.
 3. **Specs are one flat layer.** They should split into `fleet` / `instance` / `tenant` —
    see *Design direction*.
-4. **`applyMigrations` only warns on a non-zero exit.** In a non-interactive context
-   wrangler applies every migration and can still exit non-zero; we verify `schemaPresent`
-   instead. The root cause is not fully understood — worth pinning down.
-5. **Mass runs are sequential** (one process, one key) — correct and fast enough, but
-   thousands of documents want bounded parallelism.
+4. **The migrations exit code: cause found.** Wrangler's *confirmation prompt* path was the
+   unreliable one — it applied every migration and still exited non-zero. The spawn now sets
+   `CI=1` to skip the prompt, and `schemaPresent` remains the real proof regardless, so this
+   is fixed at both ends.
+5. ~~Mass runs are sequential.~~ **Done**: `--concurrency <n>` runs documents in bounded
+   batches, still one process and one admin key. Defaults to 1, so nothing changed unless
+   you ask.
 6. **Erasure exists but does not reach backups.** `--data-subject <email>` reports and
    `--erase` destroys every row and R2 object. Backup history and trash retention are still
    out of scope, so the guarantee is "gone from the live instance", not yet "gone". See
@@ -337,10 +340,12 @@ to **take a user and their data down** wherever it lives.
 Bug #1 above is the argument for this: instance-level facts should not be repeated in every
 tenant document, and a tenant must not silently depend on something it never declared.
 
-**Started.** `specs/fleet.json` maps a server name to its url and database, `--instance <name>`
-resolves through it (so no `--url`/`--db` is needed), and `specs/instances/<name>.json` holds
-what belongs to the server rather than a tenant. Still to come: jurisdiction/region in the
-fleet entry, and the derived subject index.
+**Built:** `specs/fleet.json` maps a server name to its url and database, `--instance <name>`
+resolves through it (so no `--url`/`--db` is needed), `specs/instances/<name>.json` holds what
+belongs to the server rather than a tenant, and a fleet entry can declare `jurisdiction` and
+`region`. **Declaring them is intent, not enforcement** — pinning where a Worker actually
+executes needs the source changes `--source-changes` lists, and the realtime Durable Object
+is the one already identified.
 
 ### Data subjects — the index, not the erasure
 

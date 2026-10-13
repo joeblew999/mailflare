@@ -4,8 +4,8 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-export function run(command: string, args: string[]) {
-	return spawnSync(command, args, { encoding: "utf8" });
+export function run(command: string, args: string[], env?: Record<string, string>) {
+	return spawnSync(command, args, { encoding: "utf8", env: env ? { ...process.env, ...env } : process.env });
 }
 
 // Read a secret from the macOS keychain; fnox stores entries under service "fnox"
@@ -32,7 +32,10 @@ export function d1(sql: string, { db = "mailflare", local = false }: { db?: stri
 // at, so the same call readies the local dev database and a deployed D1 (the latter
 // needs database_id + migrations_dir in wrangler.jsonc, which the repo sets).
 export function applyMigrations({ db = "mailflare", local = false }: { db?: string; local?: boolean } = {}) {
-	const result = run("npx", ["wrangler", "d1", "migrations", "apply", db, local ? "--local" : "--remote"]);
+	// CI=1 skips wrangler's confirmation prompt. That prompt path is what made the exit code
+	// unreliable: it applied every migration and still reported non-zero. The schema check
+	// below stays the real proof.
+	const result = run("npx", ["wrangler", "d1", "migrations", "apply", db, local ? "--local" : "--remote"], { CI: "1" });
 	// The exit status is not trustworthy: in a non-interactive context wrangler skips
 	// the confirmation, applies every migration, and can still report non-zero. The
 	// caller checks the schema it actually needs (Store.schemaPresent), which is the
