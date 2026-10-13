@@ -48,12 +48,6 @@ export async function ensureAccount(ctx: Context, entry: AccountEntry): Promise<
 }
 
 // updateManagedAccountSchema requires the whole object, so every update carries the
-// account's current name/role/permissions rather than a partial patch.
-//
-// It returns the INPUT, not validateBody's result: that schema transforms an omitted
-// password/forwardingEmail into null, and sending those back fails the app's own
-// parse (null is not allowed where undefined is) with a 400. Validating first still
-// catches drift before the request is made.
 function updateBody(account: ApiAccount, username: string, disabled: boolean) {
 	const body = {
 		name: account.name?.trim() || username,
@@ -66,8 +60,6 @@ function updateBody(account: ApiAccount, username: string, disabled: boolean) {
 }
 
 // An account's own mailbox is cascaded away when its domain is removed, and the
-// account itself cannot be recreated (no user-delete), so rebuild the mailbox owned
-// by that account (POST /api/v1/mailboxes accepts ownerUserId).
 async function ensureAccountMailbox(ctx: Context, account: ApiAccount, username: string, email: string): Promise<number> {
 	const boxes = await mailboxesForDomain(ctx);
 	if (boxes.has(username)) return 0;

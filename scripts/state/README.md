@@ -1,589 +1,140 @@
-# `scripts/state` — the reconciler
+# scripts/state
 
-Declarative, idempotent **state reconciliation for a Mailflare instance**. JSON documents
-are the source of truth; one loop makes the instance match them.
+**A Terraform-like reconciler for a Mailflare instance.** The JSON documents are the desired
+state; `plan` shows the diff, `apply` makes it so, `destroy` removes it. One codebase, many
+servers.
 
-Everything the system can do — reset the instance, onboard a domain, mailboxes, accounts,
-routing rules, MCP keys, the licence, web push — is a **Resource** with a uniform
-`status` / `apply` / `remove`, so `--status` and `--cleanup` work for every capability and
-there is no per-capability command.
-
----
-
-## Hard constraint: do NOT modify `src/`
-
-This system must **never** change the application. It drives `src/` through the app's HTTP
-API and its database; those endpoints are the contract, and the app is the product.
-
-Everything the reconciler does is implemented here, in `scripts/state/`. Where a capability
-genuinely cannot be completed from the scripts, the command **says so and names the file** -
-it never fails silently and never implies completeness it does not have:
-
-```bash
-npm run state -- --source-changes
-```
-
-That catalogue is `src-changes.ts`, and a test asserts every entry points at something under
-`src/` (or `worker.ts`) with a usable reason - so the code and this file cannot drift.
-
-Deploying a server is a thin passthrough for the same reason: it shells `npm run build` and
-`npm run deploy:worker -- --env <name>`, and creates nothing. Reimplementing `wrangler d1
-create` - parsing its output, detecting "already exists", recovering a half-finished attempt -
-would be rebuilding wrangler for no gain.
-
-| Cannot be done from here | Where the change goes | Why it cannot be worked around |
-|---|---|---|
-| Erase a subject from **backup history** | `src/lib/backups/` + restore | A backup holds every subject; rewriting one would destroy other people's data. Crypto-shredding — a per-subject key whose destruction *is* the erasure — is the fix. |
-| Attribute **`ai_usage`** rows to a person | `src/db/schema/index.ts:755` (`aiUsage`) | No user/owner column, so erasure cannot find them. |
-| Pin the **realtime Durable Object** to a jurisdiction | `worker.ts:44`, `src/lib/realtime/utils.ts:61` | `getByName()` takes a jurisdiction; without it residency is not guaranteed. |
-
-## Read this first — current state
-
-The live instance was wiped by a `--fresh` test and has now been **restored from its
-documents** using the new instance layer.
-
-| | |
+| Terraform | Here |
 |---|---|
-| Live instance | https://mailflare.gedw99.workers.dev |
-| Root admin | `root@amplifycms.com` / `fresh-admin-2026` |
-| Restored | `amplifycms.com`, `amplifycms.net`, `ubuntudesign.com` — domains, mailboxes, accounts, routing rules, MCP keys |
-| Cloudflare side | untouched throughout — `--fresh` only resets the database |
+| `plan` / `apply` / `destroy` | `npm run state -- <target> plan` / `apply` / `destroy` |
+| a directory of `.tf` files | a project folder of JSON documents |
+| resources and a provider | items, declared per resource; the app's API and D1 behind the store seam |
+| state file | **none** — existence is queried every run, so the plan and the world cannot drift |
+| workspaces | projects: one folder per server |
 
-Accounts created during the restore printed one-time passwords; put them in
-`passwordEnv` (e.g. `MAILFLARE_PROV_PASSWORD`) to supply them instead.
+> **Do not change anything in `src/`.** This tool drives the app through its HTTP API and its
+> database; `src/` is the product. Where a capability would need a change there, the command
+> says so and names the file: `npm run state -- --source-changes`.
 
-## Prerequisites
+Reconciles a Mailflare instance with JSON documents. Point it at a project folder; `plan`,
+`apply` and `destroy` make the instance match.
 
-- **Node 24+** and `npm install` (tsx, wrangler and typescript are devDependencies).
-- **Cloudflare credentials**, read from the environment first, then the macOS keychain
-  (service `fnox`): `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The usual route is
-  `fnox exec -- npm run state -- ...`. `npx wrangler whoami` must succeed for anything that
-  touches D1. A run that only touches *global* data (licence, web push) needs neither — the
-  store resolves the instance URL and mints its admin key lazily, on the first HTTP call.
-- **The instance URL** resolves as: `--url` → `MAILFLARE_URL` → `<worker>.<account>.workers.dev`,
-  derived from `wrangler.jsonc`'s `name` plus the Cloudflare API. The live instance is
-  **https://mailflare.gedw99.workers.dev**.
-- This file documents the *operations* layer. The application itself is `src/`, described in
-  the repo-root `README.md` and `CLAUDE.md`.
+```bash
+npm run state -- <target> <verb> [flags]
+```
 
-## Safety — these destroy data
+## Commands
 
-| Flag | Effect |
+```bash
+npm run state -- mailflare plan          # what differs, writes nothing
+npm run state -- mailflare apply         # make it so
+npm run state -- mailflare destroy       # remove it, the Worker included
+npm run state -- mailflare reset         # wipe it, make a primary admin
+npm run state -- plan                    # every project in specs/projects/
+npm run state -- <file>.json plan        # one document
+npm run state -- <folder> plan           # every project in that folder
+npm run state -- subject <email> plan    # where one person's data lives
+npm run state -- subject <email> destroy # erase it, rows and R2 objects
+
+npm run state:check                      # the gate: types + lint + tests + sandbox
+npm run state:sandbox                    # the sandbox alone (needs `npm run dev`)
+npm run state:test                       # unit tests only
+```
+
+The target is a project name, a folder, or a document. The verb is `plan`, `apply`, `destroy`,
+`reset` or `subject`. A verb with no target means every project — except `reset`, which needs
+one.
+
+Flags are how to run it, never what to build:
+
+| Flag | |
 |---|---|
-| `--fresh` | deletes **every row** in the target D1 and makes a new admin. Not reversible. |
-| `--cleanup` | deletes the document's mailboxes, routing rules and MCP keys |
-| `--cleanup --disable-accounts` | also disables the accounts (the app cannot delete users) |
-| `--cleanup --remove-domain` | also removes the domain — drops its Cloudflare DNS/MX config |
-| `--all` | applies **every** document in `specs/` |
-| `--data-subject <email> --erase` | destroys that person's rows **and their R2 objects** |
+| `--dir <path>` | projects folder (default `scripts/state/specs/projects`) |
+| `--local` / `--db <name>` / `--url <base>` | which instance |
+| `--concurrency <n>` | mass runs: documents in flight (default 1) |
+| `--confirm-mx` | onboard a domain that already has MX |
+| `--confirm-destroy` | actually undeploy; without it you get the plan |
+| `--source-changes` | what would need a change in `src/`, and where |
+| `--steps` | the Web Push (VAPID) key-rotation runbook |
 
-Always `--dry-run` or `--status` first. `--fresh` touches the database only: Cloudflare MX,
-Email Routing and DNS survive, so on a live instance it **orphans infrastructure**.
-
-## The model: it is Terraform
-
-Point the CLI at a project folder and it reconciles the server, the instance and the tenants
-to match. Three verbs, as you would expect:
-
-| Verb | Does |
-|---|---|
-| `plan` | read-only: what exists vs what the documents declare (alias of `--status`) |
-| `apply` | make it so — the default |
-| `destroy` | remove what the documents declare, the server included (alias of `--cleanup`) |
-
-```bash
-npm run state -- --project mailflare plan
-npm run state -- --project mailflare apply
-npm run state -- --project mailflare destroy --confirm-destroy
-```
-
-**One deliberate difference: there is no state file.** Terraform needs one because cloud APIs
-are hard to query, and a stale state file is the source of most of its pain — the plan and
-reality disagree. Here, existence is *queried* every run (D1, the Cloudflare API,
-`server.json`), so drift between a state file and the world cannot exist. The documents are
-the desired state; the world is the actual state; there is nothing in between to rot.
-
-**The plan is a real diff.** One line per resource, an action, and a reason:
+## Documents
 
 ```
-Plan for ubuntusoftware.net: 5 to create, 0 to update, 0 to destroy
-
-  + domain.ubuntusoftware.net                             onboard (publishes MX)
-  + mailbox.office@ubuntusoftware.net                     personal
-  + mailbox_access.support.gerard.webb@ubuntudesign.com   full_access
+specs/
+└── projects/
+    └── mailflare/
+        ├── server.json      the server: database, origin, jurisdiction
+        ├── instance.json    the instance: licence, web push, fresh.admin
+        └── <domain>.json    the tenants
 ```
-
-**The documents are validated.** Every section is typed in `spec.ts` and checked in
-`validate.ts` before anything reads it, so a typo'd key, a wrong type or a bad enum fails at
-`plan` with the path to the field — rather than silently doing nothing. One run reports every
-problem at once.
-
-And the plan reports **problems** — `!` — for things that cannot work, instead of promising a
-create that would fail on apply:
-
-```
-Plan for ubuntusoftware.net: 4 to create, 0 to update, 0 to destroy, 1 PROBLEM(S)
-
-  + mailbox.support@ubuntusoftware.net                   shared
-  ! mailbox_access.support.gerard.webb@ubuntudesign.com  no local user with that address
-```
-
-That is the alignment that matters: the JSON and the code cannot drift, because the JSON is
-checked against the model and the model is what the resources read.
-
-`plan` is a method on the Resource contract, called over the **same ordered registry** apply
-uses, publishing the same mailbox ids into `RunState` so routing rules and MCP keys can
-resolve themselves. So **the plan and apply are the same walk** — a plan built from a parallel
-implementation could promise something apply would not do, and this one cannot. That is what
-makes it safe to read before a destroy.
-
-## The order you actually do things
-
-**1. Deploy a server** (once per server). `apply` on a project deploys it if it is not
-registered, so this is usually implicit — but the plan shows it happening:
-
-```bash
-# add an env.<name> block to wrangler.jsonc first (its own name, d1 database_id, bucket, queues)
-npm run state -- mailflare plan      # what it would do, the deploy included
-npm run state -- mailflare apply
-```
-
-**2. Reset it and give it a primary admin.** Nothing else in the app can do this, and the admin
-comes from the instance document (`fresh.admin`), not from a flag:
-
-```bash
-npm run state -- mailflare reset
-```
-
-**3. Run a project.** A project is one folder: its `server.json`, then `instance.json`, then
-every tenant — in one process under one admin key.
-
-```bash
-npm run state -- mailflare plan      # the diff, writes nothing
-npm run state -- mailflare apply
-```
-
-**4. Change things over time.** Edit a document and run it again — every resource is idempotent
-and reconciles drift, so this is the only supported way to change things.
-
-```bash
-npm run state -- mailflare apply
-```
-
-**5. Tear down.** Reverse order, and safe to re-run. `destroy` removes the tenants *and* the
-Worker; the database, bucket and queues are left alone and their wrangler commands printed,
-because this system does not create them either.
-
-```bash
-npm run state -- mailflare destroy                     # the plan
-npm run state -- mailflare destroy --confirm-destroy   # and do it
-```
-
-**Everything, and the checks:**
-
-```bash
-npm run state -- plan                       # every project in specs/projects/
-npm run state -- apply --concurrency 4      # a few in flight, for thousands
-npm run state:check                         # THE gate: types + lint + tests + sandbox
-npm run state:test                          # 36 tests, no D1/network/bindings
-npm run state:typecheck
-```
-
-**One person's data** — an operation, so a verb rather than a document:
-
-```bash
-npm run state -- subject <email> plan        # where their data lives (read-only)
-npm run state -- subject <email> destroy     # DESTROY it, rows and R2 objects
-```
-
-**About the system rather than the instance:**
-
-```bash
-npm run state -- --steps                     # the VAPID rotation runbook
-npm run state -- --source-changes            # what needs a src/ change, and where
-```
-
-**Flags are how to run it, not what to build.** There are ten: `--dir`, `--local`, `--db`,
-`--url`, `--concurrency`, `--confirm-mx`, `--confirm-destroy`, `--source-changes`, `--steps`,
-`--help`. Everything that used to be a flag — onboard, share, the licence plan, web push, the
-admin, teardown — is a document section, so what gets built is reviewable in a diff.
-
-### Document shape
-
-Any subset of these sections; one file may hold many via `{ "specs": [ ... ] }`.
 
 ```jsonc
 {
   "domain": "acme.de",
-  "onboard":   { "receivingProvider": "none", "replaceMxRecords": false },
+  "onboard":   { "receivingProvider": "cloudflare", "replaceMxRecords": false },
   "mailboxes": [ { "role": "office" },
                  { "role": "support", "shared": true,
                    "access": [ { "email": "sam@acme.de", "permission": "read_only" } ] } ],
-  "accounts":  [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
+  "accounts":  [ { "username": "sam", "name": "Sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
   "routing":   [ { "pattern": "*", "action": "forward", "forwardTo": "ops@example.com" } ],
-  "mcpKeys":   [ { "name": "agent", "mailboxes": ["office"] } ]
+  "mcpKeys":   [ { "name": "agent", "mailboxes": ["office"] } ],
+  "teardown":  { "accounts": "disable", "domain": "remove" }
 }
-
-// license / push / fresh are NOT tenant sections — they belong to the instance document
-// (specs/instances/<server>.json), applied before the tenants. A mailbox `access` grant
-// must name a LOCAL user the document creates; an external address cannot resolve.
 ```
 
-`specs/` holds one document per domain. `example.json` (template) and `_*.json`
-(`_sandbox.json`, a runnable dev fixture) are **skipped by `--all`**.
+`example/` and `_*` projects are skipped by `--all`.
 
----
-
-## Standing up a new server
-
-This is the point of the whole system: from nothing to a provisioned instance with no manual
-clicking. Nothing else in the app can do it — `POST /api/auth/register` creates the first
-admin but also demands Turnstile and a domain, so it is unusable as a bootstrap.
-
-```bash
-# 1. Add an env.<name> block to wrangler.jsonc - its own name, d1 database_id, r2 bucket and
-#    queues - then deploy it. This shells the repo's own deploy path and registers the server:
-npm run state -- --deploy eu1 --dry-run   # the two commands it will run, and what it records
-npm run state -- --deploy eu1             # npm run build + npm run deploy:worker -- --env eu1
-#    It creates NO cloud resources (that is wrangler's job) and needs no src/ changes. The
-#    env block is the source of truth for the database; without one it stops rather than
-#    inventing a database_id. The Worker `name`, CF_EMAIL_WORKER_NAME and the
-#    WORKER_SELF_REFERENCE service must still agree.
-
-# 2. Reset it and give it a primary admin. The instance document is applied FIRST, so
-#    server-wide facts (the licence) stop being repeated in every tenant document:
-#    specs/instances/<server>.json — copy instances/example.json
-npm run state -- --fresh --instance mailflare --admin-email root@example.com --admin-password '…'
-#    (this runs `wrangler d1 migrations apply DB --remote` first)
-
-# 3. Run the project (its instance document, then every tenant), then confirm
-npm run state -- --project mailflare
-npm run state -- --spec scripts/state/specs/<domain>.json --status
-```
-
-The app now shows its normal login, and `root@example.com` is the primary admin.
-
-## Everyday workflow
-
-- **Add a tenant** — drop `<domain>.json` into the project folder and `npm run state --
-  --project <name>`. If the domain is not onboarded, add `--onboard` (publishes MX).
-- **Server-wide change** (licence, web push) — edit `specs/instances/<server>.json` and pass
-  it as `--instance`; it is applied before the tenant documents, in the same run and key.
-- **Change one** — edit the document and apply again. Every resource is idempotent and
-  reconciles drift, so this is safe and is the only supported way to change things.
-- **Remove one** — `--cleanup` (add `--disable-accounts`, `--remove-domain` as needed).
-  Safe to re-run.
-- **Mass** — `npm run state -- --all --dry-run` first, then without `--dry-run`. One admin
-  key covers the whole run.
+`license`, `push` and `fresh` are **instance** sections, not tenant ones. A mailbox `access`
+grant must name a local account the document creates — an outside address cannot resolve, and
+the plan reports it as a problem.
 
 ## Layout
 
 ```
-scripts/state/
-├── apply.ts              entry: parse → load → run
-├── args.ts               CLI parsing + usage
-├── driver.ts             THE reconcile loop
-├── runner.ts             many documents in one process, one admin key
-├── context.ts            per-document Context, makeContext, requireDomain
-├── spec.ts               the document model + the app-shaped row types (Api*)
-├── flags.ts              what the command line asked for
-├── document.ts           loading documents; rolesFor; onboardBody
-├── wrangler.ts           d1/fetch/keychain/migrations helpers
-├── app.ts                app-coupled: validateBody, withStore (lazy auth)
-├── store/
-│   ├── types.ts          the Store seam  ← the contract
-│   └── live.ts           the ONLY module that talks to D1 (or the CF API)
-├── resources/
-│   ├── resource.ts       the Resource contract
-│   ├── registry.ts       RESOURCES — the order, and why
-│   └── fresh domain license accounts mailboxes routing mcp-keys push .ts
-├── subject-scope.ts      where a data subject's data lives — the erasure index
-├── specs/
-│   └── projects/           ONE FOLDER PER PROJECT — the thing a user runs
-│       └── mailflare/
-│           ├── server.json        the SERVER: database, origin, jurisdiction
-│           ├── instance.json      the instance: licence, web push
-│           ├── amplifycms.com.json  the tenants
-│           └── ...
-│       ├── example/        the template (skipped by --all)
-│       └── _sandbox/       a runnable dev fixture (skipped by --all)
-└── roles.example.txt
+apply.ts            entry: target + verb
+driver.ts           the walk, and the plan renderer
+document.ts         loading documents and servers
+spec.ts             the document model
+validate.ts         checking documents against it
+resources/          one file per capability, plus registry.ts (the order)
+store/              types.ts (the seam), live.ts (the only SQL)
+subject-scope.ts    where a person's data lives
+src-changes.ts      what would need a change in src/
+deploy.ts           deploy/undeploy a server
+wrangler.ts         d1, fetch, keychain, R2 helpers
 ```
 
-### The two rules that keep this honest
+## The rules
 
-1. **All outside access goes through the `Store` seam.** Logic modules never call D1, fetch
-   or wrangler directly. That is what makes the whole system testable against an in-memory
-   fake — and it has already caught two bugs that only appeared at the seams
-   (`applyMigrations` spawning remote migrations in tests; `currentMx` hitting the keychain
-   during a dry run).
-2. **SQL lives only in `store/live.ts`.** Everything else is logic.
+- **A resource declares items; the driver executes them.** `plan`, `apply` and `destroy` are
+  the same walk, so they cannot disagree.
+- **All outside access goes through the store seam** (`store/types.ts`). SQL lives only in
+  `store/live.ts`. That is what makes the unit tests possible.
+- **No state file.** Existence is queried every run, so the plan and the world cannot drift.
+- **Documents are the only input.** Nothing describing what to build is a flag.
+- **Never modify `src/`.** It is driven through its API and its database. Where a change is
+  needed, `--source-changes` names the file.
+- **The order in `registry.ts` is load-bearing.** Every position is there for a reason; read
+  the comments before moving one.
 
-### Ordering is load-bearing
+## Verifying
 
-`resources/registry.ts` order *is* the design, and every position encodes a bug that was
-found the hard way:
+`npm run state:check` is the definition of done: types, lint, unit tests, and the sandbox.
 
-| # | Resource | Why it is here |
-|---|---|---|
-| 1 | `fresh` | wipes the instance — nothing may precede it |
-| 2 | `domain` | resolves/onboards the domain; **aborts** the run when it cannot |
-| 3 | `license` | **gates** shared inboxes *and* account management (403 without Pro/Team) |
-| 4 | `accounts` | before mailboxes: `access` grants name users, and on a fresh server the only users are the ones accounts creates |
-| 5 | `mailboxes` | before the rules/keys that name mailbox ids by role |
-| 6 | `routing` | |
-| 7 | `mcpKeys` | |
-| 8 | `push` | |
+The sandbox runs the real app against the real local database — reset, apply, plan, apply
+again, destroy, plan again — then the refusals (an unresolvable grant, a bad enum, an unknown
+section, a mailbox with no role). It asserts exit codes and messages.
 
-`--cleanup` walks this **in reverse** → the licence is reverted **last**, so the account
-disable still has a plan to work under. The two prerequisites (`fresh`, `domain`) are
-handled explicitly in `driver.ts` because on cleanup the domain must be **resolved first
-but removed last** (it cascades everything else).
+Unit tests use an in-memory fake, so they encode our assumptions and can pass while the real
+flow is broken. Only the sandbox exercises the app; a green unit suite is not evidence.
 
-Adding a resource: implement the contract in `resources/<name>.ts`, insert it at the
-correct position in `registry.ts`, add a test, and say *why* it sits there.
+`npm run dev` must be running for the sandbox. It uses `--local` and a `.test` domain, so
+nothing real is touched.
 
----
+## Outstanding
 
-## Verifying the whole thing from zero
-
-The only way to test this properly is a **fresh, disposable instance**. Never validate a
-from-zero flow against an already-populated database — it hides exactly the ordering bugs
-this system exists to prevent.
-
-```bash
-# 1. a genuinely empty local instance, with NO Cloudflare credentials so provisioning
-#    records a manual zone instead of touching real DNS
-rm -rf .wrangler/state
-env -u CF_TOKEN -u CF_API_KEY -u CF_EMAIL -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID npm run dev
-
-# 2. reset + provision from nothing
-npm run state -- --fresh --onboard --local --url http://localhost:3000 \
-  --spec scripts/state/specs/_sandbox.json \
-  --admin-email root@sandbox.test --admin-password sandbox-admin-pass-123
-
-# 3. drift, idempotency, teardown
-npm run state -- --local --url http://localhost:3000 --spec scripts/state/specs/_sandbox.json --status
-npm run state -- --local --url http://localhost:3000 --spec scripts/state/specs/_sandbox.json
-npm run state -- --local --url http://localhost:3000 --spec scripts/state/specs/_sandbox.json \
-  --cleanup --disable-accounts --remove-domain
-```
-
-`_sandbox.json` uses `receivingProvider: "none"` on purpose — mailbox routing only calls
-Cloudflare when the receiving provider **is** cloudflare, so a local run stays offline.
-
-**Stop the dev server before wiping `.wrangler/state`** — they share the local D1. The
-`kill` guard in this environment rejects a variable PID; use a literal one from
-`lsof -ti:3000`.
-
----
-
-### Testing a new resource
-
-Tests drive the **whole** run through an in-memory fake, so they need no D1, no network and
-no bindings. See `tests/state.test.ts`: build the fake with `fakeStore({...seed})`, run
-`runOn(store, flags({...}), spec, roles)`, then assert on the recorded `calls` array and the
-mutated `state`. Add a seed field for anything new the resource touches. Any test that needs
-wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly that once.
-
-## How you know it works
-
-One command, and it is the definition of done:
-
-```bash
-npm run state:check
-```
-
-| Layer | Proves | What only it can catch |
-|---|---|---|
-| `tsc` | the shapes agree | a contract change missed somewhere |
-| `eslint` | nothing dead is left behind | |
-| unit tests (`scripts/state/state.test.ts`) | ordering, the diff, the contract — against an in-memory fake | logic, in under a second |
-| **sandbox** (`scripts/state/sandbox.mjs`) | the **real** app, the **real** local database, the whole lifecycle | everything the fake cannot |
-
-**A green unit suite is not evidence that it works.** The fake store is written by us, so it
-encodes our assumptions — it once reported success while a mailbox created mid-run was
-invisible to the routing that followed. Only the sandbox exercises the actual app.
-
-The sandbox runs a disposable `.test` document against a local dev server, then the refusals:
-
-```
-  ✓ reset / apply / plan clean / apply again / destroy / plan again
-  ✓ a grant to an address with no local account is a PROBLEM
-  ✓ a bad permission is rejected at load, with the field path
-  ✓ an unknown section is rejected at load
-  ✓ a mailbox with no role is rejected at load
-```
-
-It asserts exit codes **and messages**, because "did nothing" and "said why" are different
-results. `npm run dev` must be running; `--local` means nothing real is touched.
-
-## Known bugs and outstanding work
-
-1. **A document that uses gated features must declare `license`.** `amplifycms.com.json`
-   does not, so on a fresh instance its account and shared inboxes 403. Either add the
-   section or move the licence to an instance-level document (preferred — see below).
-2. **`fresh` resets the database, not the infrastructure.** Cloudflare MX, Email Routing
-   rules and DNS survive, so a from-zero reset on a live instance *orphans* them. It counts
-   the domains and warns before wiping — in `--dry-run` as well as a real run — which makes
-   it visible; making tenant de-provision own both sides is still the real fix.
-3. **Specs are one flat layer.** They should split into `fleet` / `instance` / `tenant` —
-   see *Design direction*.
-4. **The migrations exit code: cause found.** Wrangler's *confirmation prompt* path was the
-   unreliable one — it applied every migration and still exited non-zero. The spawn now sets
-   `CI=1` to skip the prompt, and `schemaPresent` remains the real proof regardless, so this
-   is fixed at both ends.
-5. ~~Mass runs are sequential.~~ **Done**: `--concurrency <n>` runs documents in bounded
-   batches, still one process and one admin key. Defaults to 1, so nothing changed unless
-   you ask.
-6. **Erasure exists but does not reach backups.** `--data-subject <email>` reports and
-   `--erase` destroys every row and R2 object. Backup history and trash retention are still
-   out of scope, so the guarantee is "gone from the live instance", not yet "gone". See
-   *Data subjects* below.
-7. **`--fresh --remote` leaves the app showing "Prepare Installation".** Expected — the
-   setup wizard sees no admin. Not a bug, just surprising.
-8. Pre-existing, unrelated: `tests/i18n.test.mjs` fails 1 of 8 (138/139 overall).
-9. `src/` is the application. The reconciler drives it through its API and D1; **do not**
-   modify `src/` to make provisioning easier — the app's endpoints are the contract.
-
-### Gotchas that have already cost time
-
-- **`tsconfig.scripts.json` must restate the app's `types` array.** A `types` array
-  *overrides* rather than merges, and dropping it was what made app types unresolvable and
-  pushed this system toward hand-written guesses.
-- **`validateBody` returns zod's transformed output.** Posting it back fails the app's own
-  schema (an omitted `password` becomes `null`, which the server rejects but our local
-  parse accepts). Validate for drift, **send the input**.
-- **`??` does not catch an empty string** — accounts created via the API have `name: ""`.
-- **A mailbox `access` grant must name a LOCAL user**, not an external address. Grants are
-  written to `mailbox_access`, which needs a user id; an outside address silently fails the
-  run. Three checked-in documents had stale grants of exactly this kind.
-- **`wrangler.jsonc`**: `migrations_dir` must be repo-relative (`drizzle/migrations`, *not*
-  `../../drizzle/migrations` — that is what the Vite plugin writes into
-  `dist/server/wrangler.json`), and `--remote` needs a concrete `database_id`.
-- **`wrangler d1 export` does not work** on a database with FTS virtual tables.
-- The wipe **excludes** `d1_migrations`, `sqlite_%`, `_cf_%` and `%_fts%` — FTS shadow
-  tables must not be deleted directly; the triggers keep the index in step.
-
----
-
-## Design direction: multi-region, and GDPR erasure
-
-Cloudflare runs in many locations and residency must be a design input, not an afterthought.
-The goal is to go from nothing to servers in several countries with users provisioned, and
-to **take a user and their data down** wherever it lives.
-
-### Three layers, because they have different lifecycles
-
-| Layer | Holds | Personal data? |
-|---|---|---|
-| `fleet.json` | which instances exist and where: jurisdiction, region, url, db | no |
-| `instances/<name>.json` | instance-level: **licence**, providers, settings | no |
-| `tenants/<domain>.json` | domain, mailboxes, accounts, routing, mcpKeys | **yes** |
-
-Bug #1 above is the argument for this: instance-level facts should not be repeated in every
-tenant document, and a tenant must not silently depend on something it never declared.
-
-**Built:** a project folder declares its own server (`server.json`: database, origin,
-`jurisdiction`, `region`), so the **fleet is derived by scanning the folders** — there is no
-separate registry to drift, and `--instance <name>` needs no `--url`/`--db`. `--deploy` and
-`--destroy` are inverses over the same structure. **Declaring jurisdiction is intent, not
-enforcement** — pinning where a Worker actually executes needs the source changes
-`--source-changes` lists, and the realtime Durable Object is the one already identified.
-
-### Data subjects — the index, not the erasure
-
-`npm run state -- --data-subject alice@acme.de` finds the account and reports every table
-holding a row for that person, biggest first, plus the total. Read-only, exits non-zero if
-anything remains, so it is usable as a check. It needs no domain and no document.
-
-The scope in `subject-scope.ts` is **derived from the database** (`pragma_table_info`), not
-from the schema file, so it describes what an erasure would actually run against. It is
-data, not SQL: `store/live.ts` builds the predicate, and a table that links both ways
-(`messages` names a user *and* a mailbox) is ORed.
-
-Indirectly-owned tables are resolved through their parent chain (`INDIRECT_SCOPE`):
-`message_attachments` -> messages, `agent_chat_messages` -> agent_conversations,
-`webhook_deliveries` -> webhooks, and `shared_attachment_links` -> message_attachments ->
-messages in two hops. The predicate builder lives in `store/live.ts`; the links are data.
-
-`ai_usage` has **no user, owner or mailbox column at all**, so a row cannot be attributed
-to anyone. It is reported as unattributable rather than counted as clean - a distinction
-the report keeps, because "we found nothing" and "we cannot look" are different answers.
-
-**Erasure is implemented**, on top of that index. `--erase` deletes every in-scope row in a
-single SQL batch (children before parents, the `users` row last, so it cannot half-apply)
-and the objects in `SUBJECT_OBJECT_KEYS` — because deleting rows without the bytes leaves
-the mail itself behind. It then re-reports and fails if anything remains, so the result is
-verified rather than assumed. `--erase --dry-run` shows exactly what would go first.
-
-- the rows: every table in `SUBJECT_SCOPE` plus the `INDIRECT_SCOPE` chain
-- the bytes: `SUBJECT_OBJECT_KEYS` — `messages.raw_r2_key`, `message_attachments.r2_key`,
-  `drive_items.r2_key`, `users.avatar_key`. **Deleting rows without these leaves the mail
-  itself behind**, which is the whole trap
-- the order: children before parents, and the `users` row last
-
-Two deliberate exclusions, printed by the command rather than hidden: **`domains`** are
-infrastructure — deleting one orphans its Cloudflare DNS and Email Routing, so remove it
-with `--cleanup --remove-domain` — and **`ai_usage`** cannot be attributed to anyone.
-
-**Trash retention is not an obstacle** — worth stating because it looks like one: the
-erasure deletes rows with no `status` filter at all, so trash, spam and retention windows
-cannot hold data back. (Retention governs the app's *scheduled* purge, not this.)
-
-Still open: **backup history** — which cannot be closed from here. `--erase` prints a
-`SOURCE CHANGE NEEDED` block naming `src/lib/backups/` and why, rather than implying a clean
-bill of health. See *Hard constraint* above and `npm run state -- --source-changes`.
-
-### Erasure is per *subject*, not per tenant
-
-A person may exist in several tenants across regions. The index
-(`email → [(instance, domain, user_id)]`) must be **derived by scanning instances**, never
-declared in JSON, or it will drift and you will miss data. Erasure then fits the existing
-contract: a resource whose `apply` reports what exists and whose `remove` destroys it —
-idempotent and auditable. Two hard parts: it must reach **R2 backups** (the scalable answer
-is crypto-shredding — a per-subject key whose destruction is the erasure), and it must
-**bypass trash retention**.
-
-### What Cloudflare gives you — and the traps
-
-Verified in this repo: Durable Object `jurisdiction` is **used nowhere**, and `wrangler.jsonc`
-has no `jurisdiction`/`placement`/`dispatch`. Bindings present: D1, R2, Queues, Durable
-Objects, AI.
-
-- **Durable Objects** support `jurisdiction: "eu"` — real pinning. The realtime hub should use it.
-- **R2** supports jurisdiction-scoped buckets.
-- **D1 is not jurisdiction-pinnable** — a location hint with a single primary.
-- **Workers execute globally by default.** So DO/R2 jurisdiction is *not* sufficient for a
-  "no US processing" requirement; that is Data Localization Suite / Regional Services /
-  Customer Metadata Boundary (Enterprise), and it should be confirmed with Cloudflare
-  rather than assumed.
-- **Traps: Queues, KV and Analytics Engine are global.** Keep PII out of queue payloads
-  (carry the R2 key, not the MIME) and out of logs. Email Routing's ingress location is an
-  open question worth verifying.
-
-### Getting a user to their instance
-
-Key by **domain**, not user: a mailbox domain belongs to exactly one instance, so MX already
-delivers correctly and `.well-known` on that domain gives mail clients the right endpoint —
-no global directory on the mail path. For web login, either a per-tenant hostname
-(Cloudflare for SaaS / Custom Hostnames) or a thin global login that resolves email-domain →
-instance and redirects with a short-lived one-time handoff token. **Keep sessions
-instance-local** — a global session store would itself be the cross-border flow you are
-avoiding.
-
-### Scaling out
-
-Jurisdiction → instance(s) → domains. Splitting one instance into two is a *fleet mapping*
-change; tenant documents do not change, only which folder they sit in. Because MX/DNS is
-per-domain, **moving** an existing domain between instances is the invasive operation — so
-pick the instance at domain creation and treat relocation as a planned migration.
-
----
-
-## Status
-
-`tsc` and `eslint` clean; **28 tests** pass in well under a second with no D1, no network and
-no bindings. Verified end to end on a disposable local instance (reset → provision → status
-→ idempotent re-apply → teardown) and against the **live** instance for status, licence and
-cleanup. `src/` untouched throughout.
+- Backup history cannot be erased from here; it needs crypto-shredding in the app. See
+  `--source-changes`.
+- `ai_usage` has no user column, so erasure cannot attribute its rows.
+- The realtime Durable Object is not jurisdiction-pinned.
+- `reset` empties the database but leaves the domains' Cloudflare MX and DNS in place.

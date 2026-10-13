@@ -3,8 +3,6 @@ import type { ApiDomain, Spec } from "./spec";
 import type { Store } from "./store/types";
 
 // Everything a resource needs for one document: the Store (its only way out), the
-// flags, the document, and the domain once resolved. Built per document, so no
-// module reaches into process state.
 export type Context = {
 	store: Store;
 	flags: Flags;

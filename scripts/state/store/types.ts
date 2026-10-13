@@ -1,8 +1,4 @@
 // The one seam between the reconciler and the outside world. Every read and
-// write the logic needs is declared here: the app's key-authenticated HTTP API, and
-// the raw D1 statements the app exposes no key-authenticated route for. The logic
-// modules depend only on this interface, so tests drive an in-memory fake instead of
-// a live Worker - and swapping how we reach the app never touches the logic.
 import type { ApiResult } from "../wrangler";
 import type { ApiAccount, ApiDomain, ApiMailbox } from "../spec";
 

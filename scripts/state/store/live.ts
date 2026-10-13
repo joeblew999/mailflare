@@ -1,10 +1,4 @@
 // The live Store - the ONLY module in the reconciler that talks to D1 directly.
-//
-// Domains, mailboxes and accounts go over the app's key-authenticated /api/v1
-// surface. API/MCP keys, mailbox-access grants and domain routing rules have no
-// key-authenticated route in the app (they require a session cookie or a Team
-// session), so they are written with SQL. Confining that SQL here keeps the column
-// names and the escaping in exactly one place instead of scattering them.
 import { newId } from "@/lib/ids";
 import { ADMIN_API_KEY_SCOPES } from "@/lib/api/scopes";
 import { generateApiKey } from "@/lib/api-keys";
@@ -84,8 +78,6 @@ export function makeLiveStore({
 	};
 
 	// The origin and the temporary key are resolved on the FIRST HTTP call, so a run
-	// that only touches global data (license, web push) needs no Cloudflare
-	// credentials and no instance URL at all.
 	const auth = async () => {
 		if (keyId) return base;
 		base = (await resolveInstanceUrl({ url })) ?? "";
@@ -270,8 +262,6 @@ export function makeLiveStore({
 		},
 		wipeData() {
 			// FTS shadow tables are excluded: deleting from the base tables fires the
-			// triggers that keep the index in step. d1_migrations stays so the schema is
-			// not re-applied, and _cf_* is wrangler's own bookkeeping.
 			const tables = sql("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name <> 'd1_migrations' AND name NOT LIKE '%_fts%';");
 			for (const row of tables) sql(`DELETE FROM "${String(row.name)}";`);
 		},

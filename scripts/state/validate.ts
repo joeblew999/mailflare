@@ -1,6 +1,4 @@
 // Documents are data, and data with no schema is how a typo becomes a silent no-op. This
-// checks a document against the model in spec.ts BEFORE anything is read or written, so a
-// mistake fails at `plan` with the path to the field instead of half-way through an apply.
 import type { Spec } from "./spec";
 
 const SECTIONS = ["specs", "domain", "server", "onboard", "mailboxes", "accounts", "routing", "mcpKeys", "license", "push", "fresh", "teardown"];

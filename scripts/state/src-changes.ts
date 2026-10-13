@@ -1,10 +1,4 @@
 // HARD CONSTRAINT: this system must never modify `src/`. It drives the application through
-// its API and its database, and the app's endpoints are the contract.
-//
-// So where a capability genuinely cannot be completed from here, the command says so in a
-// form that can be grepped and acted on - it does not fail silently, and it does not imply
-// completeness it does not have. Every such case is listed once, here, so the code and the
-// README cannot drift apart.
 export type SourceChange = {
 	/** What cannot be done from the scripts. */
 	need: string;

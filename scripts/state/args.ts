@@ -34,11 +34,6 @@ export function parseCli() {
 	});
 
 	// Flags are INTERNAL: the documents say WHAT to build, these say HOW to run it. What used
-	// to be flags - onboard, share, the licence plan, web push, the admin, teardown - is read
-	// from the documents, and the globals are derived from the instance document in apply.ts
-	// so the resources keep one source of truth.
-	// Flags are how to RUN it. What to build is in the documents, and the resources read them
-	// directly - there is no second copy of a document value in here.
 	const flags: Flags = {
 		status: false,
 		cleanup: false,
@@ -51,8 +46,6 @@ export function parseCli() {
 	};
 
 	// Terraform's shape: a TARGET and a VERB, both positional. The target absorbs --project,
-	// --spec and --all - a bare name is a project, a .json is one document, a path is a
-	// projects folder, and no target at all means every project.
 	const VERBS = ["plan", "apply", "destroy", "reset", "subject"];
 	const [first, second, third] = positionals;
 	let target: string | undefined;
@@ -100,7 +93,10 @@ export function parseCli() {
 }
 
 export function usage() {
-	console.log(`state — reconcile a Mailflare instance with its JSON desired state.
+	console.log(`state — a Terraform-like reconciler for a Mailflare instance.
+
+The JSON documents are the desired state: plan shows the diff, apply makes it so, destroy
+removes it. There is no state file; existence is queried on every run.
 
   npm run state -- <target> <verb> [flags]
 
@@ -129,5 +125,8 @@ Flags:
   --confirm-destroy       actually destroy/undeploy; without it you get the plan
   --source-changes        what cannot be done without modifying src/, and where
   --steps                 the Web Push (VAPID) key-rotation runbook
-  -h, --help              this`);
+  -h, --help              this
+
+This tool never modifies src/. It drives the app through its API and its database.
+--source-changes lists what would need a change there, and where.`);
 }

@@ -1,10 +1,4 @@
 // Where a data subject's data lives, derived from `pragma_table_info` over the real
-// database rather than from the schema file - the database is what the erasure would
-// actually run against. Every table below carries a user or mailbox link.
-//
-// This is DATA, not SQL: store/live.ts turns it into the predicate. A table may link
-// both ways (messages name a user AND a mailbox), which is why each entry lists both
-// and the store ORs them.
 import type { SubjectReport } from "./store/types";
 
 export type SubjectScope = {
@@ -53,8 +47,6 @@ export const SUBJECT_SCOPE: SubjectScope[] = [
 ];
 
 // Reachable only through a parent row. Each entry names the column pointing at the parent,
-// and the parent is itself resolved (a direct table, or another indirect one) - so
-// shared_attachment_links -> message_attachments -> messages resolves in two hops.
 export type IndirectScope = { table: string; column: string; parent: string };
 
 export const INDIRECT_SCOPE: IndirectScope[] = [
@@ -65,8 +57,6 @@ export const INDIRECT_SCOPE: IndirectScope[] = [
 ];
 
 // No user, owner or mailbox column exists on these at all, so there is no way to
-// attribute a row to a subject. Listed so a clean report is never mistaken for a
-// complete one.
 export const SUBJECT_SCOPE_UNATTRIBUTABLE = ["ai_usage"];
 
 // The object-store keys that hold a subject's bytes. Deleting the rows without deleting

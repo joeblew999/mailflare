@@ -20,8 +20,6 @@ type RoutingPlan =
 	  };
 
 // Validate an entry with the app's own domainRoutingRuleSchema and reduce it to the
-// values that get stored. apply, status and remove all agree on "the desired rule"
-// because they all go through here.
 function planRouting(ctx: Context, entry: RoutingEntry, mailboxIdsByRole: Map<string, string>): RoutingPlan {
 	const pattern = String(entry.pattern ?? "*").trim();
 	// keepCopy / store need a destination mailbox; the document names one by role.
@@ -130,7 +128,9 @@ export const routingResource: Resource = {
 		const items: Item[] = [];
 		for (const entry of ctx.spec?.routing ?? []) {
 			const pattern = String(entry.pattern ?? "*").trim();
-			const planned = planRouting(ctx, entry, state.mailboxIdsByRole);
+			const planned = ctx.domain
+				? planRouting(ctx, entry, state.mailboxIdsByRole)
+				: { ok: false as const, error: "the domain is not resolved" };
 			if (!planned.ok) {
 				// It cannot be created, but if a rule with this pattern and action exists it must still be
 				// removable - otherwise an invalid document leaves litter behind.

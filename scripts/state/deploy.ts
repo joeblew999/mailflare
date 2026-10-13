@@ -1,11 +1,4 @@
 // Deploying a SERVER. Deliberately thin: it shells the repo's own deploy path
-// (`npm run build`, then `npm run deploy:worker -- --env <name>`) and then records the
-// server in the fleet so the rest of this system can reach it.
-//
-// It creates no cloud resources. Creating a D1, a bucket or a queue, and recovering from a
-// half-finished attempt, is wrangler's job - and inventing a database_id would be worse
-// than stopping. The `env.<name>` block in wrangler.jsonc is the source of truth, and it is
-// the thing a human must add.
 import { readFileSync } from "node:fs";
 import { loadServer, saveServer, serverDocPath } from "./document";
 import { resolveInstanceUrl, run } from "./wrangler";

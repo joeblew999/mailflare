@@ -10,17 +10,10 @@ import type { Resource } from "./resource";
 import type { Context } from "../context";
 import type { Role } from "../spec";
 
-// The order IS the design, and it is load-bearing:
-//   fresh     wipes the instance, so nothing may precede it;
-//   domain    resolves (and, when declared, onboards) the domain everything scoped
-//             operates on, and aborts the run when it cannot;
-//   license   before what it GATES: shared inboxes and account management both 403
-//             without an active Pro/Team plan - only visible on a fresh server;
-//   accounts  before mailboxes, because a mailbox's `access` grants name users and on
-//             a fresh server the only users are the ones `accounts` creates;
-//   mailboxes before routing rules and MCP keys, which name mailbox ids by role.
-// --cleanup walks this in reverse, which reverts the license last so the account
-// disable still has a plan to work under.
+// The order IS the design: fresh wipes, domain resolves and onboards (aborting when it
+// cannot), license gates shared inboxes and account management, accounts precede mailboxes
+// because access grants name users, and mailboxes precede the rules and keys that name them.
+// Destroy walks this in reverse, so the license is reverted last.
 export const RESOURCES: Resource[] = [
 	freshResource,
 	domainResource,

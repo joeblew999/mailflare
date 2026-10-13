@@ -573,8 +573,6 @@ test("a reset-only document is accepted without a domain", async () => {
 
 test("an instance document is applied before the tenant documents", async () => {
 	// The instance layer exists so a tenant does not have to declare server-wide facts
-	// (the licence) - and so it cannot silently depend on one it never declared. That
-	// only works if the instance document runs FIRST.
 	const { store, calls } = fakeStore({
 		domains: [{ id: "d1", hostname: "dev.example" }],
 		users: [],
@@ -606,8 +604,6 @@ test("the subject index says where a person's data is, and what it cannot see", 
 
 test("the erasure scope is internally consistent", () => {
 	// These are the invariants that make a destructive pass trustworthy: a table listed
-	// both ways would be deleted twice, and an object key on an unscoped table could never
-	// be found - which is how mail gets left behind.
 	const direct = new Set(SUBJECT_SCOPE.map((scope) => scope.table));
 	const indirect = new Set(INDIRECT_SCOPE.map((link) => link.table));
 	for (const table of indirect) assert.ok(!direct.has(table), `${table} is both direct and indirect`);
@@ -617,8 +613,6 @@ test("the erasure scope is internally consistent", () => {
 
 test("every source change names a location inside src/, since we may not touch it", () => {
 	// The constraint is that this system never modifies the application. So each entry has
-	// to point at the file that would need changing, with a reason - otherwise "a source
-	// change is needed" is just a shrug.
 	assert.ok(SOURCE_CHANGES.length > 0);
 	for (const change of SOURCE_CHANGES) {
 		assert.ok(change.need.length > 0, "says what cannot be done");

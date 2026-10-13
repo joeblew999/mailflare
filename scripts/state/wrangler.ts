@@ -29,17 +29,10 @@ export function d1(sql: string, { db = "mailflare", local = false }: { db?: stri
 }
 
 // Bring a database up to the current schema. It targets whatever wrangler is pointed
-// at, so the same call readies the local dev database and a deployed D1 (the latter
-// needs database_id + migrations_dir in wrangler.jsonc, which the repo sets).
 export function applyMigrations({ db = "mailflare", local = false }: { db?: string; local?: boolean } = {}) {
 	// CI=1 skips wrangler's confirmation prompt. That prompt path is what made the exit code
-	// unreliable: it applied every migration and still reported non-zero. The schema check
-	// below stays the real proof.
 	const result = run("npx", ["wrangler", "d1", "migrations", "apply", db, local ? "--local" : "--remote"], { CI: "1" });
 	// The exit status is not trustworthy: in a non-interactive context wrangler skips
-	// the confirmation, applies every migration, and can still report non-zero. The
-	// caller checks the schema it actually needs (Store.schemaPresent), which is the
-	// thing that matters, so warn rather than fail here.
 	if (result.status !== 0) console.warn("  ⚠ wrangler reported a non-zero exit while applying migrations — verifying the schema instead");
 }
 
@@ -118,8 +111,6 @@ export function workerNameFromConfig() {
 }
 
 // Cloudflare API responses wrap their payload in { result }. `json()` is typed
-// `unknown` under @cloudflare/workers-types, so this keeps the envelope explicit
-// instead of leaking `any` into callers.
 export async function cfApi<T>(path: string, token: string) {
 	const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
 		headers: { Authorization: `Bearer ${token}` },
@@ -129,8 +120,6 @@ export async function cfApi<T>(path: string, token: string) {
 }
 
 // Resolve the instance URL without hard-coding it: explicit value, then
-// MAILFLARE_URL, then <worker>.<account-subdomain>.workers.dev from the API.
-// Returns null when nothing can be determined.
 export async function resolveInstanceUrl({ url, token, account, worker }: { url?: string; token?: string | null; account?: string | null; worker?: string } = {}) {
 	const explicit = url || process.env.MAILFLARE_URL;
 	if (explicit) return explicit.replace(/\/+$/, "");

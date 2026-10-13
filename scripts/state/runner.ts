@@ -1,9 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- CLI values are untyped option bags. */
 // Applying MANY documents. A multi-document file is loaded once, ONE admin key covers
-// the whole run, and the documents are reconciled in this process. (Spawning a child
-// per document would re-resolve the instance and re-mint a key each time - fine for
-// five domains, thousands of processes for thousands of domains.) A document that
-// throws is recorded and the run continues.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { makeContext } from "./context";

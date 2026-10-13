@@ -1,8 +1,4 @@
 // The whole contract, in one place.
-//
-// A resource DECLARES ITEMS; the driver diffs and executes them, once, for plan, apply and
-// destroy alike - so the three cannot disagree and there is no per-resource triplication.
-// The item IS the implementation: there is nothing else to keep in step.
 import type { Context } from "../context";
 import type { Role } from "../spec";
 

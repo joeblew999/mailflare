@@ -3,12 +3,6 @@ import { newId } from "@/lib/ids";
 import type { Resource } from "./resource";
 
 // Reset the instance to nothing and give it a primary admin, so a brand-new server
-// needs no manual clicking before this system can drive it. It targets whatever
-// --db/--local/--remote points at: the same command readies a local dev database and
-// a deployed Cloudflare D1.
-//
-// The first admin normally comes from POST /api/auth/register, which also wants
-// Turnstile and a domain - unusable as a bootstrap. This writes the row directly.
 export const freshResource: Resource = {
 	section: "fresh",
 	needsDomain: false,

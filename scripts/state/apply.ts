@@ -1,15 +1,5 @@
 #!/usr/bin/env node
 // The entry point: a TARGET and a VERB, as terraform has.
-//
-//   npm run state -- plan                     every project
-//   npm run state -- mailflare apply          a project (server, instance, tenants)
-//   npm run state -- mailflare destroy
-//   npm run state -- mailflare reset          wipe it and make a primary admin
-//   npm run state -- subject <email> plan     an operation on a person
-//
-// Everything that describes WHAT to build lives in the documents. The flags only say HOW to
-// run it, and the globals are derived from the instance document below so the resources keep
-// reading one source of truth.
 import { parseCli, usage } from "./args";
 import { loadProject, loadServer } from "./document";
 import { loadSpecs, runSpecs, type SpecEntry } from "./runner";

@@ -1,7 +1,4 @@
 // App-coupled helpers for scripts run under `tsx` (so they resolve `@/` paths).
-// Validating request bodies here means a hand-written body cannot drift from what
-// the route accepts: it throws before the request is made, instead of 400-ing
-// halfway through a run.
 import { addDomainSchema, createUserAccountSchema, mailboxSchema, updateManagedAccountSchema } from "@/lib/validators";
 import { makeLiveStore } from "./store/live";
 import type { Store } from "./store/types";

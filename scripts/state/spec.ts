@@ -1,9 +1,4 @@
 // The DOCUMENT MODEL: what a desired-state document may contain, and the shapes the
-// app hands back. Response shapes come from the app's own builders, so field access is
-// checked against what the endpoint actually returns (no guessing):
-//   GET /api/v1/domains   -> listUserDomains() rows (+ sendingEnabled)
-//   GET /api/v1/accounts  -> accountListItemFromUser()
-//   GET /api/v1/mailboxes -> the inline select in api/v1/mailboxes/utils.ts
 import type { InferSelectModel } from "drizzle-orm";
 import type { accountListItemFromUser } from "@/app/api/accounts/utils";
 import type { listUserDomains } from "@/lib/domains/service";
