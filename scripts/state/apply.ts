@@ -71,6 +71,7 @@ if (values["data-subject"]) {
 			for (const line of subjectLines({ ...before, counts: result.deleted })) console.log(line);
 			console.log(`\n  ${result.objectsDeleted}/${result.objectKeys.length} R2 object(s) deleted`);
 			for (const skip of result.skipped) console.log(`  not removed: ${skip.table} (${skip.reason})`);
+console.log("  not removed: backup history in R2 (a backup holds every subject, so it cannot be selectively erased — crypto-shredding is the fix)");
 			// A fresh report is the only honest confirmation that it worked.
 			const after = await store.subjectReport(email);
 			const left = subjectTotal(after);

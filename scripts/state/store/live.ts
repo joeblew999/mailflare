@@ -259,6 +259,9 @@ export function makeLiveStore({
 			const objectsDeleted = objectKeys.length > 0 ? r2DeleteObjects(objectKeys) : 0;
 			return { email: trimmed, userId, deleted, objectKeys, objectsDeleted, skipped: ERASE_SKIPPED };
 		},
+		domainCount() {
+			return Number(sql("SELECT count(*) AS n FROM domains;")[0]?.n ?? 0);
+		},
 		applyMigrations() {
 			runMigrations({ db, local });
 		},

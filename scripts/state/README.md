@@ -96,11 +96,12 @@ Any subset of these sections; one file may hold many via `{ "specs": [ ... ] }`.
                    "access": [ { "email": "sam@acme.de", "permission": "read_only" } ] } ],
   "accounts":  [ { "username": "sam", "role": "user", "passwordEnv": "PROV_PASSWORD" } ],
   "routing":   [ { "pattern": "*", "action": "forward", "forwardTo": "ops@example.com" } ],
-  "mcpKeys":   [ { "name": "agent", "mailboxes": ["office"] } ],
-  "license":   { "plan": "team" },
-  "push":      { "to": "ops@example.com" },
-  "fresh":     { "admin": { "email": "root@acme.de", "password": "..." } }
+  "mcpKeys":   [ { "name": "agent", "mailboxes": ["office"] } ]
 }
+
+// license / push / fresh are NOT tenant sections — they belong to the instance document
+// (specs/instances/<server>.json), applied before the tenants. A mailbox `access` grant
+// must name a LOCAL user the document creates; an external address cannot resolve.
 ```
 
 `specs/` holds one document per domain. `example.json` (template) and `_*.json`
@@ -256,8 +257,9 @@ wrangler or Cloudflare is a bug in the seam — `applyMigrations` was exactly th
    does not, so on a fresh instance its account and shared inboxes 403. Either add the
    section or move the licence to an instance-level document (preferred — see below).
 2. **`fresh` resets the database, not the infrastructure.** Cloudflare MX, Email Routing
-   rules and DNS survive, so a from-zero reset on a live instance *orphans* them. Document
-   it, or make tenant de-provision own both sides.
+   rules and DNS survive, so a from-zero reset on a live instance *orphans* them. It now
+   counts the domains and **warns before wiping**, which makes it visible; making tenant
+   de-provision own both sides is still the real fix.
 3. **Specs are one flat layer.** They should split into `fleet` / `instance` / `tenant` —
    see *Design direction*.
 4. **`applyMigrations` only warns on a non-zero exit.** In a non-interactive context
@@ -354,10 +356,14 @@ Two deliberate exclusions, printed by the command rather than hidden: **`domains
 infrastructure — deleting one orphans its Cloudflare DNS and Email Routing, so remove it
 with `--cleanup --remove-domain` — and **`ai_usage`** cannot be attributed to anyone.
 
-Still open: reaching **backups** (the scalable answer is crypto-shredding — a per-subject
-key whose destruction *is* the erasure), and bypassing trash retention, which exists on
-purpose to keep data around. Until those land, erasure is complete for the live database and
-the object store, and **not** complete against backup history.
+**Trash retention is not an obstacle** — worth stating because it looks like one: the
+erasure deletes rows with no `status` filter at all, so trash, spam and retention windows
+cannot hold data back. (Retention governs the app's *scheduled* purge, not this.)
+
+Still open: **backup history**. A backup document holds every subject, so it cannot be
+selectively erased; crypto-shredding — a per-subject key whose destruction *is* the
+erasure — is the fix, and it is an application change, not a script. The `--erase` output
+says this out loud rather than implying a clean bill of health.
 
 ### Erasure is per *subject*, not per tenant
 

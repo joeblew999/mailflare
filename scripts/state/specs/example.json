@@ -19,7 +19,7 @@
       "shared": true,
       "access": [
         {
-          "email": "gerard.webb@ubuntudesign.com",
+          "email": "sam@example.com",
           "permission": "full_access"
         }
       ]
@@ -30,7 +30,7 @@
       "shared": true,
       "access": [
         {
-          "email": "gerard.webb@ubuntudesign.com",
+          "email": "sam@example.com",
           "permission": "read_only"
         }
       ]
@@ -70,10 +70,7 @@
       ]
     }
   ],
-  "license": {
-    "plan": "team"
-  },
   "push": {
-    "to": "gerard.webb@ubuntudesign.com"
+    "to": "you@example.com"
   }
 }

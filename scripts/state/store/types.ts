@@ -115,6 +115,8 @@ export type Store = {
 	/** Bring the target database up to the current schema. */
 	applyMigrations(): void;
 	schemaPresent(): boolean;
+	/** Rows in `domains` — used to warn before a reset orphans Cloudflare config. */
+	domainCount(): number;
 	/** Delete every row from every base table (d1_migrations and internal tables stay). */
 	wipeData(): void;
 	insertAdmin(user: { id: string; email: string; name: string; passwordHash: string }): void;

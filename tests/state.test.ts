@@ -179,6 +179,9 @@ function fakeStore(seed: Seed = {}) {
 			calls.push(`subjectReport:${email}`);
 			return { email, userId: state.subjectUserId, mailboxIds: state.subjectMailboxIds, counts: state.subjectCounts };
 		},
+		domainCount() {
+			return state.domains.length;
+		},
 		applyMigrations() {
 			calls.push("applyMigrations");
 		},
