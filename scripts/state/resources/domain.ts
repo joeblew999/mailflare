@@ -81,7 +81,12 @@ export const domainResource: Resource = {
 	needsDomain: false,
 	abortOnFailure: true,
 	declared: () => false,
-	status: (ctx, roles) => ensureDomain(ctx, roles),
+	async plan(ctx) {
+		// Resolve only: a plan must never onboard. Everything scoped reads ctx.domain from here.
+		ctx.domain = findDomain(await ctx.store.listDomains(), ctx.domainName) ?? null;
+		if (ctx.domain) return [{ address: `domain.${ctx.domainName}`, action: "unchanged" }];
+		return [{ address: `domain.${ctx.domainName}`, action: "create", detail: "onboard (publishes MX)" }];
+	},
 	apply: (ctx, roles) => ensureDomain(ctx, roles),
 	async remove(ctx, roles) {
 		await ensureDomain(ctx, roles); // resolve only: cleanup never onboards

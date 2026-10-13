@@ -3,6 +3,7 @@ import { requireDomain } from "../context";
 import type { Context } from "../context";
 import type { RoutingEntry } from "../spec";
 import type { Resource } from "./resource";
+import type { Change } from "../plan";
 import type { RoutingRulePatch, RoutingRuleRow } from "../store/types";
 
 type RoutingPlan =
@@ -134,27 +135,22 @@ export function removeRouting(ctx: Context, entry: RoutingEntry): number {
 	return 0;
 }
 
-async function statusRouting(ctx: Context, entries: RoutingEntry[], mailboxIdsByRole: Map<string, string>): Promise<number> {
-	let missing = 0;
-	for (const entry of entries) {
-		const plan = planRouting(ctx, entry, mailboxIdsByRole);
-		if (!plan.ok) {
-			missing += 1;
-			console.log(`  ✗ routing ${entry.pattern ?? "*"} — invalid: ${plan.error}`);
-			continue;
-		}
-		const ok = plan.existing !== null && matches(plan.existing, plan.patch);
-		if (!ok) missing += 1;
-		console.log(`  ${ok ? "✓" : "✗"} ${plan.label}${plan.existing && !ok ? " — drifted" : ""}`);
-	}
-	return missing;
+async function planRoutingRules(ctx: Context, entries: RoutingEntry[], mailboxIdsByRole: Map<string, string>): Promise<Change[]> {
+	return entries.map((entry) => {
+		const pattern = String(entry.pattern ?? "*").trim();
+		const planned = planRouting(ctx, entry, mailboxIdsByRole);
+		if (!planned.ok) return { address: `routing.${pattern}`, action: "update" as const, detail: `invalid: ${planned.error}` };
+		if (!planned.existing) return { address: `routing.${pattern}`, action: "create" as const, detail: planned.label };
+		if (!matches(planned.existing, planned.patch)) return { address: `routing.${pattern}`, action: "update" as const, detail: "drifted" };
+		return { address: `routing.${pattern}`, action: "unchanged" as const };
+	});
 }
 
 export const routingResource: Resource = {
 	section: "routing",
 	needsDomain: true,
 	declared: (ctx) => (ctx.spec?.routing?.length ?? 0) > 0,
-	status: (ctx, _roles, state) => statusRouting(ctx, ctx.spec?.routing ?? [], state.mailboxIdsByRole),
+	plan: (ctx, _roles, state) => planRoutingRules(ctx, ctx.spec?.routing ?? [], state.mailboxIdsByRole),
 	async apply(ctx, _roles, state) {
 		let failures = 0;
 		for (const entry of ctx.spec?.routing ?? []) failures += ensureRouting(ctx, entry, state.mailboxIdsByRole);

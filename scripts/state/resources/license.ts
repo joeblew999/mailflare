@@ -10,7 +10,7 @@ export function declaredPlan(entry: LicenseEntry | undefined, flag: string | und
 	return plan;
 }
 
-export function reportLicense(ctx: Parameters<Resource["status"]>[0]) {
+export function reportLicense(ctx: Parameters<Resource["plan"]>[0]) {
 	const row = ctx.store.licenseRow();
 	if (!row) {
 		console.log("  ⚠ no license_settings row yet — open Settings → License in the app once, then retry.");
@@ -29,9 +29,14 @@ export const licenseResource: Resource = {
 	section: "license",
 	needsDomain: false,
 	declared: (ctx) => ctx.flags.plan !== undefined || Boolean(ctx.spec?.license),
-	async status(ctx) {
+	async plan(ctx) {
 		reportLicense(ctx);
-		return 0;
+		const raw = typeof ctx.spec?.license === "string" ? ctx.spec.license : ctx.spec?.license?.plan;
+		const wanted = (raw ?? ctx.flags.plan ?? "").trim().toLowerCase();
+		const target = !wanted || wanted === "community" || wanted === "off" ? null : wanted;
+		const row = ctx.store.licenseRow();
+		const active = row?.state === "active" ? row.plan : "community";
+		return [{ address: "license", action: target && target !== active ? "update" : "unchanged", detail: `${active} -> ${target ?? "community"}` }];
 	},
 	async apply(ctx) {
 		const plan = declaredPlan(ctx.spec?.license, ctx.flags.plan);

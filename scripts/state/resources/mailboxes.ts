@@ -4,6 +4,7 @@ import { requireDomain } from "../context";
 import type { Context } from "../context";
 import type { AccessGrant, ApiMailbox, Role } from "../spec";
 import type { Resource, RunState } from "./resource";
+import type { Change } from "../plan";
 
 // The domain's mailboxes, keyed by lower-cased local part. One helper so the
 // "list mailboxes and keep this domain's" step is not rewritten in three places.
@@ -118,32 +119,31 @@ export async function syncMailboxes(ctx: Context, roles: Role[]): Promise<{ fail
 // Read-only report: which declared mailboxes and access grants are missing. It also
 // publishes the ids it found, because routing rules and MCP keys name mailboxes by
 // role and cannot resolve their destination without them.
-async function statusMailboxes(ctx: Context, roles: Role[], state: RunState): Promise<number> {
+async function planMailboxes(ctx: Context, roles: Role[], state: RunState): Promise<Change[]> {
 	const present = await mailboxesForDomain(ctx);
+	// Routing rules and MCP keys name mailboxes by role, so the plan publishes the ids it
+	// found exactly as apply does - otherwise they could not classify themselves.
 	for (const [role, box] of present) state.mailboxIdsByRole.set(role, box.id);
-	let missing = 0;
+	const changes: Change[] = [];
 	for (const { role, share, access } of roles) {
 		const box = present.get(role);
-		if (!box) missing += 1;
-		console.log(`  ${box ? "✓" : "✗"} ${role}@${ctx.domainName}${share ? " (shared)" : ""}${box ? ` — ${box.type}` : " — missing"}`);
+		changes.push({ address: `mailbox.${role}@${ctx.domainName}`, action: box ? "unchanged" : "create", detail: share ? "shared" : "personal" });
 		for (const grant of access) {
 			const email = String(grant.email ?? "").toLowerCase();
 			const permission = String(grant.permission ?? "full_access");
 			const userId = ctx.store.userIdByEmail(email);
 			const actual = box && userId ? ctx.store.accessPermission(box.id, userId) : null;
-			const ok = actual === permission;
-			if (!ok) missing += 1;
-			console.log(`      ${ok ? "✓" : "✗"} ${email} → ${permission}${actual ? ` (is ${actual})` : ""}`);
+			changes.push({ address: `mailbox_access.${role}.${email}`, action: actual === permission ? "unchanged" : actual ? "update" : "create", detail: actual && actual !== permission ? `${actual} -> ${permission}` : permission });
 		}
 	}
-	return missing;
+	return changes;
 }
 
 export const mailboxesResource: Resource = {
 	section: "mailboxes",
 	needsDomain: true,
 	declared: (_ctx, roles) => roles.length > 0,
-	status: (ctx, roles, state) => statusMailboxes(ctx, roles, state),
+	plan: (ctx, roles, state) => planMailboxes(ctx, roles, state),
 	async apply(ctx, roles, state) {
 		const { failures, mailboxIdsByRole } = await syncMailboxes(ctx, roles);
 		for (const [role, id] of mailboxIdsByRole) state.mailboxIdsByRole.set(role, id);

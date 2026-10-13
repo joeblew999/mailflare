@@ -13,11 +13,10 @@ export const freshResource: Resource = {
 	section: "fresh",
 	needsDomain: false,
 	declared: (ctx) => ctx.flags.fresh || Boolean(ctx.spec?.fresh),
-	async status(ctx) {
-		const present = ctx.store.schemaPresent();
-		const admin = present ? ctx.store.firstAdminEmail() : null;
-		console.log(`  schema ${present ? "present" : "MISSING"}   primary admin ${admin ?? "none"}`);
-		return present && admin ? 0 : 1;
+	async plan(ctx) {
+		const domains = ctx.store.domainCount();
+		const admin = ctx.store.schemaPresent() ? ctx.store.firstAdminEmail() : null;
+		return [{ address: "instance", action: "update", detail: `wipes ${domains} domain(s) and every table, then makes ${admin ?? "a new admin"}` }];
 	},
 	async apply(ctx) {
 		const entry = typeof ctx.spec?.fresh === "object" ? ctx.spec.fresh : {};

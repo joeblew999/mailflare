@@ -4,6 +4,7 @@
 // one loop that applies them (driver.ts).
 import type { Context } from "../context";
 import type { Role } from "../spec";
+import type { Change } from "../plan";
 
 // Threaded through a run: mailboxes create the ids that routing rules and MCP keys
 // refer to by role, so later resources read what earlier ones produced.
@@ -19,8 +20,8 @@ export type Resource = {
 	abortOnFailure?: boolean;
 	/** Whether this run asks for it (absent sections are skipped silently). */
 	declared(ctx: Context, roles: Role[]): boolean;
-	/** Report drift without writing. Returns the number of missing items. */
-	status(ctx: Context, roles: Role[], state: RunState): Promise<number>;
+	/** Classify every declared item WITHOUT writing: create, update or unchanged. */
+	plan(ctx: Context, roles: Role[], state: RunState): Promise<Change[]>;
 	/** Create or reconcile. Returns failures. */
 	apply(ctx: Context, roles: Role[], state: RunState): Promise<number>;
 	/** Undo, for --cleanup. Returns failures. */

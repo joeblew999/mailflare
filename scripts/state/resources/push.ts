@@ -50,15 +50,12 @@ export const pushResource: Resource = {
 	section: "push",
 	needsDomain: false,
 	declared: (ctx) => ctx.flags.push || Boolean(ctx.spec?.push),
-	async status(ctx) {
-		reportSecrets(ctx);
+	async plan(ctx) {
 		const subscriptions = ctx.store.pushSubscriptionCount();
-		console.log(`  push_subscriptions: ${subscriptions}`);
-		if (subscriptions === 0) {
-			console.log('  ⚠ none — enable Settings → Inbox → "Browser push notifications" on the device first');
-			return 1;
-		}
-		return 0;
+		const missing = VAPID.filter((name) => !(ctx.store.workerSecrets() ?? []).includes(name));
+		if (missing.length > 0) return [{ address: "push", action: "update", detail: `worker missing ${missing.join(", ")}` }];
+		if (subscriptions === 0) return [{ address: "push", action: "create", detail: "no device subscribed yet" }];
+		return [{ address: "push", action: "unchanged", detail: `${subscriptions} subscription(s)` }];
 	},
 	async apply(ctx) {
 		const entry = ctx.spec?.push ?? {};
