@@ -47,7 +47,7 @@ It also re-exports `RealtimeHub`, which must remain exported from the Worker ent
 
 ### Mail pipeline
 
-Inbound: `email` handler → R2 → queue → `processInboundMessage` (`src/lib/email/inbound.ts`) → `resolveInboundAddress` routing decision (deliver / reject / forward) → `parseRawMime` (postal-mime) → insert message + attachments → upsert contacts → `dispatchWebhooks` → `notifyUsersOfNewMessage` over the Durable Object. The raw MIME is written to R2 before the message is queued, so when the consumer stores it for nobody (no route, a reject, a forward that keeps no copy) it deletes that object (`discardRaw`); nothing else would.
+Inbound: `email` handler → R2 → queue → `processInboundMessage` (`src/lib/email/inbound.ts`) → `resolveInboundAddress` routing decision (deliver / reject / forward) → `parseRawMime` (postal-mime) → insert message + attachments → upsert contacts → `dispatchWebhooks` → `notifyUsersOfNewMessage` over the Durable Object.
 
 Outbound: `src/lib/email/send.ts` / `sender.ts`, composing with mimetext and sending through the `EMAIL` send_email binding, with `outbound_jobs` rows tracking queued sends. `to`, `cc` and `bcc` accept a header string or an array; `toAddr`/`ccAddr`/`bccAddr` on `messages` store the full comma-joined lists (use `splitEmailAddressList` from `src/lib/email/address.ts`, not `getEmailAddress`, when a value may be a list).
 
@@ -82,9 +82,7 @@ Both queries filter on `scope`, so any new rule must set it explicitly. `forward
 
 Domain and mailbox management call the Cloudflare API at runtime (`src/lib/cloudflare-api.ts`, `src/lib/domains/`). Adding a domain enables Email Routing DNS and sending subdomains on the zone; creating a mailbox creates a Cloudflare Email Routing rule targeting `CF_EMAIL_WORKER_NAME`; removing a domain cleans those up (`src/lib/domains/cloudflare-cleanup.ts`).
 
-Consequence: the name Email Routing rules deliver to (`getEmailWorkerName()`: `MAILFLARE_WORKER_NAME`, else `"mailflare"`), the deployed Worker `name`, and `services[].service` for `WORKER_SELF_REFERENCE` must all agree. Cloudflare service bindings need a literal name and cannot reference the top-level `name`.
-
-`wrangler.jsonc` is the default server and the template for every other. The tool that deploys a fleet gives each further server a generated `wrangler.<name>.json` — its own database, bucket and queues, plus `MAILFLARE_WORKER_NAME` and, for a server pinned to a jurisdiction, `MAILFLARE_JURISDICTION`, which `realtimeNamespace()` uses to pin the Durable Objects. One `npm run build` serves every server: nothing it writes names a server except `dist/server/wrangler.json`, so each is deployed with that file rewritten for it (`dist/server/wrangler.<name>.json`). Keep the build that way — anything server-specific belongs in a binding or a var, never in the bundle.
+Consequence: `CF_EMAIL_WORKER_NAME`, the deployed Worker `name`, and `services[].service` for `WORKER_SELF_REFERENCE` in `wrangler.jsonc` must all agree. Cloudflare service bindings need a literal name and cannot reference the top-level `name`.
 
 Auth is `CF_TOKEN` (preferred) or the legacy `CF_EMAIL` + `CF_API_KEY` pair.
 
@@ -106,8 +104,6 @@ Schema lives in one file: `src/db/schema/index.ts` (about 60 tables). Each diale
 `npm run db:bundle` packages the SQL files for the Worker (`src/lib/migrations/bundle.json`, `bundle-postgres.json`, `bundle-mysql.json`). `/api/setup/prepare`, the admin migration endpoint and (self-hosted, non-SQLite) server start use the shared runner in `src/lib/migrations/service.ts`. PostgreSQL and MySQL bundles split only on `--> statement-breakpoint`, because function and trigger bodies contain semicolons. Build, deploy, preview, and development scripts generate the bundle before loading application code.
 
 The setup path only ever initializes an empty database — it refuses to touch one that already has tables.
-
-A new table must also be named in `BACKUP_TABLES` (`src/lib/backups/export.ts`, in an order a restore can insert in) and in exactly one group of `table-groups.ts`. `assertBackupTablesCoverDatabase` aborts every backup when the database holds a table the list does not, so forgetting this breaks backups for everyone without any other symptom. `npm run state:test` fails when the list falls behind the schema.
 
 ### Object storage is `env.BUCKET`, from R2, Backblaze B2 or AWS S3
 

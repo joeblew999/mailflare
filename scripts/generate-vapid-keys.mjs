@@ -1,11 +1,5 @@
-#!/usr/bin/env node
-// Generate a Web Push (VAPID) key pair, printed as env vars for `npm run push:keys`.
-// Public key is the raw uncompressed P-256 point (65 bytes); the private key is the
-// JWK scalar "d" (32 bytes). Both are base64url — the format src/lib/push/server.ts
-// validates before signing.
 import { webcrypto } from "node:crypto";
 
-// base64url without padding, which is what the Push API expects.
 function base64Url(bytes) {
 	return Buffer.from(bytes).toString("base64url");
 }
