@@ -1,8 +1,0 @@
-{
-  "domain": "small.test",
-  "onboard": { "receivingProvider": "none", "sendingProvider": "none" },
-  "mailboxes": [
-    { "role": "office", "displayName": "Office" }
-  ],
-  "teardown": { "domain": "remove" }
-}

@@ -1,5 +1,0 @@
-{
-  "license": { "plan": "team" },
-  "settings": { "outboundAttachmentMaxMb": 25 },
-  "backups": { "enabled": true, "schedule": "daily", "retentionDays": 30 }
-}

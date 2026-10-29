@@ -64,6 +64,5 @@ mailflare-landing
 skills-lock.json
 /dist/
 
-# scripts/state: every login and key it creates, and the per-server wrangler configs it generates
-scripts/state/credentials/
+# The per-server wrangler configs a fleet tool generates
 /wrangler.*.json
