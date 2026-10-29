@@ -104,7 +104,7 @@ export function LoadingTransition({ children, ready }: LoadingTransitionProps) {
 					<div aria-hidden="true" className="flex w-64 flex-col items-center gap-6">
 						<img
 							src={iconUrl}
-							onError={() => setIconUrl("/icon-96.png")}
+							onError={() => setIconUrl("/icon-192.png")}
 							alt=""
 							className="h-20 w-20 rounded-2xl object-contain"
 						/>

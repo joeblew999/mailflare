@@ -242,10 +242,32 @@ async function sendSubscriptionPush(
 	});
 }
 
+export type PushContent = {
+	title: string;
+	body: string;
+	tag: string;
+	url: string;
+};
+
 export async function sendPushNotifications(
 	env: CloudflareEnv,
 	userIds: string[],
 	payload: NewMessageNotification,
+): Promise<void> {
+	const sender = (payload.fromName ?? payload.from).slice(0, 240);
+	await sendPushContent(env, userIds, {
+		title: (payload.subject || "New email").slice(0, 180),
+		body: `From ${sender}`,
+		tag: payload.messageId,
+		url: `/inbox/${payload.messageId}`,
+	});
+}
+
+/** Delivers an arbitrary notification (title, body, tag, in-app url) to every live Web Push subscription of the users. */
+export async function sendPushContent(
+	env: CloudflareEnv,
+	userIds: string[],
+	content: PushContent,
 ): Promise<void> {
 	const config = parseVapidConfig(env);
 	const uniqueUserIds = [...new Set(userIds)];
@@ -268,15 +290,10 @@ export async function sendPushNotifications(
 			),
 		);
 
-	const title = (payload.subject || "New email").slice(0, 180);
-	const sender = (payload.fromName ?? payload.from).slice(0, 240);
 	const notificationPayload = JSON.stringify({
-		title,
-		body: `From ${sender}`,
+		...content,
 		icon: "/icon-192.png",
 		badge: "/icon-96.png",
-		tag: payload.messageId,
-		url: `/inbox/${payload.messageId}`,
 	});
 
 	await Promise.allSettled(

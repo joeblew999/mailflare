@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowDownToLine, FileWarning } from "lucide-react";
+import { ArrowDownToLine, FileWarning } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,

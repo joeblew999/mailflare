@@ -2,17 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { formatUserDate } from "@/lib/time/utils";
-import { ChevronsUpDown, Paperclip } from "lucide-react";
+import { ChevronsUpDown, Paperclip } from "@/components/icons";
 import { ContactAvatar } from "@/components/contacts/contact-avatar";
 import { QuotedEmailToggle } from "@/components/messages/quoted-email-toggle";
 import { runSingleMessageAction } from "@/components/message-actions/utils";
 import { EmailHtmlRenderer } from "./email-html-renderer";
+import { useRemoteContent } from "./use-remote-content";
 import { getMessageBodyDisplay, resolveInlineAttachmentUrls } from "@/app/(dashboard)/inbox/[messageId]/utils";
 
 import { useLanguage } from "@/components/language-provider";
 import { cn } from "@/lib/utils";
 import type { ConversationMessageCardProps, ConversationThreadProps } from "./conversation-thread-types";
 import { ThreadMessageActions } from "./thread-message-actions";
+import { MessageOpenStatus } from "./message-open-status";
+import { MessageFollowUpStatus } from "@/components/follow-ups/message-follow-up-status";
 import {
 	getConversationRecipients,
 	getConversationSender,
@@ -123,9 +126,11 @@ export function ConversationMessageCard({
 	const { t } = useLanguage();
 	const [locallyExpanded, setLocallyExpanded] = useState(defaultExpanded);
 	const [locallyRead, setLocallyRead] = useState(message.read);
+	const [detailsOpen, setDetailsOpen] = useState(false);
 	const expanded = locallyExpanded;
 	const sender = getConversationSender(message, currentAccountName);
 	const senderEmail = getConversationSenderEmail(message);
+	const remote = useRemoteContent(senderEmail, message.status === "spam");
 	const recipients = getConversationRecipients(message, showFullRecipientAddresses ? "full" : "address");
 	// const href = `${getMessageBackHref(message.direction, message.status)}/${message.id}`;
 	const outbound = message.direction === "outbound";
@@ -148,9 +153,9 @@ export function ConversationMessageCard({
 
 
 	return (
-		<article className={cn("bg-white transition-colors px-6", !expanded && "hover:bg-neutral-50", !isAnyPanelVisible && "pl-12")}>
+		<article className={cn("bg-white transition-colors px-3 sm:px-6", !expanded && "hover:bg-neutral-50", !isAnyPanelVisible && "sm:pl-12")}>
 			<div className="w-full">
-				<div className="flex w-full flex-wrap items-start gap-x-3 py-3 pl-4">
+				<div className="flex w-full flex-wrap items-start gap-x-3 py-3 sm:pl-4">
 					<button
 						type="button"
 						onClick={() => {
@@ -175,7 +180,7 @@ export function ConversationMessageCard({
 							<div className="flex flex-col">
 								<span className={cn("truncate text-sm font-semibold mt-1", locallyRead || outbound ? "text-neutral-900" : "font-semibold text-neutral-900")}>
 									{sender}
-									{expanded && <span className="text-xs ml-1 opacity-50 font-normal">&lt;{senderEmail}&gt;</span>}
+									{expanded && <span className="hidden sm:inline text-xs ml-1 opacity-50 font-normal">&lt;{senderEmail}&gt;</span>}
 								</span>
 								{expanded && recipients && <span className="text-xs font-normal text-neutral-500">{t("thread.to", { recipients })}</span>}
 							</div>
@@ -184,7 +189,7 @@ export function ConversationMessageCard({
 							)}
 						</span>
 					</button>
-					<span className={clsx(!locallyRead ? "font-semibold" : "", "flex shrink-0 items-center gap-2 text-xs mr-2 mt-2")}>
+					<span className={clsx(!locallyRead ? "font-semibold" : "", "shrink-0 items-center gap-2 text-xs mr-2 mt-2", "hidden sm:flex")}>
 						{attachments.length > 0 && <Paperclip className="h-3.5 w-3.5" aria-label={t("thread.attachmentCount", { count: attachments.length })} />}
 						{formatUserDate(message.createdAt, { month: "short", day: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
 					</span>
@@ -195,15 +200,31 @@ export function ConversationMessageCard({
 						ownAddresses={ownAddresses}
 						starOnly={!expanded}
 					/>
+					<div className={clsx("sm:hidden flex w-full items-center gap-2 pl-12 text-xs", locallyRead ? "text-neutral-500" : "font-semibold text-neutral-700")}>
+						{attachments.length > 0 && <Paperclip className="h-3.5 w-3.5" aria-label={t("thread.attachmentCount", { count: attachments.length })} />}
+						<span>{formatUserDate(message.createdAt, { month: "short", day: "2-digit", year: "numeric" })}</span>
+							<button type="button" className="text-blue-600 hover:underline" aria-expanded={detailsOpen} onClick={() => setDetailsOpen((open) => !open)}>
+							{t("message.details")}
+						</button>
+					</div>
+					{detailsOpen && (
+						<dl className="sm:hidden w-full space-y-0.5 break-words pt-2 text-xs text-neutral-500">
+							<div><dt className="inline font-medium">{t("source.from")}:</dt> <dd className="inline">{sender} &lt;{senderEmail}&gt;</dd></div>
+							{recipients && <div><dt className="inline font-medium">{t("source.to")}:</dt> <dd className="inline">{recipients}</dd></div>}
+							<div><dt className="inline font-medium">{t("message.date")}:</dt> <dd className="inline">{formatUserDate(message.createdAt, { month: "short", day: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}</dd></div>
+						</dl>
+					)}
 				</div>
 				{expanded && body && (
-					<div className="pb-4 pl-16 pt-2">
+					<div className="pb-4 pt-2 sm:pl-16">
+						{outbound && <MessageOpenStatus messageId={message.id} />}
+						{outbound && message.status !== "draft" && <MessageFollowUpStatus messageId={message.id} />}
 						{body.html ? (
-							<EmailHtmlRenderer html={body.html} />
+							<EmailHtmlRenderer html={body.html} autoAllowRemote={remote.autoAllow} onAllowRemote={remote.allowSender} />
 						) : (
 							<pre className="whitespace-pre-wrap font-sans text-sm text-neutral-900">{body.text}</pre>
 						)}
-						{body.quotedHtml && <QuotedEmailToggle html={body.quotedHtml} />}
+						{body.quotedHtml && <QuotedEmailToggle html={body.quotedHtml} autoAllowRemote={remote.autoAllow} onAllowRemote={remote.allowSender} />}
 						{attachments.length > 0 && (
 							<ul className="mt-4 flex flex-wrap gap-2">
 								{attachments.map((attachment) => (
